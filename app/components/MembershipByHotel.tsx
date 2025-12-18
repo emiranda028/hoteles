@@ -113,7 +113,12 @@ export default function MembershipByHotel({
     const cur = sumFor(year);
     const base = sumFor(baseYear);
 
-    const hotels = Array.from(new Set([...cur.keys(), ...base.keys()]));
+    const hotels = Array.from(
+  new Set([
+    ...Array.from(cur.keys()),
+    ...Array.from(base.keys()),
+  ])
+);
 
     const list = hotels
       .map((h) => {
@@ -181,3 +186,4 @@ export default function MembershipByHotel({
     </div>
   );
 }
+
