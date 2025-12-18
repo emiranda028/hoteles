@@ -3,7 +3,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { readXlsxFromPublic } from "./xlsxClient";
 
-type Row = { hotel: string; year: number; month: number; qty: number };
+type Row = {
+  hotel: string;
+  year: number;
+  month: number;
+  qty: number;
+};
 
 function safeNum(v: any) {
   const n = Number(v);
@@ -12,6 +17,7 @@ function safeNum(v: any) {
 
 function parseAnyDate(v: any): Date | null {
   if (!v && v !== 0) return null;
+
   if (v instanceof Date && !isNaN(v.getTime())) return v;
 
   // Excel serial
@@ -24,7 +30,7 @@ function parseAnyDate(v: any): Date | null {
   if (typeof v === "string") {
     const s = v.trim();
 
-    // Intento ISO
+    // ISO
     const iso = new Date(s);
     if (!isNaN(iso.getTime())) return iso;
 
@@ -72,16 +78,23 @@ export default function MembershipByHotel({
         const parsed: Row[] = (rows as any[])
           .map((r: any) => {
             const qty = safeNum(r.Cantidad ?? r.cantidad ?? 0);
+
             const rawCompany = (r.Empresa ?? r.empresa ?? "")
               .toString()
               .trim()
               .toUpperCase();
 
-            const hotel = COMPANY_MAP[rawCompany] ?? "";
+            const hotel = COMPANY_MAP[rawCompany];
             const d = parseAnyDate(r.Fecha ?? r.fecha);
 
             if (!hotel || !d) return null;
-            return { hotel, year: d.getFullYear(), month: d.getMonth() + 1, qty };
+
+            return {
+              hotel,
+              year: d.getFullYear(),
+              month: d.getMonth() + 1,
+              qty,
+            };
           })
           .filter(Boolean) as Row[];
 
@@ -98,6 +111,7 @@ export default function MembershipByHotel({
     };
   }, [filePath]);
 
+  // Meses disponibles en el año base
   const monthsBase = useMemo(() => {
     const set = new Set<number>();
     rows
@@ -106,16 +120,16 @@ export default function MembershipByHotel({
     return Array.from(set).sort((a, b) => a - b);
   }, [rows, baseYear]);
 
-  // Same-period: solo meses que existen en baseYear (si baseYear está incompleto)
+  // Comparar solo meses comunes
   const compareMonths = useMemo(() => {
     const baseSet = new Set(monthsBase);
+    const curSet = new Set<number>();
 
-    const curMonths = new Set<number>();
     rows
       .filter((r) => r.year === year)
-      .forEach((r) => curMonths.add(r.month));
+      .forEach((r) => curSet.add(r.month));
 
-    const inter = Array.from(curMonths)
+    const inter = Array.from(curSet)
       .filter((m) => baseSet.has(m))
       .sort((a, b) => a - b);
 
@@ -128,14 +142,16 @@ export default function MembershipByHotel({
       rows
         .filter((r) => r.year === yy)
         .filter((r) => (compareMonths ? compareMonths.includes(r.month) : true))
-        .forEach((r) => map.set(r.hotel, (map.get(r.hotel) ?? 0) + r.qty));
+        .forEach((r) => {
+          map.set(r.hotel, (map.get(r.hotel) ?? 0) + r.qty);
+        });
       return map;
     };
 
     const cur = sumFor(year);
     const base = sumFor(baseYear);
 
-    // ✅ Evita spread sobre iterators => compatible con targets más bajos
+    // 🔧 FIX CRÍTICO PARA VERCEL
     const hotels = Array.from(
       new Set<string>([
         ...Array.from(cur.keys()),
@@ -144,24 +160,29 @@ export default function MembershipByHotel({
     );
 
     const list = hotels
-      .map((h) => {
-        const c = cur.get(h) ?? 0;
-        const b = base.get(h) ?? 0;
+      .map((hotel) => {
+        const c = cur.get(hotel) ?? 0;
+        const b = base.get(hotel) ?? 0;
         const hasBase = b > 0;
         const deltaPct = hasBase ? ((c / b) - 1) * 100 : NaN;
-        return { hotel: h, cur: c, base: b, hasBase, deltaPct };
+        return { hotel, cur: c, base: b, hasBase, deltaPct };
       })
       .sort((a, b) => b.cur - a.cur);
 
     const max = Math.max(1, ...list.map((x) => x.cur));
-    return { list, max, hasComparable: !!compareMonths };
+
+    return {
+      list,
+      max,
+      hasComparable: !!compareMonths,
+    };
   }, [rows, year, baseYear, compareMonths]);
 
   if (loading) {
     return (
       <div className="card" style={{ gridColumn: "1 / -1" }}>
-        <div className="cardTitle">Contribución por hotel</div>
-        <div className="cardNote">Cargando…</div>
+        <div className="cardTitle">Membership por hotel</div>
+        <div className="cardNote">Cargando datos…</div>
       </div>
     );
   }
@@ -170,7 +191,7 @@ export default function MembershipByHotel({
     <div className="card" style={{ gridColumn: "1 / -1" }}>
       <div className="cardTop">
         <div>
-          <div className="cardTitle">Contribución de Membership por hotel (JCR)</div>
+          <div className="cardTitle">Membership por hotel – Grupo JCR</div>
           <div className="cardNote">
             {ranking.hasComparable
               ? `Comparación mismo período vs ${baseYear}`
@@ -187,9 +208,15 @@ export default function MembershipByHotel({
               <div className="rankCountry">{x.hotel}</div>
             </div>
 
-            <div className="rankRight" style={{ display: "flex", gap: ".8rem", alignItems: "center" }}>
+            <div
+              className="rankRight"
+              style={{ display: "flex", gap: ".8rem", alignItems: "center" }}
+            >
               <div className="rankBarWrap" style={{ width: 220 }}>
-                <div className="rankBar" style={{ width: `${(x.cur / ranking.max) * 100}%` }} />
+                <div
+                  className="rankBar"
+                  style={{ width: `${(x.cur / ranking.max) * 100}%` }}
+                />
               </div>
 
               <div className="rankGuests" style={{ minWidth: 90 }}>
@@ -211,6 +238,8 @@ export default function MembershipByHotel({
     </div>
   );
 }
+
+
 
 
 
