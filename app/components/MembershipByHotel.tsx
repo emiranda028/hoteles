@@ -13,15 +13,22 @@ function safeNum(v: any) {
 function parseAnyDate(v: any): Date | null {
   if (!v && v !== 0) return null;
   if (v instanceof Date && !isNaN(v.getTime())) return v;
+
+  // Excel serial
   if (typeof v === "number") {
     const excelEpoch = new Date(Date.UTC(1899, 11, 30));
     const d = new Date(excelEpoch.getTime() + v * 86400000);
     return isNaN(d.getTime()) ? null : d;
   }
+
   if (typeof v === "string") {
     const s = v.trim();
+
+    // Intento ISO
     const iso = new Date(s);
     if (!isNaN(iso.getTime())) return iso;
+
+    // dd/mm/yyyy
     const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
     if (m) {
       const dd = Number(m[1]);
@@ -32,11 +39,12 @@ function parseAnyDate(v: any): Date | null {
       return isNaN(d.getTime()) ? null : d;
     }
   }
+
   return null;
 }
 
 const COMPANY_MAP: Record<string, string> = {
-  "MARRIOTT": "Marriott Buenos Aires",
+  MARRIOTT: "Marriott Buenos Aires",
   "SHERATON MDQ": "Sheraton Mar del Plata",
   "SHERATON BCR": "Sheraton Bariloche",
 };
@@ -61,12 +69,17 @@ export default function MembershipByHotel({
       .then(({ rows }) => {
         if (!alive) return;
 
-        const parsed: Row[] = rows
+        const parsed: Row[] = (rows as any[])
           .map((r: any) => {
             const qty = safeNum(r.Cantidad ?? r.cantidad ?? 0);
-            const rawCompany = (r.Empresa ?? r.empresa ?? "").toString().trim().toUpperCase();
+            const rawCompany = (r.Empresa ?? r.empresa ?? "")
+              .toString()
+              .trim()
+              .toUpperCase();
+
             const hotel = COMPANY_MAP[rawCompany] ?? "";
             const d = parseAnyDate(r.Fecha ?? r.fecha);
+
             if (!hotel || !d) return null;
             return { hotel, year: d.getFullYear(), month: d.getMonth() + 1, qty };
           })
@@ -87,17 +100,26 @@ export default function MembershipByHotel({
 
   const monthsBase = useMemo(() => {
     const set = new Set<number>();
-    rows.filter((r) => r.year === baseYear).forEach((r) => set.add(r.month));
+    rows
+      .filter((r) => r.year === baseYear)
+      .forEach((r) => set.add(r.month));
     return Array.from(set).sort((a, b) => a - b);
   }, [rows, baseYear]);
 
   // Same-period: solo meses que existen en baseYear (si baseYear está incompleto)
   const compareMonths = useMemo(() => {
     const baseSet = new Set(monthsBase);
+
     const curMonths = new Set<number>();
-    rows.filter((r) => r.year === year).forEach((r) => curMonths.add(r.month));
-    const inter = Array.from(curMonths).filter((m) => baseSet.has(m)).sort((a, b) => a - b);
-    return inter.length ? inter : null; // null -> no hay comparables
+    rows
+      .filter((r) => r.year === year)
+      .forEach((r) => curMonths.add(r.month));
+
+    const inter = Array.from(curMonths)
+      .filter((m) => baseSet.has(m))
+      .sort((a, b) => a - b);
+
+    return inter.length ? inter : null;
   }, [rows, year, monthsBase]);
 
   const ranking = useMemo(() => {
@@ -113,12 +135,13 @@ export default function MembershipByHotel({
     const cur = sumFor(year);
     const base = sumFor(baseYear);
 
+    // ✅ Evita spread sobre iterators => compatible con targets más bajos
     const hotels = Array.from(
-  new Set([
-    ...Array.from(cur.keys()),
-    ...Array.from(base.keys()),
-  ])
-);
+      new Set<string>([
+        ...Array.from(cur.keys()),
+        ...Array.from(base.keys()),
+      ])
+    );
 
     const list = hotels
       .map((h) => {
@@ -149,14 +172,16 @@ export default function MembershipByHotel({
         <div>
           <div className="cardTitle">Contribución de Membership por hotel (JCR)</div>
           <div className="cardNote">
-            {ranking.hasComparable ? `Comparación mismo período vs ${baseYear}` : `Comparación vs ${baseYear} (base incompleta)`}
+            {ranking.hasComparable
+              ? `Comparación mismo período vs ${baseYear}`
+              : `Comparación vs ${baseYear} (base incompleta)`}
           </div>
         </div>
       </div>
 
       <div className="rankList" style={{ marginTop: ".9rem" }}>
         {ranking.list.map((x, i) => (
-          <div key={i} className="rankRow">
+          <div key={x.hotel} className="rankRow">
             <div className="rankLeft">
               <div className="rankPos">{i + 1}</div>
               <div className="rankCountry">{x.hotel}</div>
@@ -186,4 +211,6 @@ export default function MembershipByHotel({
     </div>
   );
 }
+
+
 
