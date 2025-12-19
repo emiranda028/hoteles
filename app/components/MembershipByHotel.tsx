@@ -7,62 +7,57 @@ type Row = {
   hotel: string;
   year: number;
   month: number;
+  membership: string;
   qty: number;
 };
 
 function safeNum(v: any) {
-  const n = Number(v);
+  const n = Number(String(v ?? "").replace(/\./g, "").replace(",", "."));
   return Number.isFinite(n) ? n : 0;
 }
 
 function parseAnyDate(v: any): Date | null {
   if (!v && v !== 0) return null;
-
   if (v instanceof Date && !isNaN(v.getTime())) return v;
 
-  // Excel serial
-  if (typeof v === "number") {
+  if (typeof v === "number" && Number.isFinite(v)) {
     const excelEpoch = new Date(Date.UTC(1899, 11, 30));
     const d = new Date(excelEpoch.getTime() + v * 86400000);
     return isNaN(d.getTime()) ? null : d;
   }
 
-  if (typeof v === "string") {
-    const s = v.trim();
+  const s = String(v ?? "").trim();
+  if (!s) return null;
 
-    // ISO
-    const iso = new Date(s);
-    if (!isNaN(iso.getTime())) return iso;
-
-    // dd/mm/yyyy
-    const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
-    if (m) {
-      const dd = Number(m[1]);
-      const mm = Number(m[2]);
-      let yy = Number(m[3]);
-      if (yy < 100) yy += 2000;
-      const d = new Date(yy, mm - 1, dd);
-      return isNaN(d.getTime()) ? null : d;
-    }
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) {
+    const dd = Number(m[1]);
+    const mm = Number(m[2]);
+    let yy = Number(m[3]);
+    if (yy < 100) yy += 2000;
+    const d2 = new Date(yy, mm - 1, dd);
+    return isNaN(d2.getTime()) ? null : d2;
   }
 
-  return null;
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
 }
 
-const COMPANY_MAP: Record<string, string> = {
-  MARRIOTT: "Marriott Buenos Aires",
-  "SHERATON MDQ": "Sheraton Mar del Plata",
-  "SHERATON BCR": "Sheraton Bariloche",
-};
+function pctDelta(cur: number, base: number) {
+  if (!base) return null;
+  return ((cur / base) - 1) * 100;
+}
 
 export default function MembershipByHotel({
   year,
   baseYear,
-  filePath = "/data/jcr_membership.xlsx",
+  hotelsJCR,
+  filePath,
 }: {
   year: number;
   baseYear: number;
-  filePath?: string;
+  hotelsJCR: string[];
+  filePath: string;
 }) {
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
@@ -75,33 +70,29 @@ export default function MembershipByHotel({
       .then(({ rows }) => {
         if (!alive) return;
 
-        const parsed: Row[] = (rows as any[])
+        const parsed: Row[] = rows
           .map((r: any) => {
-            const qty = safeNum(r.Cantidad ?? r.cantidad ?? 0);
+            const membership = (r.Bonboy ?? r.bonboy ?? r.Membership ?? "").toString().trim();
+            const qty = safeNum(r.Cantidad ?? r.cantidad ?? r.Qty ?? 0);
+            const hotel = (r.Empresa ?? r.empresa ?? r.Hotel ?? "").toString().trim();
+            const d = parseAnyDate(r.Fecha ?? r.fecha ?? r.Date ?? "");
 
-            const rawCompany = (r.Empresa ?? r.empresa ?? "")
-              .toString()
-              .trim()
-              .toUpperCase();
-
-            const hotel = COMPANY_MAP[rawCompany];
-            const d = parseAnyDate(r.Fecha ?? r.fecha);
-
-            if (!hotel || !d) return null;
+            if (!membership || !hotel || !d) return null;
 
             return {
               hotel,
+              membership,
+              qty,
               year: d.getFullYear(),
               month: d.getMonth() + 1,
-              qty,
-            };
+            } as Row;
           })
           .filter(Boolean) as Row[];
 
         setRows(parsed);
       })
-      .catch((err) => {
-        console.error(err);
+      .catch((e) => {
+        console.error(e);
         setRows([]);
       })
       .finally(() => setLoading(false));
@@ -111,133 +102,92 @@ export default function MembershipByHotel({
     };
   }, [filePath]);
 
-  // Meses disponibles en el año base
-  const monthsBase = useMemo(() => {
-    const set = new Set<number>();
-    rows
-      .filter((r) => r.year === baseYear)
-      .forEach((r) => set.add(r.month));
-    return Array.from(set).sort((a, b) => a - b);
-  }, [rows, baseYear]);
-
-  // Comparar solo meses comunes
-  const compareMonths = useMemo(() => {
-    const baseSet = new Set(monthsBase);
-    const curSet = new Set<number>();
-
-    rows
-      .filter((r) => r.year === year)
-      .forEach((r) => curSet.add(r.month));
-
-    const inter = Array.from(curSet)
-      .filter((m) => baseSet.has(m))
-      .sort((a, b) => a - b);
-
-    return inter.length ? inter : null;
-  }, [rows, year, monthsBase]);
-
-  const ranking = useMemo(() => {
-    const sumFor = (yy: number) => {
-      const map = new Map<string, number>();
+  const byHotel = useMemo(() => {
+    const pick = (yy: number, hotel: string) =>
       rows
         .filter((r) => r.year === yy)
-        .filter((r) => (compareMonths ? compareMonths.includes(r.month) : true))
-        .forEach((r) => {
-          map.set(r.hotel, (map.get(r.hotel) ?? 0) + r.qty);
-        });
+        .filter((r) => r.hotel === hotel);
+
+    const sumFor = (yy: number) => {
+      const map = new Map<string, number>();
+      hotelsJCR.forEach((h) => {
+        pick(yy, h).forEach((r) => map.set(h, (map.get(h) ?? 0) + r.qty));
+      });
       return map;
     };
 
     const cur = sumFor(year);
     const base = sumFor(baseYear);
 
-    // 🔧 FIX CRÍTICO PARA VERCEL
+    // ✅ FIX VERCEL/TS TARGET: no usar spread sobre Map.keys()
     const hotels = Array.from(
-      new Set<string>([
+      new Set([
         ...Array.from(cur.keys()),
         ...Array.from(base.keys()),
       ])
     );
 
     const list = hotels
-      .map((hotel) => {
-        const c = cur.get(hotel) ?? 0;
-        const b = base.get(hotel) ?? 0;
-        const hasBase = b > 0;
-        const deltaPct = hasBase ? ((c / b) - 1) * 100 : NaN;
-        return { hotel, cur: c, base: b, hasBase, deltaPct };
+      .map((h) => {
+        const curVal = cur.get(h) ?? 0;
+        const baseVal = base.get(h) ?? 0;
+        const d = pctDelta(curVal, baseVal);
+        return { hotel: h, cur: curVal, base: baseVal, deltaPct: d };
       })
       .sort((a, b) => b.cur - a.cur);
 
-    const max = Math.max(1, ...list.map((x) => x.cur));
-
-    return {
-      list,
-      max,
-      hasComparable: !!compareMonths,
-    };
-  }, [rows, year, baseYear, compareMonths]);
+    return list;
+  }, [rows, year, baseYear, hotelsJCR]);
 
   if (loading) {
     return (
       <div className="card" style={{ gridColumn: "1 / -1" }}>
         <div className="cardTitle">Membership por hotel</div>
-        <div className="cardNote">Cargando datos…</div>
+        <div className="cardNote">Cargando…</div>
       </div>
     );
   }
 
   return (
-    <div className="card" style={{ gridColumn: "1 / -1" }}>
-      <div className="cardTop">
-        <div>
-          <div className="cardTitle">Membership por hotel – Grupo JCR</div>
-          <div className="cardNote">
-            {ranking.hasComparable
-              ? `Comparación mismo período vs ${baseYear}`
-              : `Comparación vs ${baseYear} (base incompleta)`}
-          </div>
-        </div>
+    <div className="card" style={{ gridColumn: "1 / -1", padding: "1.1rem" }}>
+      <div className="cardTitle">Membership por hotel</div>
+      <div className="cardNote">
+        {year} vs {baseYear}
       </div>
 
-      <div className="rankList" style={{ marginTop: ".9rem" }}>
-        {ranking.list.map((x, i) => (
-          <div key={x.hotel} className="rankRow">
-            <div className="rankLeft">
-              <div className="rankPos">{i + 1}</div>
-              <div className="rankCountry">{x.hotel}</div>
-            </div>
+      <div style={{ marginTop: "1rem", display: "grid", gap: ".6rem" }}>
+        {byHotel.map((x) => (
+          <div
+            key={x.hotel}
+            style={{
+              display: "grid",
+              gridTemplateColumns: "minmax(180px, 1fr) minmax(120px, 160px) minmax(120px, 160px)",
+              gap: ".75rem",
+              alignItems: "center",
+              padding: ".65rem .8rem",
+              border: "1px solid rgba(148,163,184,.22)",
+              borderRadius: 16,
+              background: "rgba(15,23,42,.04)",
+            }}
+          >
+            <div style={{ fontWeight: 800 }}>{x.hotel}</div>
+            <div style={{ fontWeight: 900 }}>{x.cur.toLocaleString("es-AR")}</div>
 
-            <div
-              className="rankRight"
-              style={{ display: "flex", gap: ".8rem", alignItems: "center" }}
-            >
-              <div className="rankBarWrap" style={{ width: 220 }}>
-                <div
-                  className="rankBar"
-                  style={{ width: `${(x.cur / ranking.max) * 100}%` }}
-                />
+            {x.deltaPct === null ? (
+              <div className="delta">Base sin datos</div>
+            ) : (
+              <div className={`delta ${x.deltaPct >= 0 ? "up" : "down"}`}>
+                {x.deltaPct >= 0 ? "+" : ""}
+                {x.deltaPct.toFixed(1).replace(".", ",")}% vs {baseYear}
               </div>
-
-              <div className="rankGuests" style={{ minWidth: 90 }}>
-                {x.cur.toLocaleString("es-AR")}
-              </div>
-
-              {x.hasBase ? (
-                <div className={`delta ${x.deltaPct >= 0 ? "up" : "down"}`}>
-                  {x.deltaPct >= 0 ? "+" : ""}
-                  {x.deltaPct.toFixed(1).replace(".", ",")}%
-                </div>
-              ) : (
-                <div className="delta">—</div>
-              )}
-            </div>
+            )}
           </div>
         ))}
       </div>
     </div>
   );
 }
+
 
 
 
