@@ -1,654 +1,580 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-
-import CountryRanking from "./CountryRanking";
-import WorldGuestsMap from "./WorldGuestsMap";
-import MembershipSummary from "./MembershipSummary";
 import HofExplorer from "./HofExplorer";
-
-// =====================
-// Types
-// =====================
-type Metrics = {
-  rooms: number; // Rooms occupied
-  guests: number; // Guests
-  revenue: number; // Room Revenue (USD)
-  adr: number; // ADR (USD)
-  occ: number; // 0-1
-};
-
-type HotelsMap = Record<string, Metrics>;
-type DataYear = {
-  jcr: { hotels: HotelsMap };
-  gotel: { hotels: HotelsMap };
-};
-
-// =====================
-// Static data (resumen ejecutivo)
-// (H&F viene del CSV por separado, HofExplorer)
-// =====================
-const DATA: Record<number, DataYear> = {
-  2024: {
-    jcr: {
-      hotels: {
-        "Marriott Buenos Aires": { rooms: 46210, guests: 74200, revenue: 12140334, adr: 157, occ: 0.52 },
-        "Sheraton Mar del Plata": { rooms: 28740, guests: 45800, revenue: 5019409, adr: 131, occ: 0.47 },
-        "Sheraton Bariloche": { rooms: 22110, guests: 35100, revenue: 2979870, adr: 140, occ: 0.44 },
-      },
-    },
-    gotel: {
-      hotels: {
-        Maitei: { rooms: 11532, guests: 20730, revenue: 447167, adr: 74, occ: 0.41 }, // occ real se calcula en H&F con 98/día
-      },
-    },
-  },
-  2025: {
-    jcr: {
-      hotels: {
-        "Marriott Buenos Aires": { rooms: 51890, guests: 80120, revenue: 13140230, adr: 171, occ: 0.54 },
-        "Sheraton Mar del Plata": { rooms: 33140, guests: 50980, revenue: 10656002, adr: 151, occ: 0.49 },
-        "Sheraton Bariloche": { rooms: 26210, guests: 40120, revenue: 338274, adr: 136, occ: 0.46 },
-      },
-    },
-    gotel: {
-      hotels: {
-        Maitei: { rooms: 15546, guests: 28080, revenue: 752851, adr: 78, occ: 0.43 },
-      },
-    },
-  },
-};
-
-// Logos
-const HOTEL_LOGOS: Record<string, string> = {
-  "Marriott Buenos Aires": "/logos/marriott.png",
-  "Sheraton Mar del Plata": "/logos/sheraton-mdq-2025.jpg",
-  "Sheraton Bariloche": "/logos/sheraton-bcr.png",
-  Maitei: "/logos/maitei.png",
-};
-
-// =====================
-// Helpers
-// =====================
-const fmtInt = (n: number) => Math.round(n).toLocaleString("es-AR");
-const fmtUsd = (n: number) =>
-  n.toLocaleString("es-AR", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
-const fmtUsd2 = (n: number) =>
-  n.toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const fmtPct01 = (p: number) => (p * 100).toFixed(1).replace(".", ",") + "%";
-
-function deltaPct(cur: number, base: number) {
-  if (!base) return 0;
-  return (cur / base - 1) * 100;
-}
-function deltaPP(curOcc01: number, baseOcc01: number) {
-  return (curOcc01 - baseOcc01) * 100;
-}
-const deltaClass = (d: number) => (d >= 0 ? "up" : "down");
-
-function animate(from: number, to: number, ms: number, setter: (v: number) => void) {
-  const start = performance.now();
-  function step(now: number) {
-    const t = Math.min((now - start) / ms, 1);
-    setter(from + (to - from) * t);
-    if (t < 1) requestAnimationFrame(step);
-  }
-  requestAnimationFrame(step);
-}
+import MembershipSummary from "./MembershipSummary";
+import CountryRanking from "./CountryRanking";
 
 /**
- * Consolidado desde hoteles:
- * - Occ ponderada: available = occupied/occ => occ_total = sum(occupied)/sum(available)
- * - ADR ponderada por rooms
+ * YearComparator
+ * - Filtro global de AÑO (reutilizable por H&F / Membership / Nacionalidades)
+ * - Carrouseles JCR grandes (Rooms, Revenue, Huéspedes, ADR) con animación
+ * - Comparativa año vs año base (por defecto 2025 vs 2024)
+ * - Secciones: H&F JCR, Membership, Nacionalidades, y bloques GOTEL/MAITEI si los tenés
+ *
+ * Importante:
+ * - NO pasamos `defaultHotel` a HofExplorer (eso te rompía el build por typings).
+ * - El cálculo de JCR se hace desde /data/hf_diario.csv (diario) usando disponibilidad fija.
  */
-function computeGroupFromHotels(hotels: HotelsMap): Metrics {
-  let roomsOccupiedSum = 0;
-  let guestsSum = 0;
-  let revenueSum = 0;
 
-  let roomsAvailableSum = 0;
-  let adrWeightedNumer = 0;
+const DEFAULT_YEAR = 2025;
+const DEFAULT_BASE_YEAR = 2024;
 
-  Object.values(hotels).forEach((h) => {
-    roomsOccupiedSum += h.rooms;
-    guestsSum += h.guests;
-    revenueSum += h.revenue;
+const JCR_HOTELS = ["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"];
+const GOTEL_HOTELS = ["MAITEI"];
 
-    const occ = Math.max(h.occ, 0.0001);
-    roomsAvailableSum += h.rooms / occ;
-
-    adrWeightedNumer += h.adr * h.rooms;
-  });
-
-  const occWeighted = roomsAvailableSum > 0 ? roomsOccupiedSum / roomsAvailableSum : 0;
-  const adrWeighted = roomsOccupiedSum > 0 ? adrWeightedNumer / roomsOccupiedSum : 0;
-
-  return {
-    rooms: roomsOccupiedSum,
-    guests: guestsSum,
-    revenue: revenueSum,
-    adr: adrWeighted,
-    occ: occWeighted,
-  };
-}
-
-// =====================
-// UI: Big carousel (4 slides)
-// =====================
-type Slide = {
-  title: string;
-  big: string;
-  sub: string;
-  trendLabel: string;
-  trendClass: string;
-  bgClass: string;
+const availPerDayByHotel: Record<string, number> = {
+  MARRIOTT: 300,
+  "SHERATON MDQ": 194,
+  "SHERATON BCR": 161,
+  MAITEI: 98,
 };
 
-function Arrow({ up }: { up: boolean }) {
-  return <span aria-hidden="true">{up ? "▲" : "▼"}</span>;
+// ---------- helpers formato ----------
+const fmtInt = (n: number) => Math.round(n).toLocaleString("es-AR");
+const fmtMoney = (n: number) =>
+  n.toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtPct01 = (p01: number) => (p01 * 100).toFixed(1).replace(".", ",") + "%";
+const fmtPP = (pp: number) => pp.toFixed(1).replace(".", ",") + " p.p.";
+
+function parseNumLoose(v: any): number {
+  if (typeof v === "number") return v;
+  const s = String(v ?? "").trim();
+  if (!s) return 0;
+  // soporta "22.441,71" y "22,441.71" y "22441.71"
+  const cleaned = s
+    .replace(/\s/g, "")
+    .replace(/\./g, "")
+    .replace(/,/g, ".")
+    .replace(/[^\d.-]/g, "");
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : 0;
 }
 
-function BigCarousel4({
-  slides,
-  autoMs = 4500,
-}: {
-  slides: Slide[];
-  autoMs?: number;
-}) {
-  const [idx, setIdx] = useState(0);
+function normHotel(raw: any) {
+  const s = String(raw ?? "").trim().toUpperCase();
+  if (s.includes("MARRIOTT")) return "MARRIOTT";
+  if (s.includes("BARILOCHE") || s.includes("BCR")) return "SHERATON BCR";
+  if (s.includes("MAR DEL PLATA") || s.includes("MDQ")) return "SHERATON MDQ";
+  if (s.includes("MAITEI")) return "MAITEI";
+  return s;
+}
+
+function parseDateLoose(v: any): Date | null {
+  if (!v) return null;
+  if (v instanceof Date && !isNaN(v.getTime())) return v;
+
+  const s = String(v).trim();
+  if (!s) return null;
+
+  // Intento ISO
+  const iso = new Date(s);
+  if (!isNaN(iso.getTime())) return iso;
+
+  // dd/mm/yyyy o dd-mm-yyyy
+  const m1 = s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})$/);
+  if (m1) {
+    const dd = Number(m1[1]);
+    const mm = Number(m1[2]) - 1;
+    const yy = Number(m1[3].length === 2 ? "20" + m1[3] : m1[3]);
+    const d = new Date(yy, mm, dd);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  // Formato del CSV: "01-06-22 Wed" (tomamos la parte "01-06-22")
+  const m2 = s.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})/);
+  if (m2) {
+    const dd = Number(m2[1]);
+    const mm = Number(m2[2]) - 1;
+    const yyRaw = String(m2[3]);
+    const yy = Number(yyRaw.length === 2 ? "20" + yyRaw : yyRaw);
+    const d = new Date(yy, mm, dd);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  return null;
+}
+
+// ---------- CSV (hf_diario) ----------
+type HfRow = {
+  hotel: string;
+  dt: Date;
+  year: number;
+  month: number;
+  roomsOcc: number; // Total Occ.
+  guests: number; // Adl. & Chl.
+  revenue: number; // Room Revenue
+};
+
+async function fetchText(path: string) {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error(`No se pudo cargar ${path} (status ${res.status})`);
+  return await res.text();
+}
+
+// CSV con separador ; y headers con saltos de línea
+function parseHfCsv(text: string): HfRow[] {
+  if (!text?.trim()) return [];
+
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  if (lines.length < 2) return [];
+
+  // Header
+  const headerLine = lines[0];
+  const headers = headerLine.split(";").map((h) => h.replace(/^"|"$/g, "").trim());
+
+  const idx = (name: string) =>
+    headers.findIndex((h) => h.toLowerCase().includes(name.toLowerCase()));
+
+  // indices flexibles
+  const iEmpresa = idx("Empresa");
+  const iFecha = idx("Fecha"); // hay "Fecha" y "Date"; preferimos "Fecha"
+  const iDate = idx("Date");
+  const iOcc = idx("Total");
+  const iRevenue = idx("Room Revenue");
+  const iGuests = idx("Adl.");
+
+  const out: HfRow[] = [];
+
+  for (let li = 1; li < lines.length; li++) {
+    const cols = lines[li].split(";").map((c) => c.replace(/^"|"$/g, "").trim());
+
+    const hotelRaw = iEmpresa >= 0 ? cols[iEmpresa] : "";
+    const hotel = normHotel(hotelRaw);
+    if (!hotel) continue;
+
+    const dateRaw =
+      (iFecha >= 0 && cols[iFecha]) ? cols[iFecha] : (iDate >= 0 ? cols[iDate] : "");
+    const dt = parseDateLoose(dateRaw);
+    if (!dt) continue;
+
+    const roomsOcc = iOcc >= 0 ? parseNumLoose(cols[iOcc]) : 0;
+    const revenue = iRevenue >= 0 ? parseNumLoose(cols[iRevenue]) : 0;
+    const guests = iGuests >= 0 ? parseNumLoose(cols[iGuests]) : 0;
+
+    const year = dt.getFullYear();
+    const month = dt.getMonth() + 1;
+
+    out.push({ hotel, dt, year, month, roomsOcc, guests, revenue });
+  }
+
+  return out;
+}
+
+// ---------- agregaciones JCR ----------
+type Agg = {
+  rooms: number;
+  guests: number;
+  revenue: number;
+  adr: number; // revenue / rooms
+  occ01: number; // rooms / available
+  availableRooms: number; // sum(availPerDay * days)
+  daysCounted: number; // total de días-hotel contados (para debug)
+};
+
+function calcAgg(rows: HfRow[], hotels: string[], year: number): Agg {
+  const byHotel = new Map<string, HfRow[]>();
+  for (const r of rows) {
+    if (r.year !== year) continue;
+    if (!hotels.includes(r.hotel)) continue;
+    if (!byHotel.has(r.hotel)) byHotel.set(r.hotel, []);
+    byHotel.get(r.hotel)!.push(r);
+  }
+
+  let rooms = 0;
+  let guests = 0;
+  let revenue = 0;
+  let availableRooms = 0;
+  let daysCounted = 0;
+
+  for (const hotel of hotels) {
+    const list = byHotel.get(hotel) ?? [];
+    if (list.length === 0) continue;
+
+    // días únicos por hotel (por si viene duplicado)
+    const daySet = new Set<number>();
+    for (const r of list) {
+      rooms += r.roomsOcc;
+      guests += r.guests;
+      revenue += r.revenue;
+      daySet.add(new Date(r.dt.getFullYear(), r.dt.getMonth(), r.dt.getDate()).getTime());
+    }
+
+    const days = daySet.size;
+    daysCounted += days;
+
+    const availPerDay = availPerDayByHotel[hotel] ?? 0;
+    availableRooms += availPerDay * days;
+  }
+
+  const adr = rooms > 0 ? revenue / rooms : 0;
+  const occ01 = availableRooms > 0 ? rooms / availableRooms : 0;
+
+  return { rooms, guests, revenue, adr, occ01, availableRooms, daysCounted };
+}
+
+// ---------- animación números ----------
+function useCountUp(target: number, durationMs = 900) {
+  const [value, setValue] = useState(0);
 
   useEffect(() => {
-    const t = setInterval(() => setIdx((p) => (p + 1) % slides.length), autoMs);
-    return () => clearInterval(t);
-  }, [autoMs, slides.length]);
+    let raf = 0;
+    const start = performance.now();
+    const from = value;
+    const to = target;
 
+    const tick = (t: number) => {
+      const p = Math.min(1, (t - start) / durationMs);
+      const eased = 1 - Math.pow(1 - p, 3); // easeOutCubic
+      setValue(from + (to - from) * eased);
+      if (p < 1) raf = requestAnimationFrame(tick);
+    };
+
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target]);
+
+  return value;
+}
+
+// ---------- UI: Cards grandes ----------
+function BigCarousel4(props: {
+  title: string;
+  subtitle: string;
+  kpis: Array<{
+    label: string;
+    value: string;
+    sub: string;
+    delta?: string;
+    deltaClass?: "up" | "down" | "flat";
+  }>;
+}) {
   return (
-    <div className="bigCarousel">
-      <div className={`bigSlide ${slides[idx]?.bgClass ?? ""}`}>
-        <div className="bigSlideTop">
-          <div className="bigSlideTitle">{slides[idx]?.title}</div>
-          <div className={`bigSlideTrend ${slides[idx]?.trendClass ?? ""}`}>
-            {slides[idx]?.trendClass === "up" ? <Arrow up /> : <Arrow up={false} />}
-            <span>{slides[idx]?.trendLabel}</span>
-          </div>
+    <div className="card" style={{ padding: "1.25rem", overflow: "hidden" }}>
+      <div style={{ display: "grid", gap: ".25rem" }}>
+        <div className="cardTitle" style={{ fontSize: "1.2rem" }}>
+          {props.title}
         </div>
-
-        <div className="bigSlideValue">{slides[idx]?.big}</div>
-        <div className="bigSlideSub">{slides[idx]?.sub}</div>
-
-        <div className="dots">
-          {slides.map((_, i) => (
-            <button
-              key={i}
-              className={`dot ${i === idx ? "active" : ""}`}
-              onClick={() => setIdx(i)}
-              type="button"
-              aria-label={`Slide ${i + 1}`}
-            />
-          ))}
-        </div>
+        <div className="cardNote">{props.subtitle}</div>
       </div>
 
-      <style jsx>{`
-        .bigCarousel {
-          width: 100%;
-        }
-        .bigSlide {
-          border-radius: 18px;
-          padding: 18px 18px 16px;
-          border: 1px solid rgba(255, 255, 255, 0.08);
-          box-shadow: 0 14px 50px rgba(0, 0, 0, 0.22);
-          overflow: hidden;
-        }
-        .bg1 {
-          background: radial-gradient(1200px 500px at 20% 10%, rgba(96, 165, 250, 0.28), transparent 60%),
-            linear-gradient(180deg, rgba(16, 18, 26, 0.95), rgba(12, 14, 20, 0.95));
-        }
-        .bg2 {
-          background: radial-gradient(1200px 500px at 20% 10%, rgba(34, 197, 94, 0.22), transparent 60%),
-            linear-gradient(180deg, rgba(16, 18, 26, 0.95), rgba(12, 14, 20, 0.95));
-        }
-        .bg3 {
-          background: radial-gradient(1200px 500px at 20% 10%, rgba(168, 85, 247, 0.22), transparent 60%),
-            linear-gradient(180deg, rgba(16, 18, 26, 0.95), rgba(12, 14, 20, 0.95));
-        }
-        .bg4 {
-          background: radial-gradient(1200px 500px at 20% 10%, rgba(245, 158, 11, 0.22), transparent 60%),
-            linear-gradient(180deg, rgba(16, 18, 26, 0.95), rgba(12, 14, 20, 0.95));
-        }
-        .bigSlideTop {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          gap: 12px;
-        }
-        .bigSlideTitle {
-          font-weight: 700;
-          font-size: 14px;
-          color: rgba(255, 255, 255, 0.86);
-          letter-spacing: 0.2px;
-        }
-        .bigSlideTrend {
-          display: inline-flex;
-          align-items: center;
-          gap: 6px;
-          font-weight: 800;
-          font-size: 13px;
-          padding: 6px 10px;
-          border-radius: 999px;
-          background: rgba(255, 255, 255, 0.06);
-          border: 1px solid rgba(255, 255, 255, 0.08);
-          white-space: nowrap;
-        }
-        .bigSlideTrend.up {
-          color: rgba(34, 197, 94, 0.95);
-        }
-        .bigSlideTrend.down {
-          color: rgba(248, 113, 113, 0.95);
-        }
-        .bigSlideValue {
-          margin-top: 10px;
-          font-size: 44px;
-          line-height: 1.03;
-          font-weight: 900;
-          letter-spacing: -1px;
-          color: rgba(255, 255, 255, 0.97);
-        }
-        .bigSlideSub {
-          margin-top: 6px;
-          font-size: 13px;
-          color: rgba(255, 255, 255, 0.7);
-        }
-        .dots {
-          margin-top: 14px;
-          display: flex;
-          gap: 8px;
-        }
-        .dot {
-          width: 10px;
-          height: 10px;
-          border-radius: 999px;
-          border: 1px solid rgba(255, 255, 255, 0.18);
-          background: rgba(255, 255, 255, 0.08);
-          cursor: pointer;
-        }
-        .dot.active {
-          background: rgba(255, 255, 255, 0.85);
-          border-color: rgba(255, 255, 255, 0.65);
-        }
-      `}</style>
+      <div
+        style={{
+          marginTop: "1rem",
+          display: "grid",
+          gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+          gap: "1rem",
+        }}
+      >
+        {props.kpis.map((k) => (
+          <div
+            key={k.label}
+            style={{
+              borderRadius: 18,
+              border: "1px solid rgba(0,0,0,.07)",
+              background: "rgba(0,0,0,.02)",
+              padding: "1rem",
+              minHeight: 140,
+              display: "grid",
+              gap: ".35rem",
+            }}
+          >
+            <div style={{ color: "var(--muted)", fontWeight: 700 }}>{k.label}</div>
+            <div style={{ fontSize: "2.2rem", fontWeight: 900, lineHeight: 1.05 }}>
+              {k.value}
+            </div>
+
+            {k.delta ? (
+              <div className={`delta ${k.deltaClass ?? "flat"}`} style={{ width: "fit-content" }}>
+                {k.delta}
+              </div>
+            ) : null}
+
+            <div style={{ color: "var(--muted)", fontSize: ".95rem" }}>{k.sub}</div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
 
-// =====================
-// Main component
-// =====================
 export default function YearComparator() {
-  const BASE_YEAR = 2024;
-  const DEFAULT_YEAR = 2025;
-
-  const years = useMemo(() => Object.keys(DATA).map(Number).sort(), []);
+  // Filtro global de año (se usa en H&F / Membership / Nacionalidades)
   const [year, setYear] = useState<number>(DEFAULT_YEAR);
+  const [baseYear, setBaseYear] = useState<number>(DEFAULT_BASE_YEAR);
 
-  // timestamp solo en cliente (evita hydration mismatch)
-  const [lastUpdated, setLastUpdated] = useState<string>("—");
+  // Cargamos hf_diario.csv 1 sola vez
+  const [hfRows, setHfRows] = useState<HfRow[]>([]);
+  const [hfErr, setHfErr] = useState<string>("");
+
   useEffect(() => {
-    setLastUpdated(new Date().toLocaleString("es-AR"));
+    let alive = true;
+    (async () => {
+      try {
+        setHfErr("");
+        const text = await fetchText("/data/hf_diario.csv");
+        if (!alive) return;
+        setHfRows(parseHfCsv(text));
+      } catch (e: any) {
+        if (!alive) return;
+        setHfRows([]);
+        setHfErr(e?.message ?? "Error cargando hf_diario.csv");
+      }
+    })();
+    return () => {
+      alive = false;
+    };
   }, []);
 
-  // Consolidados
-  const baseJCR = useMemo(() => computeGroupFromHotels(DATA[BASE_YEAR].jcr.hotels), []);
-  const curJCR = useMemo(() => computeGroupFromHotels(DATA[year].jcr.hotels), [year]);
+  const yearsAvailable = useMemo(() => {
+    const s = new Set<number>();
+    for (const r of hfRows) s.add(r.year);
+    const arr = Array.from(s).sort((a, b) => b - a);
+    // fallback razonable
+    return arr.length ? arr : [2026, 2025, 2024, 2023, 2022];
+  }, [hfRows]);
 
-  const baseMaitei = useMemo(() => computeGroupFromHotels(DATA[BASE_YEAR].gotel.hotels), []);
-  const curMaitei = useMemo(() => computeGroupFromHotels(DATA[year].gotel.hotels), [year]);
+  // --- Agregados JCR ---
+  const jcrCur = useMemo(() => calcAgg(hfRows, JCR_HOTELS, year), [hfRows, year]);
+  const jcrBase = useMemo(() => calcAgg(hfRows, JCR_HOTELS, baseYear), [hfRows, baseYear]);
 
-  // Animación valores (carrousel / tarjetas)
-  const [rooms, setRooms] = useState(curJCR.rooms);
-  const [guests, setGuests] = useState(curJCR.guests);
-  const [revenue, setRevenue] = useState(curJCR.revenue);
-  const [adr, setAdr] = useState(curJCR.adr);
-  const [occ, setOcc] = useState(curJCR.occ);
+  const dRooms = jcrBase.rooms > 0 ? (jcrCur.rooms / jcrBase.rooms - 1) * 100 : 0;
+  const dGuests = jcrBase.guests > 0 ? (jcrCur.guests / jcrBase.guests - 1) * 100 : 0;
+  const dRev = jcrBase.revenue > 0 ? (jcrCur.revenue / jcrBase.revenue - 1) * 100 : 0;
+  const dAdr = jcrBase.adr > 0 ? (jcrCur.adr / jcrBase.adr - 1) * 100 : 0;
+  const dOccPP = (jcrCur.occ01 - jcrBase.occ01) * 100;
 
-  useEffect(() => {
-    animate(rooms, curJCR.rooms, 520, setRooms);
-    animate(guests, curJCR.guests, 520, setGuests);
-    animate(revenue, curJCR.revenue, 520, setRevenue);
-    animate(adr, curJCR.adr, 520, setAdr);
-    animate(occ, curJCR.occ, 520, setOcc);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [year]);
+  // animaciones (solo para valores)
+  const roomsAnim = useCountUp(jcrCur.rooms);
+  const guestsAnim = useCountUp(jcrCur.guests);
+  const revAnim = useCountUp(jcrCur.revenue);
+  const adrAnim = useCountUp(jcrCur.adr);
 
-  // Deltas JCR
-  const roomsDelta = deltaPct(curJCR.rooms, baseJCR.rooms);
-  const guestsDelta = deltaPct(curJCR.guests, baseJCR.guests);
-  const revenueDelta = deltaPct(curJCR.revenue, baseJCR.revenue);
-  const adrDelta = deltaPct(curJCR.adr, baseJCR.adr);
-  const occDelta = deltaPP(curJCR.occ, baseJCR.occ);
-
-  // Slides JCR (usa el año seleccionado; default 2025)
-  const slidesJCR: Slide[] = useMemo(() => {
-    const upDown = (d: number) => (d >= 0 ? "up" : "down");
-    const sign = (d: number) => (d >= 0 ? "+" : "");
-
+  const jcrKpis = useMemo(() => {
+    const deltaClass = (v: number): "up" | "down" | "flat" => (v > 0.0001 ? "up" : v < -0.0001 ? "down" : "flat");
     return [
       {
-        title: "Rooms occupied · Grupo JCR",
-        big: fmtInt(rooms),
-        sub: `${BASE_YEAR}: ${fmtInt(baseJCR.rooms)} → ${year}: ${fmtInt(curJCR.rooms)}`,
-        trendLabel: `${sign(roomsDelta)}${roomsDelta.toFixed(1).replace(".", ",")}%`,
-        trendClass: upDown(roomsDelta),
-        bgClass: "bg1",
+        label: "Rooms occupied",
+        value: fmtInt(roomsAnim),
+        delta: `${dRooms >= 0 ? "+" : ""}${dRooms.toFixed(1).replace(".", ",")}% vs ${baseYear}`,
+        deltaClass: deltaClass(dRooms),
+        sub: `${fmtInt(jcrBase.rooms)} → ${fmtInt(jcrCur.rooms)}`,
       },
       {
-        title: "Room Revenue (USD) · Grupo JCR",
-        big: fmtUsd(revenue),
-        sub: `${BASE_YEAR}: ${fmtUsd(baseJCR.revenue)} → ${year}: ${fmtUsd(curJCR.revenue)}`,
-        trendLabel: `${sign(revenueDelta)}${revenueDelta.toFixed(1).replace(".", ",")}%`,
-        trendClass: upDown(revenueDelta),
-        bgClass: "bg2",
+        label: "Room Revenue (USD)",
+        value: fmtMoney(revAnim),
+        delta: `${dRev >= 0 ? "+" : ""}${dRev.toFixed(1).replace(".", ",")}% vs ${baseYear}`,
+        deltaClass: deltaClass(dRev),
+        sub: `${fmtMoney(jcrBase.revenue)} → ${fmtMoney(jcrCur.revenue)}`,
       },
       {
-        title: "Huéspedes · Grupo JCR",
-        big: fmtInt(guests),
-        sub: `${BASE_YEAR}: ${fmtInt(baseJCR.guests)} → ${year}: ${fmtInt(curJCR.guests)}`,
-        trendLabel: `${sign(guestsDelta)}${guestsDelta.toFixed(1).replace(".", ",")}%`,
-        trendClass: upDown(guestsDelta),
-        bgClass: "bg3",
+        label: "Huéspedes",
+        value: fmtInt(guestsAnim),
+        delta: `${dGuests >= 0 ? "+" : ""}${dGuests.toFixed(1).replace(".", ",")}% vs ${baseYear}`,
+        deltaClass: deltaClass(dGuests),
+        sub: `${fmtInt(jcrBase.guests)} → ${fmtInt(jcrCur.guests)}`,
       },
       {
-        title: "ADR (USD) + Ocupación · Grupo JCR",
-        big: `${fmtUsd2(adr)} · ${fmtPct01(occ)}`,
-        sub: `ADR ${BASE_YEAR}: ${fmtUsd2(baseJCR.adr)} → ${year}: ${fmtUsd2(curJCR.adr)} · Occ ${BASE_YEAR}: ${fmtPct01(baseJCR.occ)} → ${year}: ${fmtPct01(curJCR.occ)}`,
-        trendLabel: `ADR ${adrDelta >= 0 ? "+" : ""}${adrDelta.toFixed(1).replace(".", ",")}% · Occ ${occDelta >= 0 ? "+" : ""}${occDelta.toFixed(1).replace(".", ",")} p.p.`,
-        trendClass: upDown(adrDelta + occDelta),
-        bgClass: "bg4",
+        label: "ADR (USD)",
+        value: fmtMoney(adrAnim),
+        delta: `${dAdr >= 0 ? "+" : ""}${dAdr.toFixed(1).replace(".", ",")}% vs ${baseYear}`,
+        deltaClass: deltaClass(dAdr),
+        sub: `${fmtMoney(jcrBase.adr)} → ${fmtMoney(jcrCur.adr)}`,
       },
     ];
-  }, [
-    rooms,
-    guests,
-    revenue,
-    adr,
-    occ,
-    year,
-    BASE_YEAR,
-    baseJCR.rooms,
-    baseJCR.guests,
-    baseJCR.revenue,
-    baseJCR.adr,
-    baseJCR.occ,
-    curJCR.rooms,
-    curJCR.guests,
-    curJCR.revenue,
-    curJCR.adr,
-    curJCR.occ,
-    roomsDelta,
-    guestsDelta,
-    revenueDelta,
-    adrDelta,
-    occDelta,
-  ]);
+  }, [roomsAnim, guestsAnim, revAnim, adrAnim, dRooms, dRev, dGuests, dAdr, baseYear, jcrBase, jcrCur]);
 
-  // Slides Maitei (GOTEL) – abajo del todo
-  const maiteiSlides: Slide[] = useMemo(() => {
-    const roomsD = deltaPct(curMaitei.rooms, baseMaitei.rooms);
-    const guestsD = deltaPct(curMaitei.guests, baseMaitei.guests);
-    const revenueD = deltaPct(curMaitei.revenue, baseMaitei.revenue);
-    const adrD = deltaPct(curMaitei.adr, baseMaitei.adr);
-
-    const upDown = (d: number) => (d >= 0 ? "up" : "down");
-    const sign = (d: number) => (d >= 0 ? "+" : "");
-
-    return [
-      {
-        title: "Rooms occupied · Maitei (GOTEL)",
-        big: fmtInt(curMaitei.rooms),
-        sub: `${BASE_YEAR}: ${fmtInt(baseMaitei.rooms)} → ${year}: ${fmtInt(curMaitei.rooms)}`,
-        trendLabel: `${sign(roomsD)}${roomsD.toFixed(1).replace(".", ",")}%`,
-        trendClass: upDown(roomsD),
-        bgClass: "bg1",
-      },
-      {
-        title: "Room Revenue (USD) · Maitei (GOTEL)",
-        big: fmtUsd(curMaitei.revenue),
-        sub: `${BASE_YEAR}: ${fmtUsd(baseMaitei.revenue)} → ${year}: ${fmtUsd(curMaitei.revenue)}`,
-        trendLabel: `${sign(revenueD)}${revenueD.toFixed(1).replace(".", ",")}%`,
-        trendClass: upDown(revenueD),
-        bgClass: "bg2",
-      },
-      {
-        title: "Huéspedes · Maitei (GOTEL)",
-        big: fmtInt(curMaitei.guests),
-        sub: `${BASE_YEAR}: ${fmtInt(baseMaitei.guests)} → ${year}: ${fmtInt(curMaitei.guests)}`,
-        trendLabel: `${sign(guestsD)}${guestsD.toFixed(1).replace(".", ",")}%`,
-        trendClass: upDown(guestsD),
-        bgClass: "bg3",
-      },
-      {
-        title: "ADR (USD) · Maitei (GOTEL)",
-        big: fmtUsd2(curMaitei.adr),
-        sub: `${BASE_YEAR}: ${fmtUsd2(baseMaitei.adr)} → ${year}: ${fmtUsd2(curMaitei.adr)}`,
-        trendLabel: `${sign(adrD)}${adrD.toFixed(1).replace(".", ",")}%`,
-        trendClass: upDown(adrD),
-        bgClass: "bg4",
-      },
-    ];
-  }, [BASE_YEAR, baseMaitei, curMaitei, year]);
-
-  const isBase = year === BASE_YEAR;
-
-  const JCR_HOTELS = useMemo(
-    () => ["MARRIOTT", "SHERATON MDQ", "SHERATON BCR"],
-    []
-  );
-  const GOTEL_HOTELS = useMemo(() => ["MAITEI"], []);
+  const occLine = useMemo(() => {
+    return {
+      cur: fmtPct01(jcrCur.occ01),
+      base: fmtPct01(jcrBase.occ01),
+      pp: `${dOccPP >= 0 ? "+" : ""}${fmtPP(dOccPP)}`,
+    };
+  }, [jcrCur.occ01, jcrBase.occ01, dOccPP]);
 
   return (
     <section className="section" id="comparador">
-      {/* =========================
-          1) CARROUSEL JCR (arriba)
-         ========================= */}
-      <div className="sectionHeader">
+      {/* ====== CONTROLES GLOBALES (AÑO) ====== */}
+      <div className="sectionHeader" style={{ alignItems: "flex-end" }}>
         <div>
           <div className="sectionKicker">Vista ejecutiva</div>
-          <h2 className="sectionTitle">Grupo JCR · Indicadores clave (multi-año)</h2>
+          <h2 className="sectionTitle">Informe dinámico</h2>
           <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-            Seleccioná el año (por defecto {DEFAULT_YEAR}). Los carrouseles y comparativas se recalculan automáticamente.
+            Filtros y cálculos automáticos. JCR por un lado y GOTEL / Maitei por separado.
           </div>
         </div>
 
-        <div className="toggle" style={{ alignSelf: "flex-end" }}>
-          {years.map((y) => (
-            <button
-              key={y}
-              className={`toggleBtn ${year === y ? "active" : ""}`}
-              onClick={() => setYear(y)}
-              type="button"
-            >
-              {y}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <BigCarousel4 slides={slidesJCR} />
-
-      {/* =========================
-          2) COMPARATIVA 2025 vs 2024 (mantener simple)
-         ========================= */}
-      <div style={{ marginTop: "1.25rem" }}>
-        <h3 className="sectionTitle">Comparativa {year} vs {BASE_YEAR} · Grupo JCR</h3>
-        <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-          Deltas consolidados (interanual) calculados desde los hoteles JCR.
-        </div>
-
-        <div className="cardRow" style={{ marginTop: "1rem" }}>
-          <div className="card">
-            <div className="cardTop">
-              <div className="cardTitle">Rooms occupied</div>
-            </div>
-            <div className="cardValue">{fmtInt(curJCR.rooms)}</div>
-            <div className={`delta ${deltaClass(roomsDelta)}`}>
-              {roomsDelta >= 0 ? "▲" : "▼"} {roomsDelta >= 0 ? "+" : ""}
-              {roomsDelta.toFixed(1).replace(".", ",")}% vs {BASE_YEAR}
-            </div>
+        <div style={{ display: "grid", gap: ".35rem", justifyItems: "end" }}>
+          <div style={{ color: "var(--muted)", fontSize: ".9rem", fontWeight: 700 }}>
+            Filtro global de año
+          </div>
+          <div className="pillRow" style={{ justifyContent: "flex-end", flexWrap: "wrap" }}>
+            {yearsAvailable.map((y) => (
+              <button
+                key={y}
+                type="button"
+                className={`pill ${y === year ? "active" : ""}`}
+                onClick={() => setYear(y)}
+              >
+                {y}
+              </button>
+            ))}
           </div>
 
-          <div className="card">
-            <div className="cardTop">
-              <div className="cardTitle">Room Revenue (USD)</div>
-            </div>
-            <div className="cardValue">{fmtUsd(curJCR.revenue)}</div>
-            <div className={`delta ${deltaClass(revenueDelta)}`}>
-              {revenueDelta >= 0 ? "▲" : "▼"} {revenueDelta >= 0 ? "+" : ""}
-              {revenueDelta.toFixed(1).replace(".", ",")}% vs {BASE_YEAR}
-            </div>
+          <div style={{ color: "var(--muted)", fontSize: ".9rem", fontWeight: 700, marginTop: ".2rem" }}>
+            Año base comparativo
           </div>
-
-          <div className="card">
-            <div className="cardTop">
-              <div className="cardTitle">Huéspedes</div>
-            </div>
-            <div className="cardValue">{fmtInt(curJCR.guests)}</div>
-            <div className={`delta ${deltaClass(guestsDelta)}`}>
-              {guestsDelta >= 0 ? "▲" : "▼"} {guestsDelta >= 0 ? "+" : ""}
-              {guestsDelta.toFixed(1).replace(".", ",")}% vs {BASE_YEAR}
-            </div>
-          </div>
-
-          <div className="card">
-            <div className="cardTop">
-              <div className="cardTitle">Ocupación (p.p.)</div>
-            </div>
-            <div className="cardValue">{fmtPct01(curJCR.occ)}</div>
-            <div className={`delta ${deltaClass(occDelta)}`}>
-              {occDelta >= 0 ? "▲" : "▼"} {occDelta >= 0 ? "+" : ""}
-              {occDelta.toFixed(1).replace(".", ",")} p.p. vs {BASE_YEAR}
-            </div>
+          <div className="pillRow" style={{ justifyContent: "flex-end", flexWrap: "wrap" }}>
+            {yearsAvailable
+              .filter((y) => y !== year)
+              .map((y) => (
+                <button
+                  key={y}
+                  type="button"
+                  className={`pill ${y === baseYear ? "active" : ""}`}
+                  onClick={() => setBaseYear(y)}
+                >
+                  {y}
+                </button>
+              ))}
           </div>
         </div>
       </div>
 
-      {/* =========================
-          3) H&F Explorer – JCR
-         ========================= */}
-      <div style={{ marginTop: "2.25rem" }}>
-        <h3 className="sectionTitle">H&F – Grupo JCR</h3>
-        <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-          Filtros por hotel JCR + año/mes/trimestre. Incluye ranking por mes por hotel.
-        </div>
+      {/* ====== 1) CARROUSELES JCR (grandes, al inicio) ====== */}
+      <div style={{ display: "grid", gap: "1rem" }}>
+        <BigCarousel4
+          title="Grupo JCR — KPIs anuales"
+          subtitle={`Año ${year} vs ${baseYear} · Ocupación: ${occLine.base} → ${occLine.cur} (${occLine.pp})`}
+          kpis={jcrKpis}
+        />
 
-        <div className="cardRow" style={{ marginTop: "1rem" }}>
-          <div className="card" style={{ width: "100%" }}>
-            <HofExplorer
-              title="H&F – Explorador (JCR)"
-              filePath="/data/hf_diario.csv"
-              allowedHotels={JCR_HOTELS}
-              defaultYear={DEFAULT_YEAR}
-            />
+        {hfErr ? (
+          <div className="card" style={{ padding: "1rem" }}>
+            <div className="delta down">{hfErr}</div>
+            <div className="cardNote" style={{ marginTop: ".35rem" }}>
+              Revisá que exista <code>public/data/hf_diario.csv</code> en GitHub/Vercel.
+            </div>
           </div>
+        ) : null}
+      </div>
+
+      {/* ====== 2) COMPARATIVA (título general) ====== */}
+      <div className="card" style={{ padding: "1.15rem", marginTop: "1rem" }}>
+        <div className="cardTitle">Comparativa {year} vs {baseYear}</div>
+        <div className="cardNote" style={{ marginTop: ".35rem" }}>
+          La ocupación se calcula con disponibilidad fija:
+          {" "}
+          Marriott 300/día · Sheraton MDQ 194/día · Sheraton BCR 161/día · Maitei 98/día.
         </div>
       </div>
 
-      {/* =========================
-          4) Membership – JCR
-         ========================= */}
-      <div style={{ marginTop: "2.25rem" }}>
-        <h3 className="sectionTitle">Membership (JCR)</h3>
-        <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-          Distribución y variación interanual (desde Excel).
-        </div>
-
-        <div className="cardRow" style={{ marginTop: "1rem" }}>
-         <MembershipSummary
-  year={year}
-  baseYear={baseYear}
-  hotelsJCR={["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"]}
-  filePath="/data/jcr_membership.xlsx"
-/>
-          />
-        </div>
+      {/* ====== 3) H&F — Explorador JCR ====== */}
+      <div style={{ marginTop: "1rem" }}>
+        <HofExplorer
+          filePath="/data/hf_diario.csv"
+          allowedHotels={JCR_HOTELS}
+          title="H&F — Grupo JCR"
+          defaultYear={year}
+        />
       </div>
 
-      {/* =========================
-          5) Nacionalidades – Marriott
-         ========================= */}
-      <div style={{ marginTop: "2.25rem" }}>
+      {/* ====== 4) MEMBERSHIP (JCR) ====== */}
+      <div style={{ marginTop: "1rem" }}>
+        <MembershipSummary
+          year={year}
+          baseYear={baseYear}
+          allowedHotels={JCR_HOTELS}
+          filePath="/data/jcr_membership.xlsx"
+          title="Membership (JCR)"
+        />
+      </div>
+
+      {/* ====== 5) NACIONALIDADES ======
+          Nota: CountryRanking es TU componente.
+          Lo dejamos usando el filtro global de año si el componente ya lo soporta.
+          Si tu CountryRanking no recibe props, dejalo así.
+      */}
+      <div style={{ marginTop: "1rem" }}>
+        {/* Si tu CountryRanking acepta props year/baseYear, descomentá y ajustá la firma en CountryRanking.tsx */}
+        {/* <CountryRanking year={year} baseYear={baseYear} /> */}
+        <CountryRanking />
+      </div>
+
+      {/* ====== 6) CARROUSELES GOTEL/MAITEI (si querés mostrar) ====== */}
+      <div style={{ marginTop: "1rem" }}>
         <div className="sectionHeader">
           <div>
-            <div className="sectionKicker">Origen de huéspedes</div>
-            <h3 className="sectionTitle">Nacionalidades – Marriott Buenos Aires</h3>
+            <div className="sectionKicker">Gotel Management</div>
+            <h3 className="sectionTitle">Hotel Maitei</h3>
             <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-              Ranking por país + distribución global (mapa). Filtro por año.
+              Bloque independiente del Grupo JCR.
             </div>
           </div>
         </div>
 
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1.2fr)",
-            gap: "1.25rem",
-            alignItems: "stretch",
-            marginTop: "1rem",
-          }}
-        >
-          <CountryRanking year={year} filePath="/data/jcr_nacionalidades.xlsx" />
-          <WorldGuestsMap year={year} filePath="/data/jcr_nacionalidades.xlsx" />
-        </div>
-      </div>
+        {/* Mini resumen Maitei desde el mismo hf_diario */}
+        {useMemo(() => {
+          const cur = calcAgg(hfRows, GOTEL_HOTELS, year);
+          const base = calcAgg(hfRows, GOTEL_HOTELS, baseYear);
+          const dR = base.rooms > 0 ? (cur.rooms / base.rooms - 1) * 100 : 0;
+          const dG = base.guests > 0 ? (cur.guests / base.guests - 1) * 100 : 0;
+          const dV = base.revenue > 0 ? (cur.revenue / base.revenue - 1) * 100 : 0;
+          const dA = base.adr > 0 ? (cur.adr / base.adr - 1) * 100 : 0;
 
-      {/* =========================
-          6) Carrouseles Maitei – GOTEL (abajo)
-         ========================= */}
-      <div style={{ marginTop: "2.75rem" }}>
-        <div className="sectionHeader">
-          <div>
-            <div className="sectionKicker">GOTEL Management</div>
-            <h2 className="sectionTitle">Hotel Maitei · Indicadores clave</h2>
-            <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-              Bloque independiente del Grupo JCR (administración distinta).
-            </div>
-          </div>
-
-          <div className="miniChip" style={{ alignSelf: "flex-end", display: "flex", gap: 10, alignItems: "center" }}>
-            <img src={HOTEL_LOGOS["Maitei"]} alt="Maitei" style={{ width: 28, height: 28, borderRadius: 8 }} />
-            <span style={{ fontWeight: 800 }}>Maitei</span>
-          </div>
-        </div>
-
-        <BigCarousel4 slides={maiteiSlides} />
-      </div>
-
-      {/* =========================
-          7) H&F Explorer – Maitei
-         ========================= */}
-      <div style={{ marginTop: "2.25rem" }}>
-        <h3 className="sectionTitle">H&F – Maitei (GOTEL)</h3>
-        <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-          Filtros por año/mes/trimestre para Maitei. Ocupación calculada por disponibilidad fija (Maitei: 98/día) en tu HofExplorer.
-        </div>
-
-        <div className="cardRow" style={{ marginTop: "1rem" }}>
-          <div className="card" style={{ width: "100%" }}>
-            <HofExplorer
-              title="H&F – Explorador (Maitei)"
-              filePath="/data/hf_diario.csv"
-              allowedHotels={GOTEL_HOTELS}
-              defaultYear={DEFAULT_YEAR}
+          return (
+            <BigCarousel4
+              title="Maitei — KPIs anuales"
+              subtitle={`Año ${year} vs ${baseYear} · Ocupación: ${fmtPct01(base.occ01)} → ${fmtPct01(cur.occ01)} (${fmtPP((cur.occ01 - base.occ01) * 100)})`}
+              kpis={[
+                {
+                  label: "Rooms occupied",
+                  value: fmtInt(cur.rooms),
+                  delta: `${dR >= 0 ? "+" : ""}${dR.toFixed(1).replace(".", ",")}% vs ${baseYear}`,
+                  deltaClass: dR >= 0 ? "up" : "down",
+                  sub: `${fmtInt(base.rooms)} → ${fmtInt(cur.rooms)}`,
+                },
+                {
+                  label: "Room Revenue (USD)",
+                  value: fmtMoney(cur.revenue),
+                  delta: `${dV >= 0 ? "+" : ""}${dV.toFixed(1).replace(".", ",")}% vs ${baseYear}`,
+                  deltaClass: dV >= 0 ? "up" : "down",
+                  sub: `${fmtMoney(base.revenue)} → ${fmtMoney(cur.revenue)}`,
+                },
+                {
+                  label: "Huéspedes",
+                  value: fmtInt(cur.guests),
+                  delta: `${dG >= 0 ? "+" : ""}${dG.toFixed(1).replace(".", ",")}% vs ${baseYear}`,
+                  deltaClass: dG >= 0 ? "up" : "down",
+                  sub: `${fmtInt(base.guests)} → ${fmtInt(cur.guests)}`,
+                },
+                {
+                  label: "ADR (USD)",
+                  value: fmtMoney(cur.adr),
+                  delta: `${dA >= 0 ? "+" : ""}${dA.toFixed(1).replace(".", ",")}% vs ${baseYear}`,
+                  deltaClass: dA >= 0 ? "up" : "down",
+                  sub: `${fmtMoney(base.adr)} → ${fmtMoney(cur.adr)}`,
+                },
+              ]}
             />
-          </div>
-        </div>
+          );
+        }, [hfRows, year, baseYear])}
       </div>
 
-      <div style={{ marginTop: ".9rem", fontSize: ".8rem", color: "var(--muted)" }}>
-        Última actualización (simulada): {lastUpdated}
+      {/* ====== 7) H&F — Explorador Maitei ====== */}
+      <div style={{ marginTop: "1rem" }}>
+        <HofExplorer
+          filePath="/data/hf_diario.csv"
+          allowedHotels={GOTEL_HOTELS}
+          title="H&F — Maitei"
+          defaultYear={year}
+        />
       </div>
     </section>
   );
 }
-
-
-
