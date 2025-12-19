@@ -4,48 +4,69 @@ import { useEffect, useMemo, useState } from "react";
 import { readXlsxFromPublic } from "./xlsxClient";
 
 type Row = {
-  hotel: string;
+  bomboy: string;     // tipo de membresía
+  cantidad: number;   // cantidad
+  fecha?: string;
+  empresa: string;    // hotel
   year: number;
-  month: number;
-  membership: string;
-  qty: number;
 };
 
-function safeNum(v: any) {
+type Props = {
+  year: number;
+  baseYear: number;
+  hotelsJCR: string[];
+  filePath: string;
+  title?: string;
+};
+
+function norm(s: any) {
+  return String(s ?? "").trim();
+}
+
+function toNumber(v: any) {
   const n = Number(String(v ?? "").replace(/\./g, "").replace(",", "."));
   return Number.isFinite(n) ? n : 0;
 }
 
-function parseAnyDate(v: any): Date | null {
-  if (!v && v !== 0) return null;
-  if (v instanceof Date && !isNaN(v.getTime())) return v;
+function yearFromDateAny(v: any): number {
+  // soporta "13/12/2025", "2025-12-13", Date, etc.
+  if (!v) return 0;
+  if (v instanceof Date && !isNaN(v.getTime())) return v.getFullYear();
 
-  if (typeof v === "number" && Number.isFinite(v)) {
-    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
-    const d = new Date(excelEpoch.getTime() + v * 86400000);
-    return isNaN(d.getTime()) ? null : d;
-  }
+  const s = String(v).trim();
 
-  const s = String(v ?? "").trim();
-  if (!s) return null;
+  // dd/mm/yyyy
+  const m1 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m1) return Number(m1[3]);
 
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
-  if (m) {
-    const dd = Number(m[1]);
-    const mm = Number(m[2]);
-    let yy = Number(m[3]);
-    if (yy < 100) yy += 2000;
-    const d2 = new Date(yy, mm - 1, dd);
-    return isNaN(d2.getTime()) ? null : d2;
-  }
+  // yyyy-mm-dd
+  const m2 = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (m2) return Number(m2[1]);
 
-  const d = new Date(s);
-  return isNaN(d.getTime()) ? null : d;
+  // fallback: último bloque de 4 dígitos
+  const m3 = s.match(/(\d{4})/);
+  return m3 ? Number(m3[1]) : 0;
 }
 
-function pctDelta(cur: number, base: number) {
-  if (!base) return null;
-  return ((cur / base) - 1) * 100;
+function membershipColor(name: string) {
+  const n = name.toUpperCase();
+
+  if (n.includes("AMB")) return "#6EC1FF";          // Ambassador celeste
+  if (n.includes("TTM") || n.includes("TIT")) return "#4D4D4D"; // Titanium
+  if (n.includes("PLT") || n.includes("PLAT")) return "#BFC5CC"; // Platinum gris
+  if (n.includes("GLD") || n.includes("GOLD")) return "#D6B44C"; // Gold dorado
+  if (n.includes("SLR") || n.includes("SILV")) return "#A8AEB6"; // Silver gris
+  if (n.includes("MRD") || n.includes("MEMBER")) return "#E53935"; // Member rojo
+
+  return "#7C8AA0";
+}
+
+/** ✅ union keys SIN spread de iteradores */
+function unionKeysFromMaps(cur: Map<string, number>, base: Map<string, number>) {
+  const set = new Set<string>();
+  cur.forEach((_v, k) => set.add(k));
+  base.forEach((_v, k) => set.add(k));
+  return Array.from(set);
 }
 
 export default function MembershipByHotel({
@@ -53,143 +74,156 @@ export default function MembershipByHotel({
   baseYear,
   hotelsJCR,
   filePath,
-}: {
-  year: number;
-  baseYear: number;
-  hotelsJCR: string[];
-  filePath: string;
-}) {
+  title = "Membership por hotel",
+}: Props) {
   const [rows, setRows] = useState<Row[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    let alive = true;
-    setLoading(true);
+    let mounted = true;
+    (async () => {
+      try {
+        setError(null);
+        const json = await readXlsxFromPublic(filePath);
 
-    readXlsxFromPublic(filePath)
-      .then(({ rows }) => {
-        if (!alive) return;
+        // json = array de filas (objetos con keys según encabezados)
+        const parsed: Row[] = (json as any[]).map((r) => {
+          const bomboy = norm(r.Bomboy ?? r.BOMBOY ?? r.Membership ?? r.MEMBERSHIP);
+          const empresa = norm(r.Empresa ?? r.EMPRESA ?? r.Hotel ?? r.HOTEL);
+          const cantidad = toNumber(r.Cantidad ?? r.CANTIDAD ?? r.Qty ?? r.QTY);
+          const fecha = norm(r.Fecha ?? r.FECHA ?? r.Date ?? r.DATE);
 
-        const parsed: Row[] = rows
-          .map((r: any) => {
-            const membership = (r.Bonboy ?? r.bonboy ?? r.Membership ?? "").toString().trim();
-            const qty = safeNum(r.Cantidad ?? r.cantidad ?? r.Qty ?? 0);
-            const hotel = (r.Empresa ?? r.empresa ?? r.Hotel ?? "").toString().trim();
-            const d = parseAnyDate(r.Fecha ?? r.fecha ?? r.Date ?? "");
+          return {
+            bomboy,
+            empresa,
+            cantidad,
+            fecha,
+            year: yearFromDateAny(fecha),
+          };
+        });
 
-            if (!membership || !hotel || !d) return null;
+        // filtro hoteles grupo
+        const filtered = parsed.filter(
+          (r) =>
+            r.bomboy &&
+            r.empresa &&
+            hotelsJCR.includes(r.empresa) &&
+            Number.isFinite(r.cantidad)
+        );
 
-            return {
-              hotel,
-              membership,
-              qty,
-              year: d.getFullYear(),
-              month: d.getMonth() + 1,
-            } as Row;
-          })
-          .filter(Boolean) as Row[];
-
-        setRows(parsed);
-      })
-      .catch((e) => {
-        console.error(e);
-        setRows([]);
-      })
-      .finally(() => setLoading(false));
+        if (mounted) setRows(filtered);
+      } catch (e: any) {
+        if (mounted) setError(e?.message ?? "Error leyendo Excel");
+      }
+    })();
 
     return () => {
-      alive = false;
+      mounted = false;
     };
-  }, [filePath]);
+  }, [filePath, hotelsJCR]);
 
-  const byHotel = useMemo(() => {
-    const pick = (yy: number, hotel: string) =>
-      rows
-        .filter((r) => r.year === yy)
-        .filter((r) => r.hotel === hotel);
+  const perHotel = useMemo(() => {
+    // hotel -> (membership -> qty)
+    const cur = new Map<string, Map<string, number>>();
+    const base = new Map<string, Map<string, number>>();
 
-    const sumFor = (yy: number) => {
-      const map = new Map<string, number>();
-      hotelsJCR.forEach((h) => {
-        pick(yy, h).forEach((r) => map.set(h, (map.get(h) ?? 0) + r.qty));
-      });
-      return map;
-    };
+    function add(map: Map<string, Map<string, number>>, hotel: string, key: string, qty: number) {
+      if (!map.has(hotel)) map.set(hotel, new Map());
+      const m = map.get(hotel)!;
+      m.set(key, (m.get(key) ?? 0) + qty);
+    }
 
-    const cur = sumFor(year);
-    const base = sumFor(baseYear);
+    rows.forEach((r) => {
+      if (r.year === year) add(cur, r.empresa, r.bomboy, r.cantidad);
+      if (r.year === baseYear) add(base, r.empresa, r.bomboy, r.cantidad);
+    });
 
-    // ✅ FIX VERCEL/TS TARGET: no usar spread sobre Map.keys()
-    const hotels = Array.from(
-      new Set([
-        ...Array.from(cur.keys()),
-        ...Array.from(base.keys()),
-      ])
-    );
+    const hotels = Array.from(new Set<string>(hotelsJCR));
 
-    const list = hotels
-      .map((h) => {
-        const curVal = cur.get(h) ?? 0;
-        const baseVal = base.get(h) ?? 0;
-        const d = pctDelta(curVal, baseVal);
-        return { hotel: h, cur: curVal, base: baseVal, deltaPct: d };
-      })
-      .sort((a, b) => b.cur - a.cur);
+    return hotels.map((hotel) => {
+      const curM = cur.get(hotel) ?? new Map<string, number>();
+      const baseM = base.get(hotel) ?? new Map<string, number>();
 
-    return list;
+      const keys = unionKeysFromMaps(curM, baseM);
+
+      const list = keys
+        .map((k) => {
+          const curVal = curM.get(k) ?? 0;
+          const baseVal = baseM.get(k) ?? 0;
+          const diff = curVal - baseVal;
+          const pct = baseVal > 0 ? (diff / baseVal) * 100 : null;
+          return { k, curVal, baseVal, diff, pct };
+        })
+        .sort((a, b) => b.curVal - a.curVal);
+
+      const totalCur = list.reduce((acc, x) => acc + x.curVal, 0);
+      const totalBase = list.reduce((acc, x) => acc + x.baseVal, 0);
+
+      return { hotel, list, totalCur, totalBase };
+    });
   }, [rows, year, baseYear, hotelsJCR]);
 
-  if (loading) {
-    return (
-      <div className="card" style={{ gridColumn: "1 / -1" }}>
-        <div className="cardTitle">Membership por hotel</div>
-        <div className="cardNote">Cargando…</div>
-      </div>
-    );
-  }
-
   return (
-    <div className="card" style={{ gridColumn: "1 / -1", padding: "1.1rem" }}>
-      <div className="cardTitle">Membership por hotel</div>
-      <div className="cardNote">
-        {year} vs {baseYear}
+    <div className="card" style={{ width: "100%" }}>
+      <div className="cardTop">
+        <div className="cardTitle">{title}</div>
+        <div className="cardNote">Comparación {year} vs {baseYear}</div>
       </div>
 
-      <div style={{ marginTop: "1rem", display: "grid", gap: ".6rem" }}>
-        {byHotel.map((x) => (
-          <div
-            key={x.hotel}
-            style={{
-              display: "grid",
-              gridTemplateColumns: "minmax(180px, 1fr) minmax(120px, 160px) minmax(120px, 160px)",
-              gap: ".75rem",
-              alignItems: "center",
-              padding: ".65rem .8rem",
-              border: "1px solid rgba(148,163,184,.22)",
-              borderRadius: 16,
-              background: "rgba(15,23,42,.04)",
-            }}
-          >
-            <div style={{ fontWeight: 800 }}>{x.hotel}</div>
-            <div style={{ fontWeight: 900 }}>{x.cur.toLocaleString("es-AR")}</div>
+      {error && (
+        <div className="delta down" style={{ marginTop: ".75rem" }}>
+          {error}
+        </div>
+      )}
 
-            {x.deltaPct === null ? (
-              <div className="delta">Base sin datos</div>
-            ) : (
-              <div className={`delta ${x.deltaPct >= 0 ? "up" : "down"}`}>
-                {x.deltaPct >= 0 ? "+" : ""}
-                {x.deltaPct.toFixed(1).replace(".", ",")}% vs {baseYear}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "1rem", marginTop: "1rem" }}>
+        {perHotel.map((h) => (
+          <div key={h.hotel} className="card" style={{ margin: 0 }}>
+            <div className="cardTop">
+              <div className="cardTitle">{h.hotel}</div>
+              <div className="cardNote">
+                Total {year}: <strong>{h.totalCur.toLocaleString("es-AR")}</strong>{" "}
+                · {baseYear}: <strong>{h.totalBase.toLocaleString("es-AR")}</strong>
               </div>
-            )}
+            </div>
+
+            <div style={{ display: "grid", gap: ".5rem", marginTop: ".75rem" }}>
+              {h.list.slice(0, 8).map((x) => {
+                const color = membershipColor(x.k);
+                const share = h.totalCur > 0 ? x.curVal / h.totalCur : 0;
+
+                return (
+                  <div key={x.k} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: ".6rem", alignItems: "center" }}>
+                    <div style={{ display: "grid", gap: ".35rem" }}>
+                      <div style={{ display: "flex", gap: ".5rem", alignItems: "center" }}>
+                        <span style={{ width: 10, height: 10, borderRadius: 999, background: color, display: "inline-block" }} />
+                        <div style={{ fontWeight: 700 }}>{x.k}</div>
+                        <div style={{ color: "var(--muted)", fontSize: ".85rem" }}>
+                          {x.curVal.toLocaleString("es-AR")}
+                          {x.baseVal > 0 ? (
+                            <>
+                              {" "}
+                              · Δ {x.diff >= 0 ? "+" : ""}
+                              {x.diff.toLocaleString("es-AR")}
+                              {x.pct != null ? ` (${x.pct >= 0 ? "+" : ""}${x.pct.toFixed(1).replace(".", ",")}%)` : ""}
+                            </>
+                          ) : null}
+                        </div>
+                      </div>
+
+                      <div style={{ height: 10, background: "rgba(255,255,255,.06)", borderRadius: 999, overflow: "hidden" }}>
+                        <div style={{ width: `${Math.max(0, Math.min(1, share)) * 100}%`, height: "100%", background: color }} />
+                      </div>
+                    </div>
+
+                    <div style={{ fontWeight: 800 }}>{Math.round(share * 100)}%</div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         ))}
       </div>
     </div>
   );
 }
-
-
-
-
-
-
