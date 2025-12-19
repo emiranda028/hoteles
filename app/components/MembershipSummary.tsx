@@ -1,302 +1,236 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import * as XLSX from "xlsx";
-
-type RowAny = Record<string, any>;
+import { readXlsxFromPublic } from "./xlsxClient";
 
 type Props = {
-  year: number;               // año activo (global)
-  baseYear: number;           // año base para comparación (ej 2024)
-  hotelsJCR: string[];        // lista de hoteles JCR (strings tal cual Excel)
-  filePath: string;           // "/data/jcr_membership.xlsx"
-  title?: string;             // opcional
+  year: number; // año global (puede venir del comparador)
+  baseYear: number; // año base para variación
+  hotelsJCR: string[]; // lista hoteles JCR (ej: ["MARRIOTT","SHERATON BCR","SHERATON MDQ"])
+  filePath: string; // "/data/jcr_membership.xlsx"
 };
 
-type PeriodMode = "YEAR" | "MONTH";
-
-type MembershipAgg = {
-  key: string;
-  label: string;
-  value: number;
-  share01: number; // 0-1
+type Row = {
+  hotel: string;
+  membership: string;
+  qty: number;
+  date: Date;
+  year: number;
+  month: number; // 1-12
 };
 
-const MONTHS_ES = [
-  "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+type PeriodKey =
+  | "YEAR"
+  | "M01" | "M02" | "M03" | "M04" | "M05" | "M06"
+  | "M07" | "M08" | "M09" | "M10" | "M11" | "M12";
+
+const MONTHS: { key: PeriodKey; label: string; m: number }[] = [
+  { key: "M01", label: "Ene", m: 1 },
+  { key: "M02", label: "Feb", m: 2 },
+  { key: "M03", label: "Mar", m: 3 },
+  { key: "M04", label: "Abr", m: 4 },
+  { key: "M05", label: "May", m: 5 },
+  { key: "M06", label: "Jun", m: 6 },
+  { key: "M07", label: "Jul", m: 7 },
+  { key: "M08", label: "Ago", m: 8 },
+  { key: "M09", label: "Sep", m: 9 },
+  { key: "M10", label: "Oct", m: 10 },
+  { key: "M11", label: "Nov", m: 11 },
+  { key: "M12", label: "Dic", m: 12 },
 ];
 
-const MONTH_SHORT = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
+function norm(s: any) {
+  return String(s ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, " ");
+}
 
-// Colores por membresía (los que “identifican” visualmente cada una)
-const MEMBERSHIP_COLORS: Record<string, string> = {
-  "Member (MRD)": "#ef6a6a",
-  "Gold Elite (GLD)": "#f2b134",
-  "Titanium Elite (TTM)": "#a875ff",
-  "Platinum Elite (PLT)": "#94a3b8",
-  "Silver Elite (SLR)": "#cbd5e1",
-  "Ambassador Elite (AMB)": "#52c3ff",
-};
+function safeNum(v: any) {
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+  const str = String(v ?? "").replace(/\./g, "").replace(",", ".");
+  const n = Number(str);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function toDate(v: any): Date | null {
+  if (!v) return null;
+  if (v instanceof Date) return v;
+  // XLSX a veces trae datetime como string
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
 
 function fmtInt(n: number) {
   return Math.round(n).toLocaleString("es-AR");
 }
-function fmtPct(n: number) {
-  return (n * 100).toFixed(1).replace(".", ",") + "%";
-}
-function safeNum(v: any) {
-  if (v == null) return 0;
-  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
-  const s = String(v).trim().replace(/\./g, "").replace(",", ".");
-  const n = Number(s);
-  return Number.isFinite(n) ? n : 0;
+function fmtPct(n01: number) {
+  return (n01 * 100).toFixed(1).replace(".", ",") + "%";
 }
 
-function normalizeHotel(s: any) {
-  return String(s ?? "").trim().toUpperCase();
+function deltaPct(cur: number, base: number) {
+  if (!base) return 0;
+  return ((cur / base) - 1) * 100;
 }
 
-function normalizeMembership(s: any) {
-  return String(s ?? "").trim();
+function pickSheetName(sheets: Record<string, any[]>): string {
+  // Si existe BonboyVF, priorizarla
+  if (sheets["BonboyVF"]) return "BonboyVF";
+  // Caso contrario, primera hoja
+  return Object.keys(sheets)[0] ?? "Sheet1";
 }
 
-function findFirstKey(obj: RowAny, candidates: string[]) {
-  const keys = Object.keys(obj || {});
-  const found = candidates.find((c) => keys.includes(c));
-  if (found) return found;
+/**
+ * Colores por membresía (códigos del Excel).
+ * Ajustables si querés.
+ */
+const MEM_COLOR: Record<string, { fill: string; faint: string }> = {
+  "MRD": { fill: "#ef6b6b", faint: "rgba(239,107,107,.18)" }, // Member
+  "GLD": { fill: "#f2aa2b", faint: "rgba(242,170,43,.18)" }, // Gold
+  "TTM": { fill: "#a06bf2", faint: "rgba(160,107,242,.18)" }, // Titanium
+  "PLT": { fill: "#93a1b8", faint: "rgba(147,161,184,.20)" }, // Platinum
+  "SLR": { fill: "#c9d2df", faint: "rgba(201,210,223,.35)" }, // Silver
+  "AMB": { fill: "#57c4ff", faint: "rgba(87,196,255,.18)" }, // Ambassador
+};
 
-  // fallback case-insensitive
-  const lower = new Map(keys.map((k) => [k.toLowerCase(), k]));
-  for (const c of candidates) {
-    const hit = lower.get(c.toLowerCase());
-    if (hit) return hit;
-  }
-  return "";
+function membershipLabel(code: string) {
+  const c = norm(code);
+  if (c.includes("MRD") || c.includes("MEM")) return "Member (MRD)";
+  if (c.includes("GLD") || c.includes("GOLD")) return "Gold Elite (GLD)";
+  if (c.includes("TTM") || c.includes("TIT")) return "Titanium Elite (TTM)";
+  if (c.includes("PLT") || c.includes("PLA")) return "Platinum Elite (PLT)";
+  if (c.includes("SLR") || c.includes("SIL")) return "Silver Elite (SLR)";
+  if (c.includes("AMB") || c.includes("AMBASS")) return "Ambassador Elite (AMB)";
+  return c;
 }
 
-function parseExcelDate(value: any): Date | null {
-  if (!value) return null;
-
-  // XLSX puede darte Date directo
-  if (value instanceof Date && !isNaN(value.getTime())) return value;
-
-  // o número serial
-  if (typeof value === "number") {
-    const d = XLSX.SSF.parse_date_code(value);
-    if (d && d.y && d.m && d.d) {
-      return new Date(d.y, d.m - 1, d.d);
-    }
-  }
-
-  // o string tipo "2024-10-22" / "22/10/2024"
-  const s = String(value).trim();
-  // ISO
-  const iso = new Date(s);
-  if (!isNaN(iso.getTime())) return iso;
-
-  // dd/mm/yyyy
-  const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
-  if (m) {
-    const dd = Number(m[1]);
-    const mm = Number(m[2]);
-    let yy = Number(m[3]);
-    if (yy < 100) yy += 2000;
-    const d = new Date(yy, mm - 1, dd);
-    return isNaN(d.getTime()) ? null : d;
-  }
-
-  return null;
+function membershipKey(code: string) {
+  const c = norm(code);
+  // normaliza a los códigos usados en colores
+  if (c.includes("MRD") || c.includes("MEM")) return "MRD";
+  if (c.includes("GLD") || c.includes("GOLD")) return "GLD";
+  if (c.includes("TTM") || c.includes("TIT")) return "TTM";
+  if (c.includes("PLT") || c.includes("PLA")) return "PLT";
+  if (c.includes("SLR") || c.includes("SIL")) return "SLR";
+  if (c.includes("AMB") || c.includes("AMBASS")) return "AMB";
+  // Si viene ya como código raro, lo devolvemos tal cual (pero no tendrá color fijo)
+  return c;
 }
 
-async function readXlsxFromPublic(filePath: string): Promise<RowAny[]> {
-  const res = await fetch(filePath, { cache: "no-store" });
-  if (!res.ok) throw new Error(`No se pudo leer ${filePath} (${res.status})`);
-  const ab = await res.arrayBuffer();
-  const wb = XLSX.read(ab, { type: "array" });
-  const sheetName = wb.SheetNames[0];
-  const ws = wb.Sheets[sheetName];
-  const json = XLSX.utils.sheet_to_json<RowAny>(ws, { defval: null });
-  return json;
+function cardShadow() {
+  return "0 10px 30px rgba(15,23,42,.08)";
 }
 
-function uniqueStrings(list: string[]) {
-  const seen: Record<string, boolean> = {};
-  const out: string[] = [];
-  for (const x of list) {
-    const k = String(x);
-    if (!seen[k]) {
-      seen[k] = true;
-      out.push(k);
-    }
-  }
-  return out;
-}
-
-function sumMap(rows: RowAny[], hotelFilter: string[], year: number, mode: PeriodMode, monthIdx: number | null) {
-  let total = 0;
-  const by = new Map<string, number>();
-
-  // detectar columnas desde primera fila útil
-  const sample = rows.find((r) => r && Object.keys(r).length > 0) || {};
-  const kHotel = findFirstKey(sample, ["Empresa", "Hotel", "HOTEL"]);
-  const kMem = findFirstKey(sample, ["Bonboy", "Membership", "Membresia", "Membresía", "Tipo"]);
-  const kQty = findFirstKey(sample, ["Cantidad", "Qty", "QTY", "Total", "Count"]);
-  const kDate = findFirstKey(sample, ["Fecha", "Date", "FECHA"]);
-
-  for (const r of rows) {
-    const hotel = normalizeHotel(r[kHotel]);
-    if (!hotel) continue;
-    if (hotelFilter.length > 0 && !hotelFilter.includes(hotel)) continue;
-
-    const d = parseExcelDate(r[kDate]);
-    if (!d) continue;
-
-    const y = d.getFullYear();
-    if (y !== year) continue;
-
-    if (mode === "MONTH" && monthIdx != null) {
-      if (d.getMonth() !== monthIdx) continue;
-    }
-
-    const mem = normalizeMembership(r[kMem]);
-    if (!mem) continue;
-
-    const qty = safeNum(r[kQty]);
-    if (qty <= 0) continue;
-
-    total += qty;
-    by.set(mem, (by.get(mem) ?? 0) + qty);
-  }
-
-  return { total, by, detected: { kHotel, kMem, kQty, kDate } };
-}
-
-function buildAgg(by: Map<string, number>, total: number): MembershipAgg[] {
-  const keys = Array.from(by.keys()); // ✅ sin iterators raros
-  const list: MembershipAgg[] = keys
-    .map((k) => {
-      const v = by.get(k) ?? 0;
-      return {
-        key: k,
-        label: k,
-        value: v,
-        share01: total > 0 ? v / total : 0,
-      };
-    })
-    .sort((a, b) => b.value - a.value);
-
-  return list;
-}
-
-function TopPills({
+function Pill({
   active,
-  onChange,
+  onClick,
+  children,
 }: {
-  active: string;
-  onChange: (v: string) => void;
-}) {
-  const pills = ["JCR", "MARRIOTT", "SHERATON BCR", "SHERATON MDQ"];
-  return (
-    <div style={{ display: "flex", gap: ".6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
-      {pills.map((p) => (
-        <button
-          key={p}
-          type="button"
-          className={`pillBtn ${active === p ? "active" : ""}`}
-          onClick={() => onChange(p)}
-        >
-          {p}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function PeriodTabs({
-  mode,
-  monthIdx,
-  onYear,
-  onMonth,
-}: {
-  mode: PeriodMode;
-  monthIdx: number | null;
-  onYear: () => void;
-  onMonth: (m: number) => void;
+  active: boolean;
+  onClick: () => void;
+  children: any;
 }) {
   return (
-    <div className="segTabs">
-      <button type="button" className={`segTab ${mode === "YEAR" ? "active" : ""}`} onClick={onYear}>
-        Año
-      </button>
-      {MONTH_SHORT.map((m, idx) => (
-        <button
-          key={m}
-          type="button"
-          className={`segTab ${mode === "MONTH" && monthIdx === idx ? "active" : ""}`}
-          onClick={() => onMonth(idx)}
-        >
-          {m}
-        </button>
-      ))}
-    </div>
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        border: "1px solid rgba(15,23,42,.12)",
+        padding: ".55rem .9rem",
+        borderRadius: "999px",
+        background: active ? "rgba(15,23,42,.92)" : "white",
+        color: active ? "white" : "rgba(15,23,42,.9)",
+        fontWeight: 700,
+        letterSpacing: ".2px",
+        cursor: "pointer",
+        transition: "transform .08s ease",
+      }}
+      onMouseDown={(e) => (e.currentTarget.style.transform = "scale(.98)")}
+      onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
+      onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}
+    >
+      {children}
+    </button>
   );
 }
 
-function StackedBar({ items }: { items: MembershipAgg[] }) {
-  const totalShare = items.reduce((acc, it) => acc + it.share01, 0);
+function SmallPill({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: any;
+}) {
   return (
-    <div style={{ marginTop: "1rem" }}>
-      <div style={{ fontSize: ".82rem", color: "var(--muted)" }}>Composición</div>
-      <div className="stackBar">
-        {items.map((it) => {
-          const w = totalShare > 0 ? it.share01 / totalShare : 0;
-          const color = MEMBERSHIP_COLORS[it.label] || "#e5e7eb";
-          return (
-            <div
-              key={it.key}
-              title={`${it.label}: ${fmtInt(it.value)} (${fmtPct(it.share01)})`}
-              style={{
-                width: `${Math.max(0, w * 100)}%`,
-                background: color,
-              }}
-            />
-          );
-        })}
-      </div>
-    </div>
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        border: "1px solid rgba(15,23,42,.12)",
+        padding: ".42rem .7rem",
+        borderRadius: "10px",
+        background: active ? "rgba(164,0,27,.92)" : "white",
+        color: active ? "white" : "rgba(15,23,42,.85)",
+        fontWeight: 700,
+        cursor: "pointer",
+        minWidth: "46px",
+      }}
+    >
+      {children}
+    </button>
   );
 }
 
-function BarsList({ items }: { items: MembershipAgg[] }) {
-  const maxVal = items.reduce((m, it) => Math.max(m, it.value), 0) || 1;
+/** Donut SVG */
+function Donut({
+  slices,
+  size = 130,
+  stroke = 16,
+}: {
+  slices: { value: number; color: string }[];
+  size?: number;
+  stroke?: number;
+}) {
+  const total = slices.reduce((a, s) => a + s.value, 0) || 1;
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
 
+  let offset = 0;
   return (
-    <div style={{ marginTop: "1.1rem", display: "grid", gap: ".85rem" }}>
-      {items.map((it) => {
-        const color = MEMBERSHIP_COLORS[it.label] || "#9ca3af";
-        const w = (it.value / maxVal) * 100;
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={r}
+        fill="none"
+        stroke="rgba(15,23,42,.08)"
+        strokeWidth={stroke}
+      />
+      {slices.map((s, i) => {
+        const frac = s.value / total;
+        const dash = frac * c;
+        const dasharray = `${dash} ${c - dash}`;
+        const dashoffset = -offset;
+        offset += dash;
         return (
-          <div key={it.key} className="mRow">
-            <div className="mLabel">
-              <div className="dot" style={{ background: color }} />
-              <div>
-                <div className="mName">{it.label}</div>
-                <div className="mMeta">{fmtPct(it.share01)} del total</div>
-              </div>
-            </div>
-
-            <div className="mBarWrap">
-              <div className="mBarBg">
-                <div className="mBarFill" style={{ width: `${Math.max(0, w)}%`, background: color }} />
-              </div>
-            </div>
-
-            <div className="mValue">{fmtInt(it.value)}</div>
-          </div>
+          <circle
+            key={i}
+            cx={size / 2}
+            cy={size / 2}
+            r={r}
+            fill="none"
+            stroke={s.color}
+            strokeWidth={stroke}
+            strokeLinecap="round"
+            strokeDasharray={dasharray}
+            strokeDashoffset={dashoffset}
+            transform={`rotate(-90 ${size / 2} ${size / 2})`}
+          />
         );
       })}
-    </div>
+    </svg>
   );
 }
 
@@ -305,310 +239,418 @@ export default function MembershipSummary({
   baseYear,
   hotelsJCR,
   filePath,
-  title = "Membership (JCR)",
 }: Props) {
-  const [rows, setRows] = useState<RowAny[] | null>(null);
-  const [err, setErr] = useState<string>("");
+  const [rows, setRows] = useState<Row[]>([]);
+  const [error, setError] = useState<string>("");
 
-  // Filtros UI
-  const [scope, setScope] = useState<"JCR" | "MARRIOTT" | "SHERATON BCR" | "SHERATON MDQ">("JCR");
-  const [mode, setMode] = useState<PeriodMode>("YEAR");
-  const [monthIdx, setMonthIdx] = useState<number | null>(null);
+  // Tabs hotel: JCR (consolidado) + 3 hoteles
+  const allowedHotels = useMemo(() => hotelsJCR.map(norm), [hotelsJCR]);
+  const [scope, setScope] = useState<string>("JCR"); // "JCR" o nombre hotel (MARRIOTT...)
+  const [period, setPeriod] = useState<PeriodKey>("YEAR");
+
+  // Selector de año propio del bloque (se sincroniza con el global cuando cambia)
+  const [localYear, setLocalYear] = useState<number>(year);
+  useEffect(() => setLocalYear(year), [year]);
 
   useEffect(() => {
-    let alive = true;
-    setErr("");
-    readXlsxFromPublic(filePath)
-      .then((data) => {
-        if (!alive) return;
-        setRows(data);
-      })
-      .catch((e: any) => {
-        if (!alive) return;
-        setErr(e?.message || "Error leyendo Excel");
-        setRows([]);
-      });
+    let mounted = true;
+
+    (async () => {
+      try {
+        setError("");
+        const sheets = await readXlsxFromPublic(filePath);
+
+        const sheetName = pickSheetName(sheets);
+        const data = sheets[sheetName] ?? [];
+        if (!data.length) {
+          throw new Error("Excel vacío o sin hojas legibles.");
+        }
+
+        // Normalizamos headers (primera fila es el header)
+        const header = data[0] ?? [];
+        const H = header.map((h: any) => norm(h));
+
+        // Detectar columnas por nombre (tu Excel real: Bonboy, Cantidad, Fecha, Empresa)
+        const idxHotel = H.findIndex((x) => x.includes("EMPRESA") || x.includes("HOTEL"));
+        const idxMem = H.findIndex((x) => x.includes("BONBOY") || x.includes("MEMBERSHIP") || x.includes("MEMB"));
+        const idxQty = H.findIndex((x) => x.includes("CANTIDAD") || x.includes("QTY") || x.includes("CANT"));
+        const idxDate = H.findIndex((x) => x.includes("FECHA") || x.includes("DATE"));
+
+        if (idxHotel < 0 || idxMem < 0 || idxQty < 0 || idxDate < 0) {
+          throw new Error(
+            `Headers no reconocidos. Detecté: hotel=${idxHotel}, membership=${idxMem}, qty=${idxQty}, fecha=${idxDate}`
+          );
+        }
+
+        const parsed: Row[] = [];
+
+        for (let i = 1; i < data.length; i++) {
+          const r = data[i];
+          if (!r || !r.length) continue;
+
+          const hotelRaw = r[idxHotel];
+          const memRaw = r[idxMem];
+          const qtyRaw = r[idxQty];
+          const dateRaw = r[idxDate];
+
+          const hotel = norm(hotelRaw);
+          const membership = norm(memRaw);
+          const qty = safeNum(qtyRaw);
+          const d = toDate(dateRaw);
+
+          if (!hotel || !membership || !qty || !d) continue;
+
+          parsed.push({
+            hotel,
+            membership,
+            qty,
+            date: d,
+            year: d.getFullYear(),
+            month: d.getMonth() + 1,
+          });
+        }
+
+        if (mounted) setRows(parsed);
+      } catch (e: any) {
+        if (mounted) setError(e?.message ?? "Error leyendo Excel.");
+      }
+    })();
+
     return () => {
-      alive = false;
+      mounted = false;
     };
   }, [filePath]);
 
-  const hotelFilter = useMemo(() => {
-    // Normalizamos a MAYÚSCULA para matchear el Excel (que viene MARRIOTT / SHERATON...)
-    const hotelsUpper = hotelsJCR.map((h) => normalizeHotel(h));
+  const yearsAvailable = useMemo(() => {
+    const ys = Array.from(new Set(rows.map((r) => r.year))).sort((a, b) => a - b);
+    return ys;
+  }, [rows]);
 
-    if (scope === "JCR") return hotelsUpper;
-    return [normalizeHotel(scope)];
-  }, [scope, hotelsJCR]);
+  // Si el año global no existe en membership, caer al último disponible
+  useEffect(() => {
+    if (!yearsAvailable.length) return;
+    if (!yearsAvailable.includes(localYear)) {
+      setLocalYear(yearsAvailable[yearsAvailable.length - 1]);
+    }
+  }, [yearsAvailable, localYear]);
 
-  const cur = useMemo(() => {
-    if (!rows) return null;
-    return sumMap(rows, hotelFilter, year, mode, monthIdx);
-  }, [rows, hotelFilter, year, mode, monthIdx]);
+  // Filtrado por scope:
+  // - Si scope === "JCR" => incluir los 3 hoteles JCR
+  // - Si no => un hotel puntual
+  const rowsScope = useMemo(() => {
+    if (scope === "JCR") {
+      return rows.filter((r) => allowedHotels.includes(r.hotel));
+    }
+    return rows.filter((r) => r.hotel === norm(scope));
+  }, [rows, scope, allowedHotels]);
 
-  const base = useMemo(() => {
-    if (!rows) return null;
-    return sumMap(rows, hotelFilter, baseYear, mode, monthIdx);
-  }, [rows, hotelFilter, baseYear, mode, monthIdx]);
+  // Filtrado por año + período
+  const rowsPeriod = useMemo(() => {
+    let list = rowsScope.filter((r) => r.year === localYear);
+    if (period !== "YEAR") {
+      const m = MONTHS.find((x) => x.key === period)?.m ?? 0;
+      list = list.filter((r) => r.month === m);
+    }
+    return list;
+  }, [rowsScope, localYear, period]);
 
-  const curAgg = useMemo(() => {
-    if (!cur) return [];
-    return buildAgg(cur.by, cur.total);
-  }, [cur]);
+  // Base para variación (mismo período, año base)
+  const rowsBase = useMemo(() => {
+    let list = rowsScope.filter((r) => r.year === baseYear);
+    if (period !== "YEAR") {
+      const m = MONTHS.find((x) => x.key === period)?.m ?? 0;
+      list = list.filter((r) => r.month === m);
+    }
+    return list;
+  }, [rowsScope, baseYear, period]);
 
-  const baseAgg = useMemo(() => {
-    if (!base) return [];
-    return buildAgg(base.by, base.total);
-  }, [base]);
+  const sumMap = (list: Row[]) => {
+    const m = new Map<string, number>();
+    for (const r of list) {
+      const k = membershipKey(r.membership);
+      m.set(k, (m.get(k) ?? 0) + r.qty);
+    }
+    return m;
+  };
 
-  const totalCur = cur?.total ?? 0;
-  const totalBase = base?.total ?? 0;
+  const curMap = useMemo(() => sumMap(rowsPeriod), [rowsPeriod]);
+  const baseMap = useMemo(() => sumMap(rowsBase), [rowsBase]);
 
-  const deltaPct = useMemo(() => {
-    if (!totalBase) return null;
-    return ((totalCur / totalBase) - 1) * 100;
-  }, [totalCur, totalBase]);
+  const curTotal = useMemo(() => {
+    let t = 0;
+    curMap.forEach((v) => (t += v));
+    return t;
+  }, [curMap]);
 
-  const scopeLabel =
-    scope === "JCR" ? "Consolidado JCR" : `Membership (${scope})`;
+  const baseTotal = useMemo(() => {
+    let t = 0;
+    baseMap.forEach((v) => (t += v));
+    return t;
+  }, [baseMap]);
 
+  const totalDelta = useMemo(() => deltaPct(curTotal, baseTotal), [curTotal, baseTotal]);
+
+  // Lista ordenada por qty desc
+  const list = useMemo(() => {
+    const keys = Array.from(
+      new Set<string>([...Array.from(curMap.keys()), ...Array.from(baseMap.keys())])
+    );
+
+    const items = keys
+      .map((k) => {
+        const cur = curMap.get(k) ?? 0;
+        const base = baseMap.get(k) ?? 0;
+        const share = curTotal ? cur / curTotal : 0;
+        return {
+          key: k,
+          label: membershipLabel(k),
+          cur,
+          base,
+          share,
+          color: MEM_COLOR[k]?.fill ?? "rgba(15,23,42,.45)",
+          faint: MEM_COLOR[k]?.faint ?? "rgba(15,23,42,.10)",
+        };
+      })
+      .filter((x) => x.cur > 0 || x.base > 0)
+      .sort((a, b) => b.cur - a.cur);
+
+    return items;
+  }, [curMap, baseMap, curTotal]);
+
+  const donutSlices = useMemo(() => {
+    return list.map((x) => ({ value: x.cur, color: x.color }));
+  }, [list]);
+
+  const titleScope = scope === "JCR" ? "Consolidado JCR" : `Membership (${scope})`;
   const periodLabel =
-    mode === "YEAR"
-      ? `Acumulado ${year} · vs ${baseYear}`
-      : `${MONTHS_ES[monthIdx ?? 0]} ${year} · vs ${MONTHS_ES[monthIdx ?? 0]} ${baseYear}`;
-
-  const hasData = totalCur > 0;
+    period === "YEAR" ? "Acumulado" : `Mes ${MONTHS.find((m) => m.key === period)?.label ?? ""}`;
 
   return (
     <section className="section" style={{ marginTop: "2.5rem" }}>
-      <div className="sectionHeader" style={{ alignItems: "center" }}>
+      <div className="sectionHeader">
         <div>
           <div className="sectionKicker">Fidelización</div>
-          <h3 className="sectionTitle">{title}</h3>
+          <h3 className="sectionTitle">Membership (JCR)</h3>
           <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-            {scopeLabel} — {periodLabel}
+            {titleScope} — {periodLabel} {localYear} · vs {baseYear}
           </div>
         </div>
-
-        <TopPills active={scope} onChange={(v) => setScope(v as any)} />
       </div>
 
-      <div className="card" style={{ marginTop: "1rem" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap" }}>
-          <div>
-            <div className="cardTitle">{scopeLabel}</div>
-            <div className="cardNote">{periodLabel}</div>
-          </div>
+      {/* Tabs de scope: JCR + hoteles */}
+      <div
+        style={{
+          display: "flex",
+          gap: ".6rem",
+          flexWrap: "wrap",
+          justifyContent: "flex-end",
+          marginTop: "-3.1rem",
+        }}
+      >
+        <Pill active={scope === "JCR"} onClick={() => setScope("JCR")}>JCR</Pill>
+        {allowedHotels.map((h) => (
+          <Pill key={h} active={scope === h} onClick={() => setScope(h)}>
+            {h}
+          </Pill>
+        ))}
+      </div>
 
-          <PeriodTabs
-            mode={mode}
-            monthIdx={monthIdx}
-            onYear={() => {
-              setMode("YEAR");
-              setMonthIdx(null);
-            }}
-            onMonth={(m) => {
-              setMode("MONTH");
-              setMonthIdx(m);
-            }}
-          />
-        </div>
-
-        {err ? (
-          <div style={{ marginTop: "1rem", color: "#b91c1c" }}>{err}</div>
-        ) : !rows ? (
-          <div style={{ marginTop: "1rem", color: "var(--muted)" }}>Cargando…</div>
+      {/* Selector de año */}
+      <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", marginTop: "1rem" }}>
+        {yearsAvailable.length ? (
+          yearsAvailable
+            .slice()
+            .sort((a, b) => b - a)
+            .map((y) => (
+              <Pill key={y} active={localYear === y} onClick={() => setLocalYear(y)}>
+                {y}
+              </Pill>
+            ))
         ) : (
-          <div className="mGrid">
-            {/* Columna izquierda: Total */}
-            <div className="mTotalCard">
-              <div className="mTotalLabel">Total</div>
-              <div className="mTotalValue">{hasData ? fmtInt(totalCur) : "—"}</div>
-
-              {deltaPct == null ? (
-                <div className="mDelta muted">Sin base {baseYear}</div>
-              ) : (
-                <div className={`mDelta ${deltaPct >= 0 ? "up" : "down"}`}>
-                  {deltaPct >= 0 ? "+" : ""}
-                  {deltaPct.toFixed(1).replace(".", ",")}% vs {baseYear}
-                </div>
-              )}
-
-              {hasData && curAgg.length > 0 && <StackedBar items={curAgg} />}
-            </div>
-
-            {/* Columna derecha: barras por membresía */}
-            <div>
-              {!hasData ? (
-                <div style={{ color: "var(--muted)", marginTop: ".5rem" }}>
-                  Sin datos para {scope} en {year}
-                  {mode === "MONTH" && monthIdx != null ? ` (${MONTHS_ES[monthIdx]})` : ""}.
-                </div>
-              ) : (
-                <BarsList items={curAgg} />
-              )}
-
-              {/* Debug suave por si vuelve a fallar por headers */}
-              {!hasData && rows?.length ? (
-                <div style={{ marginTop: "1rem", fontSize: ".82rem", color: "var(--muted)" }}>
-                  <div><strong>Diagnóstico:</strong> si el año existe pero igual dice “sin datos”, suele ser Fecha vacía/no-fecha o Empresa no coincide.</div>
-                  <div style={{ marginTop: ".35rem" }}>
-                    <strong>Detectado:</strong>{" "}
-                    hotel={cur?.detected.kHotel || "—"} · membership={cur?.detected.kMem || "—"} · qty={cur?.detected.kQty || "—"} · fecha={cur?.detected.kDate || "—"}
-                  </div>
-                </div>
-              ) : null}
-            </div>
+          <div style={{ color: "var(--muted)", fontSize: ".95rem" }}>
+            {error ? `Error: ${error}` : "Cargando Excel…"}
           </div>
         )}
       </div>
 
-      {/* estilos locales del componente (para que no dependas de tocar globals.css) */}
-      <style jsx>{`
-        .pillBtn{
-          border: 1px solid rgba(0,0,0,.08);
-          background: #fff;
-          padding: .55rem .9rem;
-          border-radius: 999px;
-          font-weight: 650;
-          letter-spacing: .2px;
-          transition: transform .06s ease, background .15s ease, border-color .15s ease;
-        }
-        .pillBtn:hover{ transform: translateY(-1px); }
-        .pillBtn.active{
-          background: #111;
-          color: #fff;
-          border-color: transparent;
-        }
+      {/* Selector de período (Año + meses) */}
+      <div
+        style={{
+          marginTop: "1rem",
+          background: "white",
+          border: "1px solid rgba(15,23,42,.08)",
+          borderRadius: "999px",
+          padding: ".55rem",
+          display: "flex",
+          gap: ".35rem",
+          flexWrap: "wrap",
+          justifyContent: "flex-end",
+        }}
+      >
+        <SmallPill active={period === "YEAR"} onClick={() => setPeriod("YEAR")}>
+          Año
+        </SmallPill>
+        {MONTHS.map((m) => (
+          <SmallPill key={m.key} active={period === m.key} onClick={() => setPeriod(m.key)}>
+            {m.label}
+          </SmallPill>
+        ))}
+      </div>
 
-        .segTabs{
-          display: flex;
-          gap: .35rem;
-          flex-wrap: wrap;
-          align-items: center;
-          padding: .35rem;
-          border: 1px solid rgba(0,0,0,.08);
-          border-radius: 999px;
-          background: rgba(0,0,0,.02);
-        }
-        .segTab{
-          border: 0;
-          background: transparent;
-          padding: .5rem .75rem;
-          border-radius: 999px;
-          color: #6b7280;
-          font-weight: 650;
-          transition: background .15s ease, color .15s ease;
-        }
-        .segTab.active{
-          background: #9f1239; /* bordó elegante */
-          color: #fff;
-        }
+      {/* Card grande */}
+      <div
+        style={{
+          marginTop: "1rem",
+          background: "white",
+          border: "1px solid rgba(15,23,42,.08)",
+          borderRadius: "24px",
+          boxShadow: cardShadow(),
+          padding: "1.6rem",
+        }}
+      >
+        {/* Si no hay datos, mostrar diagnóstico corto */}
+        {yearsAvailable.length > 0 && curTotal === 0 ? (
+          <div style={{ color: "rgba(15,23,42,.78)", fontSize: "1rem" }}>
+            <div style={{ fontWeight: 800, marginBottom: ".35rem" }}>
+              Sin datos para {scope === "JCR" ? "JCR" : scope} en {localYear}.
+            </div>
+            <div style={{ color: "rgba(15,23,42,.62)" }}>
+              Años disponibles: {yearsAvailable.join(", ")}
+            </div>
+          </div>
+        ) : null}
 
-        .mGrid{
-          display: grid;
-          grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
-          gap: 1.25rem;
-          margin-top: 1.25rem;
-          align-items: start;
-        }
-        @media (max-width: 980px){
-          .mGrid{ grid-template-columns: 1fr; }
-        }
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "minmax(0, 420px) minmax(0, 1fr)",
+            gap: "1.3rem",
+            alignItems: "stretch",
+          }}
+        >
+          {/* Left: Total + donut */}
+          <div
+            style={{
+              borderRadius: "18px",
+              border: "1px solid rgba(15,23,42,.08)",
+              padding: "1.1rem 1.2rem",
+              background: "linear-gradient(180deg, rgba(15,23,42,.02), rgba(15,23,42,.00))",
+            }}
+          >
+            <div style={{ color: "rgba(15,23,42,.62)", fontWeight: 700 }}>Total</div>
 
-        .mTotalCard{
-          border: 1px solid rgba(0,0,0,.06);
-          background: rgba(0,0,0,.02);
-          border-radius: 18px;
-          padding: 1.2rem;
-        }
-        .mTotalLabel{
-          font-size: 1.05rem;
-          color: #6b7280;
-          font-weight: 650;
-        }
-        .mTotalValue{
-          font-size: 3.2rem;
-          line-height: 1;
-          font-weight: 850;
-          margin-top: .55rem;
-          color: #111827;
-        }
-        .mDelta{
-          display: inline-flex;
-          margin-top: .85rem;
-          padding: .45rem .7rem;
-          border-radius: 999px;
-          font-weight: 750;
-          border: 1px solid rgba(0,0,0,.08);
-          background: #fff;
-        }
-        .mDelta.up{ color: #0f766e; border-color: rgba(15,118,110,.25); background: rgba(15,118,110,.08); }
-        .mDelta.down{ color: #b91c1c; border-color: rgba(185,28,28,.25); background: rgba(185,28,28,.08); }
-        .mDelta.muted{ color: #6b7280; background: rgba(0,0,0,.02); }
+            <div
+              style={{
+                fontSize: "4rem",
+                fontWeight: 900,
+                marginTop: ".35rem",
+                letterSpacing: "-1px",
+                color: "rgba(15,23,42,.95)",
+              }}
+            >
+              {fmtInt(curTotal)}
+            </div>
 
-        .stackBar{
-          height: 12px;
-          border-radius: 999px;
-          overflow: hidden;
-          display: flex;
-          background: rgba(0,0,0,.06);
-          border: 1px solid rgba(0,0,0,.06);
-          margin-top: .35rem;
-        }
+            <div
+              style={{
+                display: "inline-flex",
+                gap: ".5rem",
+                alignItems: "center",
+                marginTop: ".6rem",
+                padding: ".45rem .75rem",
+                borderRadius: "999px",
+                border: "1px solid rgba(16,185,129,.35)",
+                background: "rgba(16,185,129,.10)",
+                color: "rgba(5,150,105,.95)",
+                fontWeight: 900,
+              }}
+            >
+              {totalDelta >= 0 ? "+" : ""}
+              {totalDelta.toFixed(1).replace(".", ",")}% vs {baseYear}
+            </div>
 
-        .mRow{
-          display: grid;
-          grid-template-columns: minmax(220px, 320px) minmax(0, 1fr) 90px;
-          gap: .9rem;
-          align-items: center;
-        }
-        @media (max-width: 640px){
-          .mRow{ grid-template-columns: 1fr; }
-        }
+            <div style={{ marginTop: "1rem", display: "flex", gap: "1rem", alignItems: "center" }}>
+              <Donut slices={donutSlices} />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 900, marginBottom: ".35rem" }}>Composición</div>
+                <div style={{ color: "rgba(15,23,42,.62)", fontSize: ".95rem" }}>
+                  Participación de cada categoría en el período seleccionado.
+                </div>
+              </div>
+            </div>
+          </div>
 
-        .mLabel{
-          display: flex;
-          gap: .8rem;
-          align-items: center;
-        }
-        .dot{
-          width: 12px;
-          height: 12px;
-          border-radius: 999px;
-          flex: 0 0 auto;
-          box-shadow: 0 0 0 3px rgba(0,0,0,.04);
-        }
-        .mName{
-          font-weight: 780;
-          color: #111827;
-        }
-        .mMeta{
-          font-size: .82rem;
-          color: #6b7280;
-          margin-top: .15rem;
-        }
+          {/* Right: barras */}
+          <div style={{ padding: ".25rem .15rem" }}>
+            <div style={{ fontWeight: 900, fontSize: "1.05rem", marginBottom: ".75rem" }}>
+              Distribución por categoría
+            </div>
 
-        .mBarWrap{ width: 100%; }
-        .mBarBg{
-          height: 12px;
-          border-radius: 999px;
-          background: rgba(0,0,0,.06);
-          overflow: hidden;
-          border: 1px solid rgba(0,0,0,.06);
-        }
-        .mBarFill{
-          height: 100%;
-          border-radius: 999px;
-          transition: width .35s ease;
-        }
-        .mValue{
-          text-align: right;
-          font-weight: 800;
-          color: #111827;
-          font-variant-numeric: tabular-nums;
-        }
-      `}</style>
+            <div style={{ display: "grid", gap: ".9rem" }}>
+              {list.map((x) => {
+                const w = Math.max(0, Math.min(100, x.share * 100));
+                return (
+                  <div
+                    key={x.key}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "280px minmax(0, 1fr) 110px",
+                      gap: "1rem",
+                      alignItems: "center",
+                    }}
+                  >
+                    <div style={{ display: "flex", flexDirection: "column", gap: ".12rem" }}>
+                      <div style={{ fontWeight: 900, color: "rgba(15,23,42,.92)" }}>
+                        {x.label}
+                      </div>
+                      <div style={{ color: "rgba(15,23,42,.62)", fontWeight: 700 }}>
+                        {fmtPct(x.share)} del total
+                      </div>
+                    </div>
+
+                    <div
+                      style={{
+                        height: "12px",
+                        borderRadius: "999px",
+                        background: "rgba(15,23,42,.08)",
+                        overflow: "hidden",
+                        position: "relative",
+                      }}
+                    >
+                      <div
+                        style={{
+                          height: "100%",
+                          width: `${w}%`,
+                          background: x.color,
+                          borderRadius: "999px",
+                        }}
+                      />
+                      {/* faint overlay */}
+                      <div
+                        style={{
+                          position: "absolute",
+                          inset: 0,
+                          background:
+                            "linear-gradient(90deg, rgba(255,255,255,.22), rgba(255,255,255,0))",
+                          pointerEvents: "none",
+                        }}
+                      />
+                    </div>
+
+                    <div style={{ textAlign: "right", fontWeight: 900, color: "rgba(15,23,42,.9)" }}>
+                      {fmtInt(x.cur)}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ marginTop: "1.1rem", color: "rgba(15,23,42,.55)", fontSize: ".9rem" }}>
+              Tip: podés alternar “Año” y meses para ver estacionalidad por hotel o consolidado.
+            </div>
+          </div>
+        </div>
+      </div>
     </section>
   );
 }
