@@ -1,287 +1,648 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { readXlsxFromPublic } from "./xlsxClient";
 
-type Row = {
-  hotel: string;
-  membership: string;
-  qty: number;
-  year: number;
-  month: number;
-};
-
-type CompareMode = "FULL_YEAR" | "SAME_PERIOD";
-
-// Normalización Empresa -> Hotel canónico (Excel)
-const COMPANY_MAP: Record<string, string> = {
-  MARRIOTT: "Marriott Buenos Aires",
-  "SHERATON MDQ": "Sheraton Mar del Plata",
-  "SHERATON BCR": "Sheraton Bariloche",
-};
-
-function safeNum(v: any) {
-  if (v === null || v === undefined) return 0;
-  const s = String(v).trim();
-  if (!s) return 0;
-  const norm = s.replace(/\./g, "").replace(",", ".");
-  const n = Number(norm);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function parseAnyDate(v: any): Date | null {
-  if (!v) return null;
-  if (v instanceof Date && !isNaN(v.getTime())) return v;
-
-  const s = String(v).trim();
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
-  if (m) {
-    const dd = Number(m[1]);
-    const mm = Number(m[2]);
-    let yy = Number(m[3]);
-    if (yy < 100) yy += 2000;
-    const d = new Date(yy, mm - 1, dd);
-    return isNaN(d.getTime()) ? null : d;
-  }
-
-  const d2 = new Date(s);
-  return isNaN(d2.getTime()) ? null : d2;
-}
-
-function fmtInt(n: number) {
-  return (Number.isFinite(n) ? n : 0).toLocaleString("es-AR");
-}
-
-function fmtPct(x: number) {
-  if (!Number.isFinite(x)) return "—";
-  return `${(x * 100).toFixed(1).replace(".", ",")}%`;
-}
-
-function deltaPct(cur: number, base: number) {
-  if (!base) return null;
-  return ((cur / base) - 1) * 100;
-}
-
-function deltaClass(d: number | null) {
-  if (d === null) return "";
-  if (d > 0) return "up";
-  if (d < 0) return "down";
-  return "";
-}
-
-function normalizeMembershipKey(raw: string) {
-  const s = (raw ?? "").toString().toUpperCase();
-  if (s.includes("(AMB)") || s.includes("AMBASSADOR")) return "AMB";
-  if (s.includes("(TTM)") || s.includes("TITANIUM")) return "TTM";
-  if (s.includes("(PLT)") || s.includes("PLATINUM")) return "PLT";
-  if (s.includes("(GLD)") || s.includes("GOLD")) return "GLD";
-  if (s.includes("(SLR)") || s.includes("SILVER")) return "SLR";
-  if (s.includes("(MRD)") || s.includes("MEMBER")) return "MRD";
-  return "OTH";
-}
-
-function membershipClass(raw: string) {
-  const k = normalizeMembershipKey(raw);
-  if (k === "AMB") return "mchip m-amb";
-  if (k === "TTM") return "mchip m-ttm";
-  if (k === "PLT") return "mchip m-plt";
-  if (k === "GLD") return "mchip m-gld";
-  if (k === "SLR") return "mchip m-slr";
-  if (k === "MRD") return "mchip m-mrd";
-  return "mchip m-oth";
-}
-
-export default function MembershipSummary({
-  year,
-  baseYear,
-  hotelsJCR,
-  filePath = "/data/jcr_membership.xlsx",
-}: {
+type Props = {
   year: number;
   baseYear: number;
   hotelsJCR: string[];
-  filePath?: string;
+  filePath: string; // "/data/jcr_membership.xlsx"
+};
+
+type Row = {
+  year: number;
+  hotel: string;
+  segment: string; // membership tier
+  count: number;
+};
+
+const fmtInt = (n: number) => Math.round(n).toLocaleString("es-AR");
+
+function norm(s: any) {
+  return String(s ?? "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function pickHeaderIndex(headers: string[], candidates: string[]) {
+  // exact or contains
+  for (const c of candidates) {
+    const i = headers.findIndex((h) => h === c);
+    if (i >= 0) return i;
+  }
+  for (const c of candidates) {
+    const i = headers.findIndex((h) => h.includes(c));
+    if (i >= 0) return i;
+  }
+  return -1;
+}
+
+async function readXlsxFromPublic(filePath: string): Promise<Row[]> {
+  // Lazy import so build stays lighter
+  const XLSX = await import("xlsx");
+
+  const res = await fetch(filePath, { cache: "no-store" });
+  if (!res.ok) throw new Error(`No pude leer ${filePath} (HTTP ${res.status})`);
+
+  const ab = await res.arrayBuffer();
+  const wb = XLSX.read(ab, { type: "array" });
+
+  const out: Row[] = [];
+
+  for (const sheetName of wb.SheetNames) {
+    const ws = wb.Sheets[sheetName];
+    if (!ws) continue;
+
+    // Array of arrays
+    const aoa: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true }) as any[][];
+    if (!aoa || aoa.length < 2) continue;
+
+    // find header row: first row with at least 3 non-empty cells
+    let headerRowIdx = 0;
+    for (let r = 0; r < Math.min(10, aoa.length); r++) {
+      const filled = (aoa[r] || []).filter((x) => String(x ?? "").trim() !== "").length;
+      if (filled >= 3) {
+        headerRowIdx = r;
+        break;
+      }
+    }
+
+    const headersRaw = aoa[headerRowIdx] || [];
+    const headers = headersRaw.map((h) => norm(h));
+
+    const idxYear =
+      pickHeaderIndex(headers, ["ano", "anio", "year", "fecha", "periodo"]) ??
+      -1;
+    const idxHotel =
+      pickHeaderIndex(headers, ["hotel", "property", "empresa", "unidad", "establecimiento"]) ??
+      -1;
+    const idxSeg =
+      pickHeaderIndex(headers, ["membership", "membresia", "membresia/tier", "tier", "level", "categoria", "segmento"]) ??
+      -1;
+    const idxCount =
+      pickHeaderIndex(headers, ["count", "cantidad", "members", "miembros", "socios", "qty", "total"]) ??
+      -1;
+
+    // If not enough, skip sheet (but we try best effort)
+    if (idxHotel < 0 || idxSeg < 0 || idxCount < 0) continue;
+
+    for (let r = headerRowIdx + 1; r < aoa.length; r++) {
+      const row = aoa[r] || [];
+      const hotel = String(row[idxHotel] ?? "").trim();
+      const segment = String(row[idxSeg] ?? "").trim();
+      const rawCount = row[idxCount];
+
+      if (!hotel || !segment) continue;
+
+      const count =
+        typeof rawCount === "number"
+          ? rawCount
+          : Number(String(rawCount ?? "").replace(/\./g, "").replace(",", "."));
+
+      if (!Number.isFinite(count)) continue;
+
+      // year parse: if missing, try infer from sheet name or ignore
+      let y = 0;
+      if (idxYear >= 0) {
+        const rawYear = row[idxYear];
+        const s = String(rawYear ?? "").trim();
+        // If date-like "1/6/2024", try last 4 digits
+        const m = s.match(/(20\d{2})/);
+        y = m ? Number(m[1]) : Number(s);
+      }
+      if (!y || !Number.isFinite(y)) {
+        const m2 = sheetName.match(/(20\d{2})/);
+        y = m2 ? Number(m2[1]) : 0;
+      }
+      if (!y) continue;
+
+      out.push({
+        year: y,
+        hotel,
+        segment,
+        count,
+      });
+    }
+  }
+
+  return out;
+}
+
+function groupSum(rows: Row[]) {
+  const m = new Map<string, number>();
+  for (const r of rows) {
+    m.set(r.segment, (m.get(r.segment) ?? 0) + r.count);
+  }
+  return m;
+}
+
+function totalOf(map: Map<string, number>) {
+  let t = 0;
+  for (const v of map.values()) t += v;
+  return t;
+}
+
+function topN(map: Map<string, number>, n = 8) {
+  const list = Array.from(map.entries()).sort((a, b) => b[1] - a[1]);
+  return list.slice(0, n);
+}
+
+function Donut({
+  data,
+  title,
+}: {
+  data: { name: string; value: number }[];
+  title: string;
 }) {
+  const total = data.reduce((s, d) => s + d.value, 0) || 1;
+
+  // Build conic-gradient stops (no hard-coded colors; uses CSS variables palette-like)
+  // We cycle through a small set of CSS color vars already in your theme (fallback to rgba)
+  const palette = [
+    "rgba(96,165,250,.9)",
+    "rgba(34,197,94,.9)",
+    "rgba(168,85,247,.9)",
+    "rgba(245,158,11,.9)",
+    "rgba(248,113,113,.9)",
+    "rgba(20,184,166,.9)",
+    "rgba(236,72,153,.9)",
+    "rgba(148,163,184,.9)",
+  ];
+
+  let acc = 0;
+  const stops: string[] = [];
+  data.forEach((d, i) => {
+    const start = (acc / total) * 360;
+    acc += d.value;
+    const end = (acc / total) * 360;
+    const color = palette[i % palette.length];
+    stops.push(`${color} ${start.toFixed(1)}deg ${end.toFixed(1)}deg`);
+  });
+
+  const bg = `conic-gradient(${stops.join(",")})`;
+
+  return (
+    <div className="memCard">
+      <div className="memCardHead">
+        <div className="memCardTitle">{title}</div>
+      </div>
+
+      <div className="donutWrap">
+        <div className="donut" style={{ background: bg }} />
+        <div className="donutCenter">
+          <div className="donutBig">{fmtInt(total)}</div>
+          <div className="donutCap">Total</div>
+        </div>
+      </div>
+
+      <div className="legend">
+        {data.map((d, i) => (
+          <div className="legRow" key={d.name}>
+            <span className="swatch" style={{ background: palette[i % palette.length] }} />
+            <span className="legName">{d.name}</span>
+            <span className="legVal">{fmtInt(d.value)}</span>
+          </div>
+        ))}
+      </div>
+
+      <style jsx>{`
+        .donutWrap {
+          position: relative;
+          width: 100%;
+          display: flex;
+          justify-content: center;
+          margin-top: 10px;
+          margin-bottom: 10px;
+        }
+        .donut {
+          width: 170px;
+          height: 170px;
+          border-radius: 999px;
+          box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08), 0 14px 30px rgba(0, 0, 0, 0.18);
+          position: relative;
+        }
+        .donut::after {
+          content: "";
+          position: absolute;
+          inset: 22px;
+          background: rgba(12, 14, 20, 0.9);
+          border-radius: 999px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .donutCenter {
+          position: absolute;
+          inset: 0;
+          display: grid;
+          place-items: center;
+          pointer-events: none;
+        }
+        .donutBig {
+          font-weight: 900;
+          font-size: 26px;
+          color: rgba(255, 255, 255, 0.95);
+          letter-spacing: -0.5px;
+          margin-top: -6px;
+        }
+        .donutCap {
+          font-size: 12px;
+          color: rgba(255, 255, 255, 0.65);
+          margin-top: -10px;
+        }
+        .legend {
+          margin-top: 8px;
+          display: grid;
+          gap: 8px;
+        }
+        .legRow {
+          display: grid;
+          grid-template-columns: 14px 1fr auto;
+          gap: 10px;
+          align-items: center;
+          padding: 8px 10px;
+          border-radius: 12px;
+          background: rgba(255, 255, 255, 0.04);
+          border: 1px solid rgba(255, 255, 255, 0.06);
+        }
+        .swatch {
+          width: 10px;
+          height: 10px;
+          border-radius: 3px;
+        }
+        .legName {
+          font-weight: 700;
+          color: rgba(255, 255, 255, 0.82);
+          font-size: 13px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .legVal {
+          font-weight: 900;
+          color: rgba(255, 255, 255, 0.92);
+          font-size: 13px;
+        }
+      `}</style>
+    </div>
+  );
+}
+
+function Bars({
+  data,
+  title,
+}: {
+  data: { name: string; value: number }[];
+  title: string;
+}) {
+  const max = Math.max(1, ...data.map((d) => d.value));
+  return (
+    <div className="memCard">
+      <div className="memCardHead">
+        <div className="memCardTitle">{title}</div>
+      </div>
+
+      <div className="bars">
+        {data.map((d) => (
+          <div className="barRow" key={d.name}>
+            <div className="barName">{d.name}</div>
+            <div className="barTrack">
+              <div
+                className="barFill"
+                style={{ width: `${(d.value / max) * 100}%` }}
+                aria-label={`${d.name}: ${d.value}`}
+              />
+            </div>
+            <div className="barVal">{fmtInt(d.value)}</div>
+          </div>
+        ))}
+      </div>
+
+      <style jsx>{`
+        .bars {
+          margin-top: 10px;
+          display: grid;
+          gap: 10px;
+        }
+        .barRow {
+          display: grid;
+          grid-template-columns: 1fr 1.4fr auto;
+          gap: 12px;
+          align-items: center;
+          padding: 10px 12px;
+          border-radius: 14px;
+          background: rgba(255, 255, 255, 0.04);
+          border: 1px solid rgba(255, 255, 255, 0.06);
+        }
+        .barName {
+          font-weight: 800;
+          font-size: 13px;
+          color: rgba(255, 255, 255, 0.85);
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .barTrack {
+          height: 10px;
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.08);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          overflow: hidden;
+        }
+        .barFill {
+          height: 100%;
+          border-radius: 999px;
+          background: linear-gradient(
+            90deg,
+            rgba(96, 165, 250, 0.9),
+            rgba(168, 85, 247, 0.85)
+          );
+        }
+        .barVal {
+          font-weight: 900;
+          font-size: 13px;
+          color: rgba(255, 255, 255, 0.92);
+        }
+      `}</style>
+    </div>
+  );
+}
+
+export default function MembershipSummary({ year, baseYear, hotelsJCR, filePath }: Props) {
   const [rows, setRows] = useState<Row[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  // selector de mes en pantalla (Año o un mes específico)
-  const [month, setMonth] = useState<number | "ALL">("ALL");
-
-  // modo comparación (por si baseYear está incompleto)
-  const [compareMode, setCompareMode] = useState<CompareMode>("SAME_PERIOD");
+  const [err, setErr] = useState<string>("");
 
   useEffect(() => {
     let alive = true;
-    setLoading(true);
-
+    setErr("");
     readXlsxFromPublic(filePath)
-      .then(({ rows }) => {
+      .then((r) => {
         if (!alive) return;
-
-        const parsed: Row[] = (rows as any[])
-          .map((r: any) => {
-            const membership = (r.Bonboy ?? r.bonboy ?? r.Membership ?? "").toString().trim();
-            const qty = safeNum(r.Cantidad ?? r.cantidad ?? r.Qty ?? r.Cant ?? 0);
-
-            const rawCompany = (r.Empresa ?? r.empresa ?? r.Hotel ?? "")
-              .toString()
-              .trim()
-              .toUpperCase();
-
-            const hotel = COMPANY_MAP[rawCompany] ?? "";
-            const d = parseAnyDate(r.Fecha ?? r.fecha ?? r.Date ?? r.Dia ?? r.Día);
-
-            if (!membership || !hotel || !d) return null;
-
-            return {
-              hotel,
-              membership,
-              qty,
-              year: d.getFullYear(),
-              month: d.getMonth() + 1,
-            } as Row;
-          })
-          .filter(Boolean) as Row[];
-
-        setRows(parsed);
+        setRows(r);
       })
-      .catch((err) => {
-        console.error("MembershipSummary error:", err);
+      .catch((e: any) => {
+        if (!alive) return;
+        setErr(e?.message ?? "Error leyendo Excel");
         setRows([]);
-      })
-      .finally(() => setLoading(false));
+      });
 
     return () => {
       alive = false;
     };
   }, [filePath]);
 
-  const filtered = useMemo(() => {
-    const hotelsCanon = hotelsJCR
-      .map((h) => COMPANY_MAP[h.toUpperCase()] ?? h)
-      .filter(Boolean);
+  const normHotels = useMemo(() => hotelsJCR.map((h) => norm(h)), [hotelsJCR]);
 
+  // Filter only JCR hotels (match by normalization and partial contains)
+  const rowsJCR = useMemo(() => {
     return rows.filter((r) => {
-      if (r.year !== year && r.year !== baseYear) return false;
-      if (!hotelsCanon.includes(r.hotel)) return false;
-      if (month === "ALL") return true;
-      return r.month === month;
+      const h = norm(r.hotel);
+      return normHotels.some((t) => h === t || h.includes(t) || t.includes(h));
     });
-  }, [rows, hotelsJCR, year, baseYear, month]);
+  }, [rows, normHotels]);
 
-  function sumMap(targetYear: number) {
-    const m = new Map<string, number>();
-    filtered
-      .filter((r) => r.year === targetYear)
-      .forEach((r) => {
-        const key = r.membership;
-        m.set(key, (m.get(key) ?? 0) + r.qty);
-      });
-    return m;
-  }
+  const rowsCur = useMemo(() => rowsJCR.filter((r) => r.year === year), [rowsJCR, year]);
+  const rowsBase = useMemo(() => rowsJCR.filter((r) => r.year === baseYear), [rowsJCR, baseYear]);
+
+  const curMap = useMemo(() => groupSum(rowsCur), [rowsCur]);
+  const baseMap = useMemo(() => groupSum(rowsBase), [rowsBase]);
+
+  const curTotal = useMemo(() => totalOf(curMap), [curMap]);
+  const baseTotal = useMemo(() => totalOf(baseMap), [baseMap]);
+
+  const delta = useMemo(() => deltaPct(curTotal, baseTotal), [curTotal, baseTotal]);
+
+  const topCur = useMemo(() => topN(curMap, 8).map(([name, value]) => ({ name, value })), [curMap]);
+  const topDonut = useMemo(() => topN(curMap, 6).map(([name, value]) => ({ name, value })), [curMap]);
 
   const table = useMemo(() => {
-    const cur = sumMap(year);
-    const base = sumMap(baseYear);
-
-    // ✅ FIX (sin spread de iterator)
-    const keys = Array.from(new Set<string>(Array.from(cur.keys()).concat(Array.from(base.keys()))));
-
+    const keys = Array.from(new Set([...Array.from(curMap.keys()), ...Array.from(baseMap.keys())]));
     const list = keys
       .map((k) => {
-        const curVal = cur.get(k) ?? 0;
-        const baseVal = base.get(k) ?? 0;
-
-        // si compareMode SAME_PERIOD, la base es comparable solo por el mismo mes (si se eligió)
-        const delta = deltaPct(curVal, baseVal);
-
-        return { k, curVal, baseVal, delta };
+        const c = curMap.get(k) ?? 0;
+        const b = baseMap.get(k) ?? 0;
+        const d = deltaPct(c, b);
+        return { k, c, b, d };
       })
-      .sort((a, b) => b.curVal - a.curVal);
+      .sort((a, b) => b.c - a.c);
+    return list;
+  }, [curMap, baseMap]);
 
-    const curTotal = Array.from(cur.values()).reduce((a, b) => a + b, 0);
-    const baseTotal = Array.from(base.values()).reduce((a, b) => a + b, 0);
-    const totalDelta = deltaPct(curTotal, baseTotal);
-
-    return { list, curTotal, baseTotal, totalDelta };
-  }, [filtered, year, baseYear, compareMode]);
-
-  if (loading) {
-    return <div className="card">Cargando membership…</div>;
+  if (err) {
+    return (
+      <div className="card" style={{ width: "100%" }}>
+        <div className="cardTitle">Membership (JCR)</div>
+        <div className="delta down" style={{ marginTop: 8 }}>
+          Error: {err}
+        </div>
+        <div className="cardNote" style={{ marginTop: 8 }}>
+          Revisá que el archivo exista en <strong>public{filePath}</strong>.
+        </div>
+      </div>
+    );
   }
 
+  const hasData = rowsCur.length > 0;
+
   return (
-    <div className="card" style={{ padding: "1.25rem" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", alignItems: "flex-end" }}>
+    <div style={{ width: "100%" }}>
+      <div className="memHead">
         <div>
-          <div className="cardTitle">Membership – resumen</div>
-          <div className="cardNote" style={{ marginTop: ".25rem" }}>
-            {month === "ALL" ? "Año completo" : `Mes ${month}`} · {year} vs {baseYear}
+          <div className="sectionKicker">Membership</div>
+          <h3 className="sectionTitle" style={{ margin: 0 }}>
+            Grupo JCR · Membership {year}
+          </h3>
+          <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
+            Total y distribución por categoría (desde Excel).
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
-          <select className="input" value={month} onChange={(e) => setMonth(e.target.value === "ALL" ? "ALL" : Number(e.target.value))}>
-            <option value="ALL">Año</option>
-            {Array.from({ length: 12 }).map((_, i) => (
-              <option key={i + 1} value={i + 1}>
-                Mes {i + 1}
-              </option>
-            ))}
-          </select>
-
-          <select className="input" value={compareMode} onChange={(e) => setCompareMode(e.target.value as CompareMode)}>
-            <option value="SAME_PERIOD">Mismo período</option>
-            <option value="FULL_YEAR">Año completo</option>
-          </select>
-        </div>
-      </div>
-
-      <div className="cardGrid" style={{ marginTop: "1rem" }}>
-        <div className="kpi">
-          <div className="kpiLabel">Total</div>
-          <div className="kpiValue">{fmtInt(table.curTotal)}</div>
-          <div className={`delta ${deltaClass(table.totalDelta)}`}>
-            {table.totalDelta === null ? "—" : `${table.totalDelta >= 0 ? "+" : ""}${table.totalDelta.toFixed(1).replace(".", ",")}%`}
-          </div>
-        </div>
-      </div>
-
-      <div style={{ marginTop: "1rem", display: "grid", gap: ".6rem" }}>
-        {table.list.slice(0, 10).map((it) => (
-          <div
-            key={it.k}
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              gap: ".75rem",
-              alignItems: "center",
-              border: "1px solid rgba(148,163,184,.25)",
-              borderRadius: 14,
-              padding: ".65rem .75rem",
-            }}
-          >
-            <div style={{ display: "flex", gap: ".6rem", alignItems: "center" }}>
-              <span className={membershipClass(it.k)}>{normalizeMembershipKey(it.k)}</span>
-              <div style={{ fontWeight: 700 }}>{it.k}</div>
-            </div>
-
-            <div style={{ textAlign: "right" }}>
-              <div style={{ fontWeight: 800 }}>{fmtInt(it.curVal)}</div>
-              <div className={`delta ${deltaClass(it.delta)}`} style={{ justifyContent: "flex-end" as any }}>
-                {it.delta === null ? "—" : `${it.delta >= 0 ? "+" : ""}${it.delta.toFixed(1).replace(".", ",")}%`}
-              </div>
+        <div className="memTotals">
+          <div className="memTotalCard">
+            <div className="memTotalLabel">Total members</div>
+            <div className="memTotalValue">{hasData ? fmtInt(curTotal) : "—"}</div>
+            <div className={`memTotalDelta ${delta >= 0 ? "up" : "down"}`}>
+              {delta >= 0 ? "▲" : "▼"} {delta >= 0 ? "+" : ""}
+              {delta.toFixed(1).replace(".", ",")}% vs {baseYear}
             </div>
           </div>
-        ))}
+
+          <div className="memTotalCard">
+            <div className="memTotalLabel">Años disponibles</div>
+            <div className="memTotalValue" style={{ fontSize: 18 }}>
+              {Array.from(new Set(rowsJCR.map((r) => r.year))).sort().join(" · ") || "—"}
+            </div>
+            <div className="memTotalDelta" style={{ color: "rgba(255,255,255,.65)" }}>
+              Filas {year}: {rowsCur.length} · Filas {baseYear}: {rowsBase.length}
+            </div>
+          </div>
+        </div>
       </div>
 
-      <div className="cardNote" style={{ marginTop: "1rem" }}>
-        *Base comparativa: {baseYear}. (El modo “mismo período” te ayuda cuando la base no tiene el año completo.)
-      </div>
+      {!hasData ? (
+        <div className="card" style={{ width: "100%", marginTop: "1rem" }}>
+          <div className="cardTitle">Sin datos para {year}</div>
+          <div className="cardNote" style={{ marginTop: 8 }}>
+            El Excel se leyó, pero no encontré filas para ese año / hoteles JCR. Probá con otro año.
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="memGrid">
+            <Bars data={topCur} title="Top categorías (barras)" />
+            <Donut data={topDonut} title="Distribución (donut)" />
+          </div>
+
+          <div className="memCard" style={{ marginTop: "1rem" }}>
+            <div className="memCardHead">
+              <div className="memCardTitle">Detalle por categoría (tabla)</div>
+            </div>
+
+            <div className="memTableWrap">
+              <table className="memTable">
+                <thead>
+                  <tr>
+                    <th>Categoría</th>
+                    <th style={{ textAlign: "right" }}>{year}</th>
+                    <th style={{ textAlign: "right" }}>{baseYear}</th>
+                    <th style={{ textAlign: "right" }}>Δ</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {table.map((r) => (
+                    <tr key={r.k}>
+                      <td>{r.k}</td>
+                      <td style={{ textAlign: "right", fontWeight: 800 }}>{fmtInt(r.c)}</td>
+                      <td style={{ textAlign: "right", color: "rgba(255,255,255,.75)" }}>{fmtInt(r.b)}</td>
+                      <td style={{ textAlign: "right" }} className={r.d >= 0 ? "up" : "down"}>
+                        {r.b === 0 ? "—" : `${r.d >= 0 ? "+" : ""}${r.d.toFixed(1).replace(".", ",")}%`}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <style jsx>{`
+              .memTableWrap {
+                overflow: auto;
+                margin-top: 10px;
+              }
+              .memTable {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 13px;
+              }
+              .memTable th {
+                text-align: left;
+                color: rgba(255, 255, 255, 0.7);
+                font-weight: 800;
+                padding: 10px 8px;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+              }
+              .memTable td {
+                padding: 10px 8px;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+                color: rgba(255, 255, 255, 0.88);
+              }
+              .up {
+                color: rgba(34, 197, 94, 0.95);
+                font-weight: 900;
+              }
+              .down {
+                color: rgba(248, 113, 113, 0.95);
+                font-weight: 900;
+              }
+            `}</style>
+          </div>
+        </>
+      )}
+
+      <style jsx>{`
+        .memHead {
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 12px;
+        }
+        @media (min-width: 980px) {
+          .memHead {
+            grid-template-columns: 1fr 1fr;
+            align-items: end;
+          }
+        }
+        .memTotals {
+          display: grid;
+          gap: 10px;
+        }
+        @media (min-width: 980px) {
+          .memTotals {
+            grid-template-columns: 1fr 1fr;
+          }
+        }
+        .memTotalCard {
+          border-radius: 16px;
+          padding: 12px 14px;
+          background: rgba(255, 255, 255, 0.04);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .memTotalLabel {
+          font-size: 12px;
+          color: rgba(255, 255, 255, 0.65);
+          font-weight: 800;
+        }
+        .memTotalValue {
+          margin-top: 6px;
+          font-size: 28px;
+          font-weight: 900;
+          color: rgba(255, 255, 255, 0.95);
+          letter-spacing: -0.6px;
+        }
+        .memTotalDelta {
+          margin-top: 6px;
+          font-size: 12px;
+          font-weight: 900;
+        }
+        .memTotalDelta.up {
+          color: rgba(34, 197, 94, 0.95);
+        }
+        .memTotalDelta.down {
+          color: rgba(248, 113, 113, 0.95);
+        }
+
+        .memGrid {
+          margin-top: 1rem;
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 1rem;
+        }
+        @media (min-width: 980px) {
+          .memGrid {
+            grid-template-columns: 1.2fr 0.8fr;
+          }
+        }
+
+        .memCard {
+          border-radius: 18px;
+          padding: 14px 14px 16px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          background: linear-gradient(180deg, rgba(16, 18, 26, 0.95), rgba(12, 14, 20, 0.95));
+          box-shadow: 0 14px 40px rgba(0, 0, 0, 0.22);
+        }
+        .memCardHead {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+        }
+        .memCardTitle {
+          font-size: 14px;
+          font-weight: 900;
+          color: rgba(255, 255, 255, 0.9);
+        }
+      `}</style>
     </div>
   );
 }
+
 
 
