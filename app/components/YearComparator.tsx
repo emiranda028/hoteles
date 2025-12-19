@@ -367,13 +367,12 @@ export default function YearComparator() {
       </div>
 
       <div className="cardRow" style={{ marginTop: "1rem" }}>
-        <HofExplorer
-          filePath="/data/hf_diario.csv"
-          allowedHotels={JCR_HOTELS}
-          defaultHotel="MARRIOTT"
-          defaultYear={DEFAULT_YEAR}
-        />
-      </div>
+      <HofExplorer
+  filePath="/data/hf_diario.csv"
+  allowedHotels={JCR_HOTELS}
+  title="H&F – Grupo JCR"
+  defaultYear={DEFAULT_YEAR}
+/>
 
       {/* 4) Membership */}
       <h3 className="sectionTitle" style={{ marginTop: "2rem" }}>
@@ -458,4 +457,5 @@ export default function YearComparator() {
     </section>
   );
 }
+
 
