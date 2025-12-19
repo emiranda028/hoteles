@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { readCsvFromPublic } from "./csvClient";
 
 /* ===============================
@@ -42,8 +42,6 @@ function parseMoneyES(value: any) {
   const s = String(value).trim();
   if (!s) return 0;
 
-  // Caso típico ES: 22.441,71  => 22441.71
-  // Si viene US: 22441.71 lo deja como está
   const hasComma = s.includes(",");
   const hasDot = s.includes(".");
   if (hasComma && hasDot) {
@@ -52,7 +50,6 @@ function parseMoneyES(value: any) {
   if (hasComma && !hasDot) {
     return Number(s.replace(",", ".")) || 0;
   }
-  // solo puntos: puede ser miles o decimal; lo intentamos directo
   return Number(s) || 0;
 }
 
@@ -97,22 +94,41 @@ export default function HofExplorer({
   allowedHotels,
   title,
   defaultYear = 2025,
+  defaultHotel,
 }: {
   filePath?: string;
   allowedHotels: string[];
   title: string;
   defaultYear?: number;
+  defaultHotel?: string; // ✅ NUEVO
 }) {
   /* ---------- STATE ---------- */
+
+  const initialHotel = useMemo(() => {
+    const normalizedAllowed = (allowedHotels ?? []).map(normHotel);
+    const dh = defaultHotel ? normHotel(defaultHotel) : "";
+    if (dh && normalizedAllowed.includes(dh)) return allowedHotels[normalizedAllowed.indexOf(dh)];
+    return allowedHotels?.[0] ?? "MARRIOTT";
+  }, [allowedHotels, defaultHotel]);
 
   const [rows, setRows] = useState<HofRow[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const [hotel, setHotel] = useState<string>(allowedHotels?.[0] ?? "MARRIOTT");
+  const [hotel, setHotel] = useState<string>(initialHotel);
   const [year, setYear] = useState<number>(defaultYear);
   const [mode, setMode] = useState<"year" | "quarter" | "month">("year");
   const [quarter, setQuarter] = useState<number>(1);
   const [month, setMonth] = useState<number>(1);
+
+  // ✅ Si cambia allowedHotels/defaultHotel, revalidamos hotel seleccionado
+  useEffect(() => {
+    const allowedNorm = (allowedHotels ?? []).map(normHotel);
+    const current = normHotel(hotel);
+    if (!allowedNorm.includes(current)) {
+      setHotel(initialHotel);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allowedHotels.join("|"), initialHotel]);
 
   /* ---------- LOAD CSV ---------- */
 
@@ -129,7 +145,14 @@ export default function HofExplorer({
             const d = new Date(r.Fecha || r.Date);
             if (Number.isNaN(d.getTime())) return null;
 
-            const rooms = Number(r["Total Occ."] ?? r["Total\nOcc."] ?? r["Total Occ"] ?? r.Rooms ?? 0) || 0;
+            const rooms =
+              Number(
+                r["Total Occ."] ??
+                  r["Total\nOcc."] ??
+                  r["Total Occ"] ??
+                  r.Rooms ??
+                  0
+              ) || 0;
 
             return {
               date: d,
@@ -137,8 +160,12 @@ export default function HofExplorer({
               month: d.getMonth() + 1,
               quarter: Math.floor(d.getMonth() / 3) + 1,
               rooms,
-              revenue: parseMoneyES(r["Room Revenue"] ?? r["Room\nRevenue"] ?? r.Revenue ?? 0),
-              guests: Number(r["Adl. & Chl."] ?? r["Adl. &\nChl."] ?? r.Guests ?? 0) || 0,
+              revenue: parseMoneyES(
+                r["Room Revenue"] ?? r["Room\nRevenue"] ?? r.Revenue ?? 0
+              ),
+              guests:
+                Number(r["Adl. & Chl."] ?? r["Adl. &\nChl."] ?? r.Guests ?? 0) ||
+                0,
               hotel: normHotel(r.Empresa ?? r.Hotel ?? ""),
             } as HofRow;
           })
@@ -169,8 +196,9 @@ export default function HofExplorer({
   useEffect(() => {
     if (!yearsAvailable.length) return;
     if (!yearsAvailable.includes(year)) {
-      // preferimos 2025 si existe, si no el último
-      const prefer = yearsAvailable.includes(2025) ? 2025 : yearsAvailable[yearsAvailable.length - 1];
+      const prefer = yearsAvailable.includes(2025)
+        ? 2025
+        : yearsAvailable[yearsAvailable.length - 1];
       setYear(prefer);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -214,9 +242,7 @@ export default function HofExplorer({
   /* ---------- DETALLE MENSUAL (12 MESES) + RANKING ---------- */
 
   const monthly = useMemo(() => {
-    const out: Array<
-      Agg & { month: number; name: string }
-    > = [];
+    const out: Array<Agg & { month: number; name: string }> = [];
 
     for (let m = 1; m <= 12; m++) {
       const list = rowsHotel.filter((r) => r.year === year && r.month === m);
@@ -227,24 +253,16 @@ export default function HofExplorer({
           month: m,
           name: MONTHS_ES[m - 1],
         });
-      } else {
-        // Si querés siempre 12 filas aunque falten meses, descomentá esto:
-        // out.push({ rooms:0,revenue:0,guests:0,days:0,availableRooms:0,occ01:0,adr:0,month:m,name:MONTHS_ES[m-1] })
       }
     }
-
     return out;
   }, [rowsHotel, year, hotel]);
 
   const ranking = useMemo(() => {
-    const sorted = [...monthly].sort((a, b) => b.occ01 - a.occ01);
-    return sorted;
+    return [...monthly].sort((a, b) => b.occ01 - a.occ01);
   }, [monthly]);
 
-  const maxOcc = useMemo(() => {
-    const v = ranking.length ? ranking[0].occ01 : 0;
-    return v > 0 ? v : 0;
-  }, [ranking]);
+  const maxOcc = useMemo(() => (ranking.length ? ranking[0].occ01 : 0), [ranking]);
 
   /* ===============================
      UI helpers
@@ -267,14 +285,15 @@ export default function HofExplorer({
       onClick={onClick}
       style={{
         border: "1px solid var(--border)",
-        background: active ? "rgba(0,0,0,.06)" : "transparent",
+        background: active ? "rgba(0,0,0,.08)" : "transparent",
         color: "var(--text)",
-        padding: ".5rem .75rem",
+        padding: ".52rem .78rem",
         borderRadius: "999px",
-        fontWeight: 700,
+        fontWeight: 800,
         fontSize: ".85rem",
         cursor: "pointer",
         transition: "transform .06s ease, background .15s ease",
+        boxShadow: active ? "0 6px 16px rgba(0,0,0,.08)" : "none",
       }}
     >
       {children}
@@ -297,11 +316,12 @@ export default function HofExplorer({
         border: "1px solid var(--border)",
         background: active ? "var(--primary)" : "transparent",
         color: active ? "#fff" : "var(--text)",
-        padding: ".55rem .9rem",
+        padding: ".58rem .95rem",
         borderRadius: "12px",
-        fontWeight: 800,
+        fontWeight: 900,
         fontSize: ".8rem",
         cursor: "pointer",
+        boxShadow: active ? "0 10px 22px rgba(0,0,0,.12)" : "none",
       }}
     >
       {children}
@@ -331,7 +351,7 @@ export default function HofExplorer({
         </div>
       </div>
 
-      {/* ===== FILTROS (BONITOS) ===== */}
+      {/* ===== FILTROS ===== */}
       <div
         className="card"
         style={{
@@ -343,7 +363,7 @@ export default function HofExplorer({
       >
         {/* fila 1: Hotel + Año */}
         <div style={{ display: "flex", flexWrap: "wrap", gap: ".6rem", alignItems: "center" }}>
-          <div style={{ fontWeight: 800, fontSize: ".85rem", color: "var(--muted)" }}>Hotel</div>
+          <div style={{ fontWeight: 900, fontSize: ".85rem", color: "var(--muted)" }}>Hotel</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: ".5rem" }}>
             {allowedHotels.map((h) => (
               <Chip
@@ -358,7 +378,7 @@ export default function HofExplorer({
 
           <div style={{ flex: 1 }} />
 
-          <div style={{ fontWeight: 800, fontSize: ".85rem", color: "var(--muted)" }}>Año</div>
+          <div style={{ fontWeight: 900, fontSize: ".85rem", color: "var(--muted)" }}>Año</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: ".5rem" }}>
             {yearsAvailable.map((y) => (
               <Chip key={y} active={year === y} onClick={() => setYear(y)}>
@@ -370,7 +390,7 @@ export default function HofExplorer({
 
         {/* fila 2: modo + selector quarter/month */}
         <div style={{ display: "flex", flexWrap: "wrap", gap: ".6rem", alignItems: "center" }}>
-          <div style={{ fontWeight: 800, fontSize: ".85rem", color: "var(--muted)" }}>Vista</div>
+          <div style={{ fontWeight: 900, fontSize: ".85rem", color: "var(--muted)" }}>Vista</div>
           <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
             <SegBtn active={mode === "year"} onClick={() => setMode("year")}>
               YEAR
@@ -385,7 +405,7 @@ export default function HofExplorer({
 
           {mode === "quarter" && (
             <>
-              <div style={{ marginLeft: ".75rem", fontWeight: 800, fontSize: ".85rem", color: "var(--muted)" }}>
+              <div style={{ marginLeft: ".75rem", fontWeight: 900, fontSize: ".85rem", color: "var(--muted)" }}>
                 Trimestre
               </div>
               <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
@@ -400,7 +420,7 @@ export default function HofExplorer({
 
           {mode === "month" && (
             <>
-              <div style={{ marginLeft: ".75rem", fontWeight: 800, fontSize: ".85rem", color: "var(--muted)" }}>
+              <div style={{ marginLeft: ".75rem", fontWeight: 900, fontSize: ".85rem", color: "var(--muted)" }}>
                 Mes
               </div>
               <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
@@ -422,9 +442,7 @@ export default function HofExplorer({
       <div className="cardRow" style={{ marginTop: "1rem" }}>
         <div className="card">
           <div className="cardTitle">Ocupación promedio</div>
-          <div className="cardValue">
-            {loading ? "…" : aggMain ? fmtPct1(aggMain.occ01) : "—"}
-          </div>
+          <div className="cardValue">{loading ? "…" : aggMain ? fmtPct1(aggMain.occ01) : "—"}</div>
           <div className="cardNote">
             Disponibilidad: {AVAIL_PER_DAY_BY_HOTEL[normHotel(hotel)] ?? 0}/día · Días:{" "}
             {aggMain ? fmtInt(aggMain.days) : "0"}
@@ -434,15 +452,12 @@ export default function HofExplorer({
         <div className="card">
           <div className="cardTitle">Rooms occupied</div>
           <div className="cardValue">{loading ? "…" : aggMain ? fmtInt(aggMain.rooms) : "—"}</div>
-          <div className="cardNote">
-            Total disp.: {aggMain ? fmtInt(aggMain.availableRooms) : "0"}
-          </div>
+          <div className="cardNote">Total disp.: {aggMain ? fmtInt(aggMain.availableRooms) : "0"}</div>
         </div>
 
         <div className="card">
           <div className="cardTitle">Room Revenue</div>
           <div className="cardValue">{loading ? "…" : aggMain ? fmtMoney2(aggMain.revenue) : "—"}</div>
-          <div className="cardNote">Moneda “as-is” desde el CSV.</div>
         </div>
 
         <div className="card">
@@ -490,21 +505,13 @@ export default function HofExplorer({
                 ) : (
                   monthly.map((m) => (
                     <tr key={m.month}>
-                      <td style={{ padding: ".55rem .5rem", borderBottom: "1px solid rgba(0,0,0,.06)", fontWeight: 700 }}>
+                      <td style={{ padding: ".55rem .5rem", borderBottom: "1px solid rgba(0,0,0,.06)", fontWeight: 800 }}>
                         {m.name}
                       </td>
-                      <td style={{ padding: ".55rem .5rem", borderBottom: "1px solid rgba(0,0,0,.06)" }}>
-                        {fmtPct1(m.occ01)}
-                      </td>
-                      <td style={{ padding: ".55rem .5rem", borderBottom: "1px solid rgba(0,0,0,.06)" }}>
-                        {fmtInt(m.rooms)}
-                      </td>
-                      <td style={{ padding: ".55rem .5rem", borderBottom: "1px solid rgba(0,0,0,.06)" }}>
-                        {fmtMoney2(m.revenue)}
-                      </td>
-                      <td style={{ padding: ".55rem .5rem", borderBottom: "1px solid rgba(0,0,0,.06)" }}>
-                        {fmtMoney0(m.adr)}
-                      </td>
+                      <td style={{ padding: ".55rem .5rem", borderBottom: "1px solid rgba(0,0,0,.06)" }}>{fmtPct1(m.occ01)}</td>
+                      <td style={{ padding: ".55rem .5rem", borderBottom: "1px solid rgba(0,0,0,.06)" }}>{fmtInt(m.rooms)}</td>
+                      <td style={{ padding: ".55rem .5rem", borderBottom: "1px solid rgba(0,0,0,.06)" }}>{fmtMoney2(m.revenue)}</td>
+                      <td style={{ padding: ".55rem .5rem", borderBottom: "1px solid rgba(0,0,0,.06)" }}>{fmtMoney0(m.adr)}</td>
                     </tr>
                   ))
                 )}
@@ -520,7 +527,7 @@ export default function HofExplorer({
             Mejor → peor (por ocupación)
           </div>
 
-          <div style={{ marginTop: ".9rem", display: "grid", gap: ".55rem" }}>
+          <div style={{ marginTop: ".9rem", display: "grid", gap: ".6rem" }}>
             {ranking.length === 0 ? (
               <div style={{ color: "var(--muted)" }}>Sin datos.</div>
             ) : (
@@ -531,27 +538,27 @@ export default function HofExplorer({
                     key={m.month}
                     style={{
                       border: "1px solid rgba(0,0,0,.08)",
-                      borderRadius: "14px",
-                      padding: ".65rem .7rem",
-                      background: "rgba(0,0,0,.02)",
+                      borderRadius: "16px",
+                      padding: ".72rem .8rem",
+                      background: "linear-gradient(180deg, rgba(0,0,0,.03), rgba(0,0,0,.015))",
                       overflow: "hidden",
                     }}
                   >
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: ".75rem" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: ".5rem" }}>
-                        <div style={{ width: 24, textAlign: "center" }}>{Medal(i)}</div>
-                        <div style={{ fontWeight: 900 }}>{i + 1}. {m.name}</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: ".55rem" }}>
+                        <div style={{ width: 26, textAlign: "center" }}>{Medal(i)}</div>
+                        <div style={{ fontWeight: 950 }}>{i + 1}. {m.name}</div>
                       </div>
-                      <div style={{ fontWeight: 900 }}>{fmtPct1(m.occ01)}</div>
+                      <div style={{ fontWeight: 950 }}>{fmtPct1(m.occ01)}</div>
                     </div>
 
-                    <div style={{ marginTop: ".45rem", display: "flex", gap: ".5rem", alignItems: "center" }}>
+                    <div style={{ marginTop: ".5rem", display: "flex", gap: ".55rem", alignItems: "center" }}>
                       <div
                         aria-hidden="true"
                         style={{
-                          height: 8,
+                          height: 9,
                           flex: 1,
-                          background: "rgba(0,0,0,.08)",
+                          background: "rgba(0,0,0,.10)",
                           borderRadius: 999,
                           overflow: "hidden",
                         }}
@@ -565,7 +572,7 @@ export default function HofExplorer({
                           }}
                         />
                       </div>
-                      <div style={{ fontSize: ".8rem", color: "var(--muted)", whiteSpace: "nowrap" }}>
+                      <div style={{ fontSize: ".82rem", color: "var(--muted)", whiteSpace: "nowrap", fontWeight: 800 }}>
                         ADR {fmtMoney0(m.adr)}
                       </div>
                     </div>
@@ -581,3 +588,4 @@ export default function HofExplorer({
     </section>
   );
 }
+
