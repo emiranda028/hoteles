@@ -1,57 +1,167 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { readXlsxFromPublic } from "./xlsxClient";
 
 type Row = {
-  year: number;
   hotel: string;
+  year: number;
+  month: number;
   membership: string;
   qty: number;
 };
 
-type Props = {
-  rows: Row[];
-  year: number;
-  baseYear?: number;
-  title?: string;
+const monthLabel = (m: number) =>
+  ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"][m - 1] ?? `Mes ${m}`;
+
+function safeNum(v: any) {
+  const n = Number(String(v ?? "").replace(/\./g, "").replace(",", "."));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function parseAnyDate(v: any): Date | null {
+  if (!v && v !== 0) return null;
+  if (v instanceof Date && !isNaN(v.getTime())) return v;
+
+  // Excel serial
+  if (typeof v === "number" && Number.isFinite(v)) {
+    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
+    const d = new Date(excelEpoch.getTime() + v * 86400000);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  const s = String(v ?? "").trim();
+  if (!s) return null;
+
+  // dd/mm/yyyy
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) {
+    const dd = Number(m[1]);
+    const mm = Number(m[2]);
+    let yy = Number(m[3]);
+    if (yy < 100) yy += 2000;
+    const d2 = new Date(yy, mm - 1, dd);
+    return isNaN(d2.getTime()) ? null : d2;
+  }
+
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function normalizeKey(raw: string) {
+  const s = (raw ?? "").toString().toUpperCase();
+  if (s.includes("(AMB)") || s.includes("AMBASSADOR")) return "AMB";
+  if (s.includes("(TTM)") || s.includes("TITANIUM")) return "TTM";
+  if (s.includes("(PLT)") || s.includes("PLATINUM")) return "PLT";
+  if (s.includes("(GLD)") || s.includes("GOLD")) return "GLD";
+  if (s.includes("(SLR)") || s.includes("SILVER")) return "SLR";
+  if (s.includes("(MRD)") || s.includes("MEMBER")) return "MRD";
+  return "OTH";
+}
+
+const COLOR: Record<string, string> = {
+  GLD: "rgba(245,158,11,.80)",
+  PLT: "rgba(148,163,184,.80)",
+  SLR: "rgba(203,213,225,.75)",
+  MRD: "rgba(239,68,68,.75)",
+  AMB: "rgba(56,189,248,.75)",
+  TTM: "rgba(168,85,247,.75)",
+  OTH: "rgba(100,116,139,.60)",
 };
 
-function sumMap(rows: Row[], year: number) {
-  const map = new Map<string, number>();
-  rows
-    .filter((r) => r.year === year)
-    .forEach((r) => {
-      map.set(r.membership, (map.get(r.membership) ?? 0) + r.qty);
-    });
-  return map;
-}
-
-// ✅ FIX: sin for..of sobre Map.values()
-function totalOf(map: Map<string, number>) {
-  return Array.from(map.values()).reduce((a, b) => a + b, 0);
-}
-
-function deltaPct(cur: number, base: number) {
-  if (!base) return 0;
-  return ((cur - base) / base) * 100;
+function pctDelta(cur: number, base: number) {
+  if (!base) return null;
+  return ((cur / base) - 1) * 100;
 }
 
 export default function MembershipSummary({
-  rows,
   year,
   baseYear,
-  title = "Membership",
-}: Props) {
-  const cur = useMemo(() => sumMap(rows, year), [rows, year]);
-  const base = useMemo(
-    () => (baseYear ? sumMap(rows, baseYear) : new Map()),
-    [rows, baseYear]
-  );
+  filePath,
+  hotelsJCR,
+}: {
+  year: number;
+  baseYear: number;
+  filePath: string;
+  /** opcional para no romper YearComparator si lo manda */
+  hotelsJCR?: string[];
+}) {
+  const [rows, setRows] = useState<Row[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [month, setMonth] = useState<number | "ALL">("ALL");
 
-  const totalCur = totalOf(cur);
-  const totalBase = baseYear ? totalOf(base) : 0;
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
 
-  const list = useMemo(() => {
+    readXlsxFromPublic(filePath)
+      .then(({ rows }) => {
+        if (!alive) return;
+
+        const parsed: Row[] = (rows ?? [])
+          .map((r: any) => {
+            const membership = (r.Bonboy ?? r.bonboy ?? r.Membership ?? "").toString().trim();
+            const qty = safeNum(r.Cantidad ?? r.cantidad ?? r.Qty ?? 0);
+            const hotel = (r.Empresa ?? r.empresa ?? r.Hotel ?? "").toString().trim();
+            const d = parseAnyDate(r.Fecha ?? r.fecha ?? r.Date ?? "");
+
+            if (!membership || !hotel || !d) return null;
+
+            return {
+              hotel,
+              membership,
+              qty,
+              year: d.getFullYear(),
+              month: d.getMonth() + 1,
+            } as Row;
+          })
+          .filter(Boolean) as Row[];
+
+        setRows(parsed);
+      })
+      .catch((e) => {
+        console.error(e);
+        setRows([]);
+      })
+      .finally(() => setLoading(false));
+
+    return () => {
+      alive = false;
+    };
+  }, [filePath]);
+
+  const hotelAllow = useMemo(() => {
+    if (!hotelsJCR || hotelsJCR.length === 0) return null;
+    const s = new Set(hotelsJCR);
+    return (h: string) => s.has(h);
+  }, [hotelsJCR]);
+
+  const monthsCur = useMemo(() => {
+    const s = new Set<number>();
+    rows
+      .filter((r) => r.year === year)
+      .filter((r) => (hotelAllow ? hotelAllow(r.hotel) : true))
+      .forEach((r) => s.add(r.month));
+    return Array.from(s).sort((a, b) => a - b);
+  }, [rows, year, hotelAllow]);
+
+  const agg = useMemo(() => {
+    const pick = (yy: number) =>
+      rows
+        .filter((r) => r.year === yy)
+        .filter((r) => (hotelAllow ? hotelAllow(r.hotel) : true))
+        .filter((r) => (month === "ALL" ? true : r.month === month));
+
+    const sumMap = (yy: number) => {
+      const map = new Map<string, number>();
+      pick(yy).forEach((r) => map.set(r.membership, (map.get(r.membership) ?? 0) + r.qty));
+      return map;
+    };
+
+    const cur = sumMap(year);
+    const base = sumMap(baseYear);
+
+    // ✅ FIX VERCEL/TS: no spreads sobre iterators
     const keys = Array.from(
       new Set([
         ...Array.from(cur.keys()),
@@ -59,72 +169,117 @@ export default function MembershipSummary({
       ])
     );
 
-    return keys
+    const list = keys
       .map((k) => {
         const curVal = cur.get(k) ?? 0;
         const baseVal = base.get(k) ?? 0;
-        return {
-          membership: k,
-          cur: curVal,
-          base: baseVal,
-          delta: deltaPct(curVal, baseVal),
-        };
+        const d = pctDelta(curVal, baseVal);
+        return { membership: k, key: normalizeKey(k), cur: curVal, base: baseVal, deltaPct: d };
       })
       .sort((a, b) => b.cur - a.cur);
-  }, [cur, base]);
+
+    const totalCur = list.reduce((s, x) => s + x.cur, 0);
+    const totalBase = list.reduce((s, x) => s + x.base, 0);
+    const totalDelta = pctDelta(totalCur, totalBase);
+
+    const maxCur = Math.max(1, ...list.map((x) => x.cur));
+
+    return { list, totalCur, totalDelta, maxCur };
+  }, [rows, year, baseYear, hotelAllow, month]);
+
+  if (loading) {
+    return (
+      <div className="card" style={{ gridColumn: "1 / -1" }}>
+        <div className="cardTitle">Membership</div>
+        <div className="cardNote">Cargando…</div>
+      </div>
+    );
+  }
 
   return (
-    <section className="section">
-      <h3 className="sectionTitle">{title}</h3>
+    <div className="card" style={{ gridColumn: "1 / -1", padding: "1.1rem" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap" }}>
+        <div>
+          <div className="cardTitle">Membership</div>
+          <div className="cardNote">
+            {month === "ALL" ? `Acumulado ${year}` : `${monthLabel(month)} ${year}`} · vs {baseYear}
+          </div>
+        </div>
 
-      <div className="kpiGrid" style={{ marginBottom: "1rem" }}>
-        <div className="kpi">
-          <div className="kpiLabel">Total membresías</div>
-          <div className="kpiValue">{totalCur.toLocaleString()}</div>
-          {baseYear && (
-            <div className="kpiCap">
-              {deltaPct(totalCur, totalBase).toFixed(1)}%
-              vs {baseYear}
-            </div>
-          )}
+        <div className="toggle" style={{ flexWrap: "wrap" }}>
+          <button type="button" className={`toggleBtn ${month === "ALL" ? "active" : ""}`} onClick={() => setMonth("ALL")}>
+            Año
+          </button>
+          {monthsCur.map((m) => (
+            <button
+              key={m}
+              type="button"
+              className={`toggleBtn ${month === m ? "active" : ""}`}
+              onClick={() => setMonth(m)}
+            >
+              {monthLabel(m)}
+            </button>
+          ))}
         </div>
       </div>
 
-      <div className="card">
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Membresía</th>
-              <th>{year}</th>
-              {baseYear && <th>{baseYear}</th>}
-              {baseYear && <th>Variación</th>}
-            </tr>
-          </thead>
-          <tbody>
-            {list.map((r) => (
-              <tr key={r.membership}>
-                <td>{r.membership}</td>
-                <td>{r.cur.toLocaleString()}</td>
-                {baseYear && <td>{r.base.toLocaleString()}</td>}
-                {baseYear && (
-                  <td
-                    style={{
-                      color:
-                        r.delta > 0
-                          ? "var(--success)"
-                          : r.delta < 0
-                          ? "var(--danger)"
-                          : "inherit",
-                    }}
-                  >
-                    {r.delta.toFixed(1)}%
-                  </td>
-                )}
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div
+        style={{
+          marginTop: "1rem",
+          display: "grid",
+          gridTemplateColumns: "minmax(0, 280px) minmax(0, 1fr)",
+          gap: "1rem",
+          alignItems: "start",
+        }}
+      >
+        {/* Total */}
+        <div
+          style={{
+            border: "1px solid rgba(148,163,184,.25)",
+            borderRadius: 18,
+            padding: "1rem",
+            background: "rgba(15,23,42,.06)",
+          }}
+        >
+          <div style={{ fontSize: ".85rem", color: "var(--muted)" }}>Total miembros</div>
+          <div style={{ fontSize: "2rem", fontWeight: 800, marginTop: ".2rem" }}>
+            {Math.round(agg.totalCur).toLocaleString("es-AR")}
+          </div>
+          <div className="delta" style={{ marginTop: ".4rem" }}>
+            {agg.totalDelta == null ? "—" : `${agg.totalDelta >= 0 ? "+" : ""}${agg.totalDelta.toFixed(1).replace(".", ",")}%`} vs {baseYear}
+          </div>
+          <div className="cardNote" style={{ marginTop: ".55rem" }}>
+            Distribución por tipo de membresía (Top → Bottom).
+          </div>
+        </div>
+
+        {/* Bars */}
+        <div style={{ display: "grid", gap: ".55rem" }}>
+          {agg.list.map((x) => {
+            const w = Math.max(2, (x.cur / agg.maxCur) * 100);
+            const col = COLOR[x.key] ?? COLOR.OTH;
+            return (
+              <div key={x.membership} style={{ display: "grid", gap: ".25rem" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: ".75rem" }}>
+                  <div style={{ fontWeight: 700 }}>
+                    {x.membership}
+                    <span style={{ marginLeft: ".5rem", fontWeight: 600, color: "var(--muted)" }}>
+                      · {Math.round(x.cur).toLocaleString("es-AR")}
+                    </span>
+                  </div>
+                  <div className={`delta ${x.deltaPct != null && x.deltaPct < 0 ? "down" : "up"}`} style={{ margin: 0 }}>
+                    {x.deltaPct == null ? "—" : `${x.deltaPct >= 0 ? "+" : ""}${x.deltaPct.toFixed(1).replace(".", ",")}%`}
+                  </div>
+                </div>
+
+                <div style={{ height: 10, borderRadius: 999, background: "rgba(148,163,184,.18)", overflow: "hidden" }}>
+                  <div style={{ width: `${w}%`, height: "100%", background: col }} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
-    </section>
+    </div>
   );
 }
