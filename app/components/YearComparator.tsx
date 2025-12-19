@@ -562,11 +562,12 @@ export default function YearComparator() {
         </div>
 
         <div className="cardRow" style={{ marginTop: "1rem" }}>
-          <MembershipSummary
-            year={year}
-            baseYear={BASE_YEAR}
-            hotelsJCR={Object.keys(DATA[year].jcr.hotels)}
-            filePath="/data/jcr_membership.xlsx"
+         <MembershipSummary
+  year={year}
+  baseYear={baseYear}
+  hotelsJCR={["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"]}
+  filePath="/data/jcr_membership.xlsx"
+/>
           />
         </div>
       </div>
@@ -648,5 +649,6 @@ export default function YearComparator() {
     </section>
   );
 }
+
 
 
