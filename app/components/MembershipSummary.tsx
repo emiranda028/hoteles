@@ -3,279 +3,221 @@
 import { useEffect, useMemo, useState } from "react";
 import { readXlsxFromPublic } from "./xlsxClient";
 
-type Row = {
-  hotel: string;
-  year: number;
-  month: number;
-  membership: string;
-  qty: number;
-};
-
-const monthLabel = (m: number) =>
-  ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"][m - 1] ?? `Mes ${m}`;
-
-function safeNum(v: any) {
-  const n = Number(String(v ?? "").replace(/\./g, "").replace(",", "."));
-  return Number.isFinite(n) ? n : 0;
-}
-
-function parseAnyDate(v: any): Date | null {
-  if (!v && v !== 0) return null;
-  if (v instanceof Date && !isNaN(v.getTime())) return v;
-
-  if (typeof v === "number" && Number.isFinite(v)) {
-    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
-    const d = new Date(excelEpoch.getTime() + v * 86400000);
-    return isNaN(d.getTime()) ? null : d;
-  }
-
-  const s = String(v ?? "").trim();
-  if (!s) return null;
-
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
-  if (m) {
-    const dd = Number(m[1]);
-    const mm = Number(m[2]);
-    let yy = Number(m[3]);
-    if (yy < 100) yy += 2000;
-    const d2 = new Date(yy, mm - 1, dd);
-    return isNaN(d2.getTime()) ? null : d2;
-  }
-
-  const d = new Date(s);
-  return isNaN(d.getTime()) ? null : d;
-}
-
-function normalizeKey(raw: string) {
-  const s = (raw ?? "").toString().toUpperCase();
-  if (s.includes("(AMB)") || s.includes("AMBASSADOR")) return "AMB";
-  if (s.includes("(TTM)") || s.includes("TITANIUM")) return "TTM";
-  if (s.includes("(PLT)") || s.includes("PLATINUM")) return "PLT";
-  if (s.includes("(GLD)") || s.includes("GOLD")) return "GLD";
-  if (s.includes("(SLR)") || s.includes("SILVER")) return "SLR";
-  if (s.includes("(MRD)") || s.includes("MEMBER")) return "MRD";
-  return "OTH";
-}
-
-const COLOR: Record<string, string> = {
-  GLD: "rgba(245,158,11,.80)",
-  PLT: "rgba(148,163,184,.80)",
-  SLR: "rgba(203,213,225,.75)",
-  MRD: "rgba(239,68,68,.75)",
-  AMB: "rgba(56,189,248,.75)",
-  TTM: "rgba(168,85,247,.75)",
-  OTH: "rgba(100,116,139,.60)",
-};
-
-function pctDelta(cur: number, base: number) {
-  if (!base) return null;
-  return ((cur / base) - 1) * 100;
-}
-
-export default function MembershipSummary({
-  year,
-  baseYear,
-  hotelsJCR,
-  filePath,
-}: {
+type Props = {
   year: number;
   baseYear: number;
   hotelsJCR: string[];
   filePath: string;
-}) {
+};
+
+type Row = {
+  bomboy: string;
+  cantidad: number;
+  empresa: string;
+  year: number;
+};
+
+function norm(s: any) {
+  return String(s ?? "").trim();
+}
+function toNumber(v: any) {
+  const n = Number(String(v ?? "").replace(/\./g, "").replace(",", "."));
+  return Number.isFinite(n) ? n : 0;
+}
+function yearFromDateAny(v: any): number {
+  if (!v) return 0;
+  if (v instanceof Date && !isNaN(v.getTime())) return v.getFullYear();
+  const s = String(v).trim();
+  const m1 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m1) return Number(m1[3]);
+  const m2 = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (m2) return Number(m2[1]);
+  const m3 = s.match(/(\d{4})/);
+  return m3 ? Number(m3[1]) : 0;
+}
+
+function membershipColor(name: string) {
+  const n = name.toUpperCase();
+  if (n.includes("AMB")) return "#6EC1FF";
+  if (n.includes("TTM") || n.includes("TIT")) return "#4D4D4D";
+  if (n.includes("PLT") || n.includes("PLAT")) return "#BFC5CC";
+  if (n.includes("GLD") || n.includes("GOLD")) return "#D6B44C";
+  if (n.includes("SLR") || n.includes("SILV")) return "#A8AEB6";
+  if (n.includes("MRD") || n.includes("MEMBER")) return "#E53935";
+  return "#7C8AA0";
+}
+
+/** ✅ union keys SIN spread de iteradores */
+function unionKeysFromMaps(cur: Map<string, number>, base: Map<string, number>) {
+  const set = new Set<string>();
+  cur.forEach((_v, k) => set.add(k));
+  base.forEach((_v, k) => set.add(k));
+  return Array.from(set);
+}
+
+export default function MembershipSummary({ year, baseYear, hotelsJCR, filePath }: Props) {
   const [rows, setRows] = useState<Row[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [month, setMonth] = useState<number | "ALL">("ALL");
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    let alive = true;
-    setLoading(true);
+    let mounted = true;
 
-    readXlsxFromPublic(filePath)
-      .then(({ rows }) => {
-        if (!alive) return;
+    (async () => {
+      try {
+        setError(null);
+        const json = await readXlsxFromPublic(filePath);
 
-        const parsed: Row[] = rows
-          .map((r: any) => {
-            const membership = (r.Bonboy ?? r.bonboy ?? r.Membership ?? "").toString().trim();
-            const qty = safeNum(r.Cantidad ?? r.cantidad ?? r.Qty ?? 0);
-            const hotel = (r.Empresa ?? r.empresa ?? r.Hotel ?? "").toString().trim();
-            const d = parseAnyDate(r.Fecha ?? r.fecha ?? r.Date ?? "");
+        const parsed: Row[] = (json as any[]).map((r) => {
+          const bomboy = norm(r.Bomboy ?? r.BOMBOY);
+          const empresa = norm(r.Empresa ?? r.EMPRESA);
+          const cantidad = toNumber(r.Cantidad ?? r.CANTIDAD);
+          const fecha = norm(r.Fecha ?? r.FECHA);
 
-            if (!membership || !hotel || !d) return null;
+          return { bomboy, empresa, cantidad, year: yearFromDateAny(fecha) };
+        });
 
-            return {
-              hotel,
-              membership,
-              qty,
-              year: d.getFullYear(),
-              month: d.getMonth() + 1,
-            } as Row;
-          })
-          .filter(Boolean) as Row[];
+        const filtered = parsed.filter(
+          (r) => r.bomboy && r.empresa && hotelsJCR.includes(r.empresa) && Number.isFinite(r.cantidad)
+        );
 
-        setRows(parsed);
-      })
-      .catch((e) => {
-        console.error(e);
-        setRows([]);
-      })
-      .finally(() => setLoading(false));
+        if (mounted) setRows(filtered);
+      } catch (e: any) {
+        if (mounted) setError(e?.message ?? "Error leyendo Excel");
+      }
+    })();
 
     return () => {
-      alive = false;
+      mounted = false;
     };
-  }, [filePath]);
+  }, [filePath, hotelsJCR]);
 
-  const monthsCur = useMemo(() => {
-    const s = new Set<number>();
-    rows
-      .filter((r) => r.year === year)
-      .filter((r) => hotelsJCR.includes(r.hotel))
-      .forEach((r) => s.add(r.month));
-    return Array.from(s).sort((a, b) => a - b);
-  }, [rows, year, hotelsJCR]);
-
-  const agg = useMemo(() => {
-    const pick = (yy: number) =>
-      rows
-        .filter((r) => r.year === yy)
-        .filter((r) => hotelsJCR.includes(r.hotel))
-        .filter((r) => (month === "ALL" ? true : r.month === month));
-
-    const sumMap = (yy: number) => {
+  const summary = useMemo(() => {
+    function sumMap(y: number) {
       const map = new Map<string, number>();
-      pick(yy).forEach((r) => map.set(r.membership, (map.get(r.membership) ?? 0) + r.qty));
+      rows.forEach((r) => {
+        if (r.year !== y) return;
+        map.set(r.bomboy, (map.get(r.bomboy) ?? 0) + r.cantidad);
+      });
       return map;
-    };
+    }
 
     const cur = sumMap(year);
     const base = sumMap(baseYear);
 
-    // ✅ FIX VERCEL/TS TARGET: no usar spread sobre Map.keys()
-    const keys = Array.from(
-      new Set([
-        ...Array.from(cur.keys()),
-        ...Array.from(base.keys()),
-      ])
-    );
+    const keys = unionKeysFromMaps(cur, base);
 
     const list = keys
       .map((k) => {
         const curVal = cur.get(k) ?? 0;
         const baseVal = base.get(k) ?? 0;
-        const d = pctDelta(curVal, baseVal);
-        return { membership: k, key: normalizeKey(k), cur: curVal, base: baseVal, deltaPct: d };
+        const diff = curVal - baseVal;
+        const pct = baseVal > 0 ? (diff / baseVal) * 100 : null;
+        return { k, curVal, baseVal, diff, pct };
       })
-      .sort((a, b) => b.cur - a.cur);
+      .sort((a, b) => b.curVal - a.curVal);
 
-    const totalCur = list.reduce((s, x) => s + x.cur, 0);
-    const totalBase = list.reduce((s, x) => s + x.base, 0);
-    const totalDelta = pctDelta(totalCur, totalBase);
+    const totalCur = list.reduce((a, x) => a + x.curVal, 0);
+    const totalBase = list.reduce((a, x) => a + x.baseVal, 0);
 
-    const maxCur = Math.max(1, ...list.map((x) => x.cur));
-
-    return { list, totalCur, totalDelta, maxCur };
-  }, [rows, year, baseYear, hotelsJCR, month]);
-
-  if (loading) {
-    return (
-      <div className="card" style={{ gridColumn: "1 / -1" }}>
-        <div className="cardTitle">Membership (JCR)</div>
-        <div className="cardNote">Cargando…</div>
-      </div>
-    );
-  }
+    return { list, totalCur, totalBase };
+  }, [rows, year, baseYear]);
 
   return (
-    <div className="card" style={{ gridColumn: "1 / -1", padding: "1.1rem" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap" }}>
-        <div>
-          <div className="cardTitle">Membership (JCR)</div>
-          <div className="cardNote">
-            {month === "ALL" ? `Acumulado ${year}` : `${monthLabel(month)} ${year}`} · vs {baseYear}
-          </div>
-        </div>
-
-        <div className="toggle" style={{ flexWrap: "wrap" }}>
-          <button
-            type="button"
-            className={`toggleBtn ${month === "ALL" ? "active" : ""}`}
-            onClick={() => setMonth("ALL")}
-          >
-            Año
-          </button>
-
-          {monthsCur.map((m) => (
-            <button
-              key={m}
-              type="button"
-              className={`toggleBtn ${month === m ? "active" : ""}`}
-              onClick={() => setMonth(m)}
-            >
-              {monthLabel(m)}
-            </button>
-          ))}
+    <div className="card" style={{ width: "100%" }}>
+      <div className="cardTop">
+        <div className="cardTitle">Membership (JCR) – distribución y variación</div>
+        <div className="cardNote">
+          Consolidado {year} vs {baseYear} (Excel)
         </div>
       </div>
 
-      <div
-        style={{
-          marginTop: "1rem",
-          display: "grid",
-          gridTemplateColumns: "minmax(0, 280px) minmax(0, 1fr)",
-          gap: "1rem",
-          alignItems: "start",
-        }}
-      >
-        <div
-          style={{
-            border: "1px solid rgba(148,163,184,.25)",
-            borderRadius: 18,
-            padding: "1rem",
-            background: "rgba(15,23,42,.06)",
-          }}
-        >
-          <div style={{ fontSize: ".9rem", color: "var(--muted)" }}>Total</div>
-          <div style={{ fontSize: "2.2rem", fontWeight: 900, marginTop: ".15rem" }}>
-            {agg.totalCur.toLocaleString("es-AR")}
+      {error && (
+        <div className="delta down" style={{ marginTop: ".75rem" }}>
+          {error}
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1.2fr) minmax(0,1fr)", gap: "1.25rem", marginTop: "1rem" }}>
+        {/* Lista + barras */}
+        <div className="card" style={{ margin: 0 }}>
+          <div className="cardTop">
+            <div className="cardTitle">Mix por membresía</div>
+            <div className="cardNote">
+              Total {year}: <strong>{summary.totalCur.toLocaleString("es-AR")}</strong>
+              {" · "}
+              {baseYear}: <strong>{summary.totalBase.toLocaleString("es-AR")}</strong>
+            </div>
           </div>
 
-          {agg.totalDelta === null ? (
-            <div className="delta" style={{ marginTop: ".35rem" }}>Base sin datos</div>
-          ) : (
-            <div className={`delta ${agg.totalDelta >= 0 ? "up" : "down"}`} style={{ marginTop: ".35rem" }}>
-              {agg.totalDelta >= 0 ? "+" : ""}
-              {agg.totalDelta.toFixed(1).replace(".", ",")}% vs {baseYear}
-            </div>
-          )}
+          <div style={{ display: "grid", gap: ".65rem", marginTop: ".9rem" }}>
+            {summary.list.map((x) => {
+              const color = membershipColor(x.k);
+              const share = summary.totalCur > 0 ? x.curVal / summary.totalCur : 0;
+
+              return (
+                <div key={x.k} style={{ display: "grid", gap: ".35rem" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: ".75rem", alignItems: "baseline" }}>
+                    <div style={{ display: "flex", gap: ".5rem", alignItems: "center" }}>
+                      <span style={{ width: 10, height: 10, borderRadius: 999, background: color, display: "inline-block" }} />
+                      <div style={{ fontWeight: 800 }}>{x.k}</div>
+                      <div style={{ color: "var(--muted)", fontSize: ".85rem" }}>
+                        {x.curVal.toLocaleString("es-AR")}
+                        {x.baseVal > 0 ? (
+                          <>
+                            {" "}
+                            · Δ {x.diff >= 0 ? "+" : ""}
+                            {x.diff.toLocaleString("es-AR")}
+                            {x.pct != null ? ` (${x.pct >= 0 ? "+" : ""}${x.pct.toFixed(1).replace(".", ",")}%)` : ""}
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div style={{ fontWeight: 800 }}>{Math.round(share * 100)}%</div>
+                  </div>
+
+                  <div style={{ height: 10, background: "rgba(255,255,255,.06)", borderRadius: 999, overflow: "hidden" }}>
+                    <div style={{ width: `${Math.max(0, Math.min(1, share)) * 100}%`, height: "100%", background: color }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
 
-        <div style={{ display: "grid", gap: ".7rem" }}>
-          {agg.list.slice(0, 10).map((x) => {
-            const w = Math.max(0, Math.min(100, (x.cur / agg.maxCur) * 100));
-            return (
-              <div
-                key={x.membership}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "minmax(160px, 1fr) minmax(0, 2fr) minmax(80px, 110px)",
-                  gap: ".75rem",
-                  alignItems: "center",
-                }}
-              >
-                <div style={{ fontWeight: 800, fontSize: ".95rem" }}>{x.membership}</div>
+        {/* Tarjeta de variación */}
+        <div className="card" style={{ margin: 0 }}>
+          <div className="cardTop">
+            <div className="cardTitle">Resumen interanual</div>
+            <div className="cardNote">Lectura rápida</div>
+          </div>
 
-                <div style={{ height: 10, background: "rgba(148,163,184,.22)", borderRadius: 999, overflow: "hidden" }}>
-                  <div style={{ width: `${w}%`, height: "100%", background: COLOR[x.key] ?? COLOR.OTH }} />
-                </div>
-
-                <div style={{ textAlign: "right", fontWeight: 900 }}>
-                  {x.cur.toLocaleString("es-AR")}
-                </div>
+          <div style={{ display: "grid", gap: ".75rem", marginTop: "1rem" }}>
+            <div className="kpi">
+              <div className="kpiLabel">Total membresías</div>
+              <div className="kpiValue">{summary.totalCur.toLocaleString("es-AR")}</div>
+              <div className="kpiCap">
+                vs {baseYear}: {summary.totalBase.toLocaleString("es-AR")}
               </div>
-            );
-          })}
+            </div>
+
+            <div className="kpi">
+              <div className="kpiLabel">Variación absoluta</div>
+              <div className="kpiValue">
+                {(summary.totalCur - summary.totalBase >= 0 ? "+" : "")}
+                {(summary.totalCur - summary.totalBase).toLocaleString("es-AR")}
+              </div>
+              <div className="kpiCap">
+                {summary.totalBase > 0
+                  ? `${(((summary.totalCur - summary.totalBase) / summary.totalBase) * 100).toFixed(1).replace(".", ",")}%`
+                  : "—"}
+              </div>
+            </div>
+
+            <div className="cardNote" style={{ marginTop: ".5rem" }}>
+              Tip: si querés, después le metemos una torta interactiva (Recharts) con el mismo color mapping.
+            </div>
+          </div>
         </div>
       </div>
     </div>
