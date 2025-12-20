@@ -15,7 +15,6 @@ type Row = Record<string, any>;
 function norm(s: any) {
   return String(s ?? "").trim();
 }
-
 function upper(s: any) {
   return norm(s).toUpperCase();
 }
@@ -48,9 +47,11 @@ function tryYear(fecha: any): number | null {
     if (y < 100) y += 2000;
     return Number.isFinite(y) ? y : null;
   }
+
   const m2 = s.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (m2) return Number(m2[1]);
 
+  // Excel serial
   const n = Number(s);
   if (Number.isFinite(n) && n > 20000) {
     const ms = Math.round((n - 25569) * 86400 * 1000);
@@ -66,13 +67,22 @@ function fmtInt(n: number) {
   return new Intl.NumberFormat("es-AR", { maximumFractionDigits: 0 }).format(n || 0);
 }
 
-// Bandera simple por código ISO2 (si tu dataset tiene país en texto, lo dejamos sin flag o lo mappeás luego)
+/**
+ * FIX build: NO usamos [...s] porque rompe si no hay ES2015/downlevelIteration.
+ * Esto evita iteradores y funciona con target viejo.
+ */
 function flagEmojiFromISO2(iso2: string) {
   const s = upper(iso2);
   if (s.length !== 2) return "";
   const A = 0x1f1e6;
-  const codePoints = [...s].map((c) => A + (c.charCodeAt(0) - 65));
-  return String.fromCodePoint(...codePoints);
+
+  const c0 = s.charCodeAt(0);
+  const c1 = s.charCodeAt(1);
+  if (c0 < 65 || c0 > 90 || c1 < 65 || c1 > 90) return "";
+
+  const p0 = A + (c0 - 65);
+  const p1 = A + (c1 - 65);
+  return String.fromCodePoint(p0, p1);
 }
 
 export default function CountryRanking({ year, filePath, baseYear, limit = 18 }: Props) {
@@ -137,8 +147,14 @@ export default function CountryRanking({ year, filePath, baseYear, limit = 18 }:
     for (const r of filtered) {
       const key = upper(r.pais) || "SIN_PAIS";
       const prev = m.get(key);
-      if (!prev) m.set(key, { pais: r.pais || "—", iso2: r.iso2, qty: r.qty || 0, cont: r.cont || "—" });
-      else prev.qty += r.qty || 0;
+      if (!prev) {
+        m.set(key, { pais: r.pais || "—", iso2: r.iso2, qty: r.qty || 0, cont: r.cont || "—" });
+      } else {
+        prev.qty += r.qty || 0;
+        // si antes venía iso2 vacío y ahora aparece, lo guardamos
+        if (!prev.iso2 && r.iso2) prev.iso2 = r.iso2;
+        if (!prev.cont && r.cont) prev.cont = r.cont;
+      }
     }
     const list = Array.from(m.values()).sort((a, b) => b.qty - a.qty);
     return list.slice(0, limit);
@@ -304,9 +320,8 @@ export default function CountryRanking({ year, filePath, baseYear, limit = 18 }:
             })}
           </div>
 
-          {/* Mapa: si ya tenés el <img> del mapa, lo podés sumar acá */}
           <div style={{ marginTop: ".9rem", opacity: 0.75, fontSize: ".9rem" }}>
-            Mapa: si tu versión anterior lo traía como imagen/svg, lo reintegramos acá en el mismo bloque.
+            Mapa: si tu versión anterior lo traía como imagen/svg, se reintegra acá.
           </div>
         </div>
       </div>
