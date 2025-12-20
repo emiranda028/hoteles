@@ -1,455 +1,355 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import * as XLSX from "xlsx";
+import { readXlsxFromPublic } from "./xlsxClient";
 
 type Props = {
+  filePath: string;
   year: number;
   baseYear: number;
-  allowedHotels: string[];
-  filePath: string;
-  hotelFilter?: string; // "JCR" | hotel
+  allowedHotels: string[]; // ["JCR", "MARRIOTT", ...]
+  hotelFilter: string; // "JCR" o hotel
 };
 
 type Row = {
-  hotel: string;
-  membership: string;
-  qty: number;
-  date: Date | null;
-  year: number | null;
+  hotel: string; // Empresa
+  membership: string; // Bonboy
+  qty: number; // Cantidad
+  year: number;
+  month: number; // 1..12 (si existe)
 };
 
-type ReadResult = {
-  rows: any[];
-  sheetName: string;
-  sheetNames: string[];
-};
-
-function normStr(s: any) {
-  return String(s ?? "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .toUpperCase();
+function normHotel(x: any) {
+  const s = String(x ?? "").trim().toUpperCase();
+  if (!s) return "";
+  if (s.includes("MARRIOTT")) return "MARRIOTT";
+  if (s.includes("BARILOCHE") || s.includes("BCR")) return "SHERATON BCR";
+  if (s.includes("MAR DEL PLATA") || s.includes("MDQ")) return "SHERATON MDQ";
+  if (s.includes("MAITEI")) return "MAITEI";
+  return s;
 }
 
-function safeNum(v: any): number {
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  const s = String(v ?? "").trim();
+function parseNumberES(v: any) {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+  let s = String(v).trim();
   if (!s) return 0;
-  const out = s.replace(/\s/g, "").replace(/\./g, "").replace(",", ".");
-  const n = Number(out);
+  s = s.replace(/\./g, "").replace(/,/g, ".");
+  const n = Number(s);
   return Number.isFinite(n) ? n : 0;
 }
 
-function parseDateLoose(v: any): Date | null {
+function yearFromDateLike(v: any): number {
+  if (typeof v === "number" && v > 1900 && v < 2100) return Math.floor(v);
   const s = String(v ?? "").trim();
-  if (!s) return null;
-
-  const m1 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (m1) {
-    const dd = Number(m1[1]);
-    const mm = Number(m1[2]);
-    const yyyy = Number(m1[3]);
-    const d = new Date(yyyy, mm - 1, dd);
-    return Number.isFinite(d.getTime()) ? d : null;
-  }
-
-  const t = Date.parse(s);
-  if (Number.isFinite(t)) return new Date(t);
-  return null;
+  const m4 = s.match(/(19|20)\d{2}/);
+  if (m4) return Number(m4[0]);
+  return 0;
 }
 
-function pick(obj: Record<string, any>, candidates: string[]) {
-  const keys = Object.keys(obj);
-  const lower = new Map(keys.map((k) => [k.toLowerCase(), k]));
-  for (const cand of candidates) {
-    const k = lower.get(cand.toLowerCase());
-    if (k != null) return obj[k];
+function monthFromDateLike(v: any): number {
+  const s = String(v ?? "").trim();
+  if (!s) return 0;
+  const m = s.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-]((19|20)\d{2}|\d{2})/);
+  if (m) {
+    const mm = Number(m[2]);
+    if (mm >= 1 && mm <= 12) return mm;
   }
-  return "";
-}
-
-function scoreRows(rows: any[]) {
-  if (!rows || rows.length === 0) return 0;
-  const keys = Object.keys(rows[0] ?? {});
-  const set = new Set(keys.map((k) => String(k).trim().toLowerCase()));
-  let score = keys.length;
-
-  if (set.has("empresa")) score += 50;
-  if (set.has("bonboy")) score += 25;
-  if (set.has("cantidad")) score += 25;
-  if (set.has("fecha") || set.has("date")) score += 15;
-
-  score += Math.min(rows.length, 300) / 10;
-  return score;
-}
-
-async function readXlsxFromPublic(path: string): Promise<ReadResult> {
-  const res = await fetch(path);
-  if (!res.ok) throw new Error(`No se pudo cargar ${path} (status ${res.status})`);
-  const buffer = await res.arrayBuffer();
-
-  const wb = XLSX.read(buffer, { type: "array" });
-  const sheetNames = wb.SheetNames ?? [];
-  if (sheetNames.length === 0) return { rows: [], sheetName: "", sheetNames: [] };
-
-  let bestSheet = sheetNames[0];
-  let bestRows: any[] = [];
-  let bestScore = -1;
-
-  for (const name of sheetNames) {
-    const ws = wb.Sheets[name];
-    if (!ws) continue;
-    const rows = XLSX.utils.sheet_to_json(ws, { defval: "" }) as any[];
-    const s = scoreRows(rows);
-    if (s > bestScore) {
-      bestScore = s;
-      bestSheet = name;
-      bestRows = rows;
-    }
-  }
-
-  return { rows: bestRows, sheetName: bestSheet, sheetNames };
+  return 0;
 }
 
 function fmtInt(n: number) {
-  return new Intl.NumberFormat("es-AR", { maximumFractionDigits: 0 }).format(n);
+  return (n ?? 0).toLocaleString("es-AR");
+}
+function fmtPct(n: number) {
+  return (n ?? 0).toLocaleString("es-AR", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + "%";
 }
 
-function pctDelta(cur: number, base: number) {
-  if (!base) return 0;
-  return (cur - base) / base;
+const COLOR_BY_MEM: Record<string, string> = {
+  MRD: "#ef4444", // rojo
+  GLD: "#f59e0b", // naranja
+  TTM: "#a855f7", // violeta
+  PLT: "#94a3b8", // gris-azulado
+  SLR: "#cbd5e1", // gris claro
+  AMB: "#38bdf8", // celeste
+};
+
+function normalizeMemName(raw: string) {
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  // Si viene "Member (MRD)" tomamos código
+  const m = s.match(/\(([^)]+)\)/);
+  if (m) return m[1].trim().toUpperCase();
+  // si viene "MRD"
+  if (s.length <= 5) return s.toUpperCase();
+  return s.toUpperCase();
 }
 
-function colorForMembership(name: string) {
-  const n = normStr(name);
-  // podés ajustar estos “keywords”
-  if (n.includes("PLAT")) return { bg: "rgba(59,130,246,.14)", border: "rgba(59,130,246,.35)" };
-  if (n.includes("GOLD")) return { bg: "rgba(245,158,11,.16)", border: "rgba(245,158,11,.35)" };
-  if (n.includes("SILV")) return { bg: "rgba(148,163,184,.20)", border: "rgba(148,163,184,.40)" };
-  if (n.includes("MEMB")) return { bg: "rgba(34,197,94,.14)", border: "rgba(34,197,94,.35)" };
-  return { bg: "rgba(147,51,234,.12)", border: "rgba(147,51,234,.30)" };
-}
-
-export default function MembershipSummary({
-  year,
-  baseYear,
-  allowedHotels,
-  filePath,
-  hotelFilter = "JCR",
-}: Props) {
+export default function MembershipSummary({ filePath, year, baseYear, allowedHotels, hotelFilter }: Props) {
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string>("");
-
-  // filtro interno (por si querés cambiar dentro del bloque)
-  const [hotelLocal, setHotelLocal] = useState<string>(hotelFilter);
-
-  useEffect(() => setHotelLocal(hotelFilter), [hotelFilter]);
+  const [err, setErr] = useState("");
 
   useEffect(() => {
-    let alive = true;
-
-    async function run() {
+    (async () => {
       try {
         setLoading(true);
         setErr("");
-        const rr = await readXlsxFromPublic(filePath);
-        const mapped = rr.rows.map((r: any) => {
-          const hotel = normStr(pick(r, ["Empresa", "empresa", "Hotel", "hotel", "Property"]));
-          const membership = String(pick(r, ["Bonboy", "bonboy", "Membership", "membership", "Programa"])).trim();
-          const qty = safeNum(pick(r, ["Cantidad", "cantidad", "Qty", "qty", "Count", "count"]));
-          const dtRaw = pick(r, ["Fecha", "fecha", "Date", "date"]);
-          const dt = parseDateLoose(dtRaw);
 
-          return {
-            hotel,
-            membership,
-            qty,
-            date: dt,
-            year: dt ? dt.getFullYear() : null,
-          } as Row;
-        });
+        const { rows: raw } = await readXlsxFromPublic(filePath);
 
-        const clean = mapped.filter((r) => r.hotel && r.membership && r.qty && r.year);
-        if (alive) setRows(clean);
-      } catch (e: any) {
-        console.error(e);
-        if (alive) {
+        // Detectar headers
+        const keys = Object.keys(raw?.[0] ?? {});
+        const keyLC = keys.map((k) => String(k).trim().toLowerCase());
+
+        const hotelKey =
+          keys[keyLC.indexOf("empresa")] ??
+          keys[keyLC.indexOf("hotel")] ??
+          keys.find((k) => String(k).toLowerCase().includes("empresa")) ??
+          "";
+
+        const memKey =
+          keys[keyLC.indexOf("bonboy")] ??
+          keys[keyLC.indexOf("membership")] ??
+          keys.find((k) => String(k).toLowerCase().includes("bon")) ??
+          "";
+
+        const qtyKey =
+          keys[keyLC.indexOf("cantidad")] ??
+          keys[keyLC.indexOf("qty")] ??
+          keys.find((k) => String(k).toLowerCase().includes("cant")) ??
+          "";
+
+        const dateKey =
+          keys[keyLC.indexOf("fecha")] ??
+          keys[keyLC.indexOf("date")] ??
+          keys.find((k) => String(k).toLowerCase().includes("fec")) ??
+          "";
+
+        if (!hotelKey || !memKey || !qtyKey || !dateKey) {
           setRows([]);
-          setErr(String(e?.message ?? e));
+          setErr(
+            `Headers no detectados. Detectado: hotel=${hotelKey || "—"} · membership=${memKey || "—"} · qty=${
+              qtyKey || "—"
+            } · fecha=${dateKey || "—"}`
+          );
+          return;
         }
-      } finally {
-        if (alive) setLoading(false);
-      }
-    }
 
-    run();
-    return () => {
-      alive = false;
-    };
+        const parsed: Row[] = [];
+
+        for (const r of raw) {
+          const hotel = normHotel(r[hotelKey]);
+          const membership = normalizeMemName(r[memKey]);
+          const qty = parseNumberES(r[qtyKey]);
+          const y = yearFromDateLike(r[dateKey]);
+          const m = monthFromDateLike(r[dateKey]);
+
+          if (!hotel || !membership || !y) continue;
+          if (!qty) continue;
+
+          parsed.push({ hotel, membership, qty, year: y, month: m || 0 });
+        }
+
+        setRows(parsed);
+      } catch (e: any) {
+        setErr(String(e?.message ?? e));
+        setRows([]);
+      } finally {
+        setLoading(false);
+      }
+    })();
   }, [filePath]);
 
-  const allowedSet = useMemo(() => new Set(allowedHotels.map(normStr)), [allowedHotels]);
+  // scope hotel: JCR suma 3 hoteles
+  const scopedRows = useMemo(() => {
+    const scope = hotelFilter;
 
-  const filtered = useMemo(() => {
-    const hotelF = normStr(hotelLocal);
-    return rows.filter((r) => {
-      if (!allowedSet.has(normStr(r.hotel))) return false;
-      if (hotelF !== "JCR" && hotelF !== normStr(r.hotel)) return false;
-      return true;
-    });
-  }, [rows, allowedSet, hotelLocal]);
-
-  const yearsAvail = useMemo(() => {
-    const ys = new Set<number>();
-    for (const r of filtered) if (r.year) ys.add(r.year);
-    return Array.from(ys).sort((a, b) => b - a);
-  }, [filtered]);
+    if (scope === "JCR") {
+      const set = new Set(["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"]);
+      return rows.filter((r) => set.has(r.hotel));
+    }
+    return rows.filter((r) => r.hotel === normHotel(scope));
+  }, [rows, hotelFilter]);
 
   function sumFor(y: number) {
-    return filtered
-      .filter((r) => r.year === y)
-      .reduce((a, r) => a + (r.qty || 0), 0);
-  }
-
-  function sumMap(y: number) {
-    const m = new Map<string, number>();
-    for (const r of filtered) {
+    // Mapa membership -> qty
+    const map: Record<string, number> = {};
+    for (const r of scopedRows) {
       if (r.year !== y) continue;
-      const key = String(r.membership ?? "").trim();
-      const prev = m.get(key) ?? 0;
-      m.set(key, prev + (r.qty || 0));
+      map[r.membership] = (map[r.membership] ?? 0) + r.qty;
     }
-    return m;
+    return map;
   }
 
-  const totalCur = useMemo(() => sumFor(year), [filtered, year]); // eslint-disable-line
-  const totalBase = useMemo(() => sumFor(baseYear), [filtered, baseYear]); // eslint-disable-line
+  const cur = useMemo(() => sumFor(year), [scopedRows, year]);
+  const base = useMemo(() => sumFor(baseYear), [scopedRows, baseYear]);
+
+  const keys = useMemo(() => {
+    const set: Record<string, true> = {};
+    Object.keys(cur).forEach((k) => (set[k] = true));
+    Object.keys(base).forEach((k) => (set[k] = true));
+    return Object.keys(set);
+  }, [cur, base]);
+
+  const totalCur = useMemo(() => Object.values(cur).reduce((a, b) => a + b, 0), [cur]);
+  const totalBase = useMemo(() => Object.values(base).reduce((a, b) => a + b, 0), [base]);
+
+  const delta = useMemo(() => {
+    if (!totalBase) return 0;
+    return ((totalCur - totalBase) / totalBase) * 100;
+  }, [totalCur, totalBase]);
 
   const list = useMemo(() => {
-    const cur = sumMap(year);
-    const base = sumMap(baseYear);
-
-    const keys = Array.from(
-      new Set<string>([
-        ...Array.from(cur.keys()),
-        ...Array.from(base.keys()),
-      ])
-    );
-
-    return keys
-      .map((k) => {
-        const curVal = cur.get(k) ?? 0;
-        const baseVal = base.get(k) ?? 0;
-        return {
-          membership: k,
-          cur: curVal,
-          base: baseVal,
-          delta: pctDelta(curVal, baseVal),
-        };
-      })
+    const arr = keys
+      .map((k) => ({
+        key: k,
+        cur: cur[k] ?? 0,
+        base: base[k] ?? 0,
+      }))
+      .filter((x) => x.cur > 0 || x.base > 0)
       .sort((a, b) => b.cur - a.cur);
-  }, [filtered, year, baseYear]);
 
-  const maxCur = useMemo(() => {
-    const m = Math.max(1, ...list.map((x) => x.cur));
-    return m;
-  }, [list]);
+    return arr;
+  }, [keys, cur, base]);
+
+  const titleHotel =
+    hotelFilter === "JCR" ? "JCR" : normHotel(hotelFilter);
+
+  const noData = !loading && list.length === 0;
 
   return (
-    <div>
-      {/* filtros */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: ".6rem", alignItems: "center", justifyContent: "space-between" }}>
-        <div style={{ fontWeight: 950, fontSize: "1.05rem" }}>
-          Membership ({hotelLocal === "JCR" ? "JCR total" : hotelLocal}) — {year} (vs {baseYear})
+    <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
+      <div style={{ display: "flex", gap: "1rem", alignItems: "baseline", flexWrap: "wrap" }}>
+        <div style={{ fontSize: "1.15rem", fontWeight: 950 }}>
+          Membership ({titleHotel})
         </div>
-
-        <div style={{ display: "flex", flexWrap: "wrap", gap: ".5rem", alignItems: "center" }}>
-          <select
-            value={hotelLocal}
-            onChange={(e) => setHotelLocal(e.target.value)}
-            style={{
-              padding: ".55rem .7rem",
-              borderRadius: 999,
-              border: "1px solid rgba(2,6,23,.16)",
-              background: "rgba(255,255,255,.85)",
-              fontWeight: 850,
-            }}
-          >
-            <option value="JCR">JCR (Total)</option>
-            {allowedHotels.map((h) => (
-              <option key={h} value={normStr(h)}>
-                {h}
-              </option>
-            ))}
-          </select>
-
-          <select
-            value={year}
-            onChange={() => {}}
-            disabled
-            style={{
-              padding: ".55rem .7rem",
-              borderRadius: 999,
-              border: "1px solid rgba(2,6,23,.10)",
-              background: "rgba(255,255,255,.65)",
-              fontWeight: 850,
-              opacity: 0.9,
-            }}
-            title="Este año se controla desde el filtro global de arriba"
-          >
-            <option value={year}>{year}</option>
-          </select>
-
-          <select
-            value={baseYear}
-            onChange={() => {}}
-            disabled
-            style={{
-              padding: ".55rem .7rem",
-              borderRadius: 999,
-              border: "1px solid rgba(2,6,23,.10)",
-              background: "rgba(255,255,255,.65)",
-              fontWeight: 850,
-              opacity: 0.9,
-            }}
-            title="Año base se controla desde el filtro global de arriba"
-          >
-            <option value={baseYear}>{baseYear}</option>
-          </select>
+        <div style={{ opacity: 0.75 }}>
+          Acumulado {year} · vs {baseYear}
+        </div>
+        <div style={{ marginLeft: "auto", opacity: 0.75, fontSize: ".9rem" }}>
+          Fuente: Excel ({filePath})
         </div>
       </div>
 
-      <div style={{ marginTop: ".55rem", opacity: 0.85, fontWeight: 750 }}>
-        {loading ? "Cargando..." : err ? `Error: ${err}` : yearsAvail.length ? `Años disponibles: ${yearsAvail.join(", ")}` : "Sin datos"}
-      </div>
-
-      {/* Totales */}
-      <div
-        style={{
-          marginTop: ".8rem",
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
-          gap: 12,
-        }}
-      >
+      {loading ? (
+        <div style={{ marginTop: ".75rem", opacity: 0.75 }}>Cargando membership…</div>
+      ) : err ? (
+        <div style={{ marginTop: ".75rem", color: "crimson" }}>{err}</div>
+      ) : noData ? (
+        <div style={{ marginTop: ".75rem", opacity: 0.75 }}>
+          Sin datos para {titleHotel} en {year}.
+        </div>
+      ) : (
         <div
           style={{
-            borderRadius: 20,
-            padding: "1rem",
-            background: "linear-gradient(135deg, rgba(59,130,246,.18), rgba(34,197,94,.14))",
-            border: "1px solid rgba(2,6,23,.08)",
+            marginTop: "1rem",
+            display: "grid",
+            gridTemplateColumns: "minmax(0, 420px) minmax(0, 1fr)",
+            gap: "1rem",
           }}
         >
-          <div style={{ fontWeight: 950, opacity: 0.9 }}>Total {year}</div>
-          <div style={{ fontSize: "2rem", fontWeight: 950, letterSpacing: "-.02em" }}>{fmtInt(totalCur)}</div>
-          <div style={{ fontWeight: 850, opacity: 0.85 }}>
-            vs {baseYear}: {fmtInt(totalBase)} ·{" "}
-            <span style={{ fontWeight: 950 }}>
-              {totalBase ? `${(pctDelta(totalCur, totalBase) * 100).toFixed(1)}%` : "—"}
-            </span>
+          {/* Total */}
+          <div
+            style={{
+              background: "rgba(0,0,0,0.03)",
+              borderRadius: 20,
+              padding: "1rem",
+              border: "1px solid rgba(0,0,0,0.06)",
+            }}
+          >
+            <div style={{ opacity: 0.7, fontWeight: 700 }}>Total</div>
+            <div style={{ fontSize: "3rem", fontWeight: 950, lineHeight: 1.05, marginTop: ".25rem" }}>
+              {fmtInt(totalCur)}
+            </div>
+            <div
+              style={{
+                display: "inline-block",
+                marginTop: ".8rem",
+                padding: ".4rem .7rem",
+                borderRadius: 999,
+                background: "rgba(16, 185, 129, 0.12)",
+                border: "1px solid rgba(16, 185, 129, 0.25)",
+                fontWeight: 800,
+                color: "rgb(4, 120, 87)",
+              }}
+            >
+              {delta >= 0 ? "+" : ""}
+              {fmtPct(delta)} vs {baseYear}
+            </div>
+
+            <div style={{ marginTop: ".8rem", opacity: 0.65 }}>Composición</div>
           </div>
-        </div>
 
-        <div
-          style={{
-            borderRadius: 20,
-            padding: "1rem",
-            background: "rgba(255,255,255,.75)",
-            border: "1px solid rgba(2,6,23,.10)",
-          }}
-        >
-          <div style={{ fontWeight: 950, opacity: 0.9 }}>Top memberships ({year})</div>
-          <div style={{ marginTop: ".55rem", display: "flex", flexWrap: "wrap", gap: ".45rem" }}>
-            {list.slice(0, 6).map((x) => {
-              const c = colorForMembership(x.membership);
+          {/* Barras por membresía (más chicas + responsive) */}
+          <div style={{ display: "grid", gap: ".65rem" }}>
+            {list.map((it) => {
+              const pct = totalCur > 0 ? (it.cur / totalCur) * 100 : 0;
+              const color = COLOR_BY_MEM[it.key] ?? "#64748b";
+
               return (
-                <span
-                  key={x.membership}
+                <div
+                  key={it.key}
                   style={{
-                    padding: ".35rem .6rem",
-                    borderRadius: 999,
-                    background: c.bg,
-                    border: `1px solid ${c.border}`,
-                    fontWeight: 950,
-                    fontSize: ".9rem",
-                    whiteSpace: "nowrap",
+                    display: "grid",
+                    gridTemplateColumns: "220px minmax(0, 1fr) 90px",
+                    gap: ".75rem",
+                    alignItems: "center",
                   }}
                 >
-                  {x.membership || "—"} · {fmtInt(x.cur)}
-                </span>
+                  <div style={{ fontWeight: 850 }}>
+                    {it.key === "MRD" ? "Member (MRD)" :
+                     it.key === "GLD" ? "Gold Elite (GLD)" :
+                     it.key === "TTM" ? "Titanium Elite (TTM)" :
+                     it.key === "PLT" ? "Platinum Elite (PLT)" :
+                     it.key === "SLR" ? "Silver Elite (SLR)" :
+                     it.key === "AMB" ? "Ambassador Elite (AMB)" : it.key}
+                    <div style={{ fontSize: ".9rem", opacity: 0.7, fontWeight: 700 }}>
+                      {pct.toFixed(1).replace(".", ",")}% del total
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      height: 12,
+                      borderRadius: 999,
+                      background: "rgba(0,0,0,0.08)",
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: `${Math.max(0, Math.min(100, pct))}%`,
+                        height: "100%",
+                        borderRadius: 999,
+                        background: color,
+                      }}
+                    />
+                  </div>
+
+                  <div style={{ textAlign: "right", fontWeight: 900 }}>
+                    {fmtInt(it.cur)}
+                  </div>
+                </div>
               );
             })}
           </div>
         </div>
-      </div>
+      )}
 
-      {/* Gráfico compacto */}
-      <div style={{ marginTop: "1rem" }}>
-        <div style={{ fontWeight: 950, marginBottom: ".45rem" }}>Distribución por membresía ({year})</div>
-
-        <div style={{ display: "grid", gap: 8 }}>
-          {list.slice(0, 10).map((x) => {
-            const c = colorForMembership(x.membership);
-            const w = Math.round((x.cur / maxCur) * 100);
-            const pos = x.delta >= 0;
-            const sign = pos ? "+" : "";
-            return (
-              <div
-                key={x.membership}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr auto",
-                  gap: 10,
-                  alignItems: "center",
-                  padding: ".55rem .65rem",
-                  borderRadius: 16,
-                  background: "rgba(255,255,255,.75)",
-                  border: "1px solid rgba(2,6,23,.10)",
-                }}
-              >
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                    <div style={{ fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {x.membership || "—"}
-                    </div>
-                    <div style={{ fontWeight: 950 }}>{fmtInt(x.cur)}</div>
-                  </div>
-
-                  <div style={{ height: 8, borderRadius: 999, background: "rgba(2,6,23,.10)", overflow: "hidden", marginTop: 6 }}>
-                    <div
-                      style={{
-                        height: "100%",
-                        width: `${w}%`,
-                        background: c.border,
-                        borderRadius: 999,
-                      }}
-                    />
-                  </div>
-                </div>
-
-                <div
-                  style={{
-                    padding: ".25rem .55rem",
-                    borderRadius: 999,
-                    fontWeight: 950,
-                    fontSize: ".82rem",
-                    color: pos ? "rgb(21,128,61)" : "rgb(185,28,28)",
-                    background: pos ? "rgba(34,197,94,.16)" : "rgba(239,68,68,.16)",
-                    border: pos ? "1px solid rgba(34,197,94,.25)" : "1px solid rgba(239,68,68,.25)",
-                    whiteSpace: "nowrap",
-                  }}
-                  title={`Variación vs ${baseYear}`}
-                >
-                  {sign}
-                  {totalBase ? (x.delta * 100).toFixed(1) : "0.0"}%
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
+      {/* responsive tweak */}
+      <style jsx>{`
+        @media (max-width: 900px) {
+          div[style*="grid-template-columns: minmax(0, 420px)"] {
+            grid-template-columns: 1fr !important;
+          }
+        }
+        @media (max-width: 640px) {
+          div[style*="grid-template-columns: 220px"] {
+            grid-template-columns: 1fr !important;
+          }
+        }
+      `}</style>
     </div>
   );
 }
