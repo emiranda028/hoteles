@@ -1,355 +1,456 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { readXlsxFromPublic } from "./xlsxClient";
+import React, { useEffect, useMemo, useState } from "react";
+import * as XLSX from "xlsx";
 
 type Props = {
-  filePath: string;
   year: number;
   baseYear: number;
-  allowedHotels: string[]; // ["JCR", "MARRIOTT", ...]
-  hotelFilter: string; // "JCR" o hotel
+  filePath: string;            // "/data/jcr_membership.xlsx"
+  hotelFilter: string;         // "JCR" | "MARRIOTT" | "SHERATON BCR" | "SHERATON MDQ"
 };
+
+type Mode = "YEAR" | "MONTH";
 
 type Row = {
-  hotel: string; // Empresa
-  membership: string; // Bonboy
-  qty: number; // Cantidad
-  year: number;
-  month: number; // 1..12 (si existe)
+  date: Date | null;
+  year: number | null;
+  month: number | null;
+  hotel: string;
+  tier: string;
+  qty: number;
 };
 
-function normHotel(x: any) {
-  const s = String(x ?? "").trim().toUpperCase();
-  if (!s) return "";
-  if (s.includes("MARRIOTT")) return "MARRIOTT";
-  if (s.includes("BARILOCHE") || s.includes("BCR")) return "SHERATON BCR";
-  if (s.includes("MAR DEL PLATA") || s.includes("MDQ")) return "SHERATON MDQ";
-  if (s.includes("MAITEI")) return "MAITEI";
-  return s;
+const JCR_HOTELS = ["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"];
+
+const TIER_COLORS: Record<string, string> = {
+  "MEMBER (MRD)": "linear-gradient(90deg, rgba(235,87,87,1), rgba(235,87,87,.65))",
+  "GOLD ELITE (GLD)": "linear-gradient(90deg, rgba(243,156,18,1), rgba(243,156,18,.55))",
+  "TITANIUM ELITE (TTM)": "linear-gradient(90deg, rgba(155,89,182,1), rgba(155,89,182,.55))",
+  "PLATINUM ELITE (PLT)": "linear-gradient(90deg, rgba(120,136,160,1), rgba(120,136,160,.55))",
+  "SILVER ELITE (SLR)": "linear-gradient(90deg, rgba(170,185,200,1), rgba(170,185,200,.55))",
+  "AMBASSADOR ELITE (AMB)": "linear-gradient(90deg, rgba(46,204,255,1), rgba(46,204,255,.55))",
+};
+
+const MONTHS = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
+
+function normKey(s: any) {
+  return String(s ?? "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
 }
 
-function parseNumberES(v: any) {
+function safeNum(v: any) {
   if (v === null || v === undefined) return 0;
-  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
-  let s = String(v).trim();
+  const s = String(v).trim();
   if (!s) return 0;
-  s = s.replace(/\./g, "").replace(/,/g, ".");
-  const n = Number(s);
+  const normalized =
+    s.indexOf(",") >= 0 && s.indexOf(".") >= 0
+      ? s.replace(/\./g, "").replace(",", ".")
+      : s.replace(",", ".");
+  const n = Number(normalized);
   return Number.isFinite(n) ? n : 0;
 }
 
-function yearFromDateLike(v: any): number {
-  if (typeof v === "number" && v > 1900 && v < 2100) return Math.floor(v);
+function parseDateAny(v: any): Date | null {
+  if (v instanceof Date) return isNaN(v.getTime()) ? null : v;
   const s = String(v ?? "").trim();
-  const m4 = s.match(/(19|20)\d{2}/);
-  if (m4) return Number(m4[0]);
-  return 0;
+  if (!s) return null;
+
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) {
+    const dd = Number(m[1]);
+    const mm = Number(m[2]);
+    let yy = Number(m[3]);
+    if (yy < 100) yy += 2000;
+    const d = new Date(yy, mm - 1, dd);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  const d2 = new Date(s);
+  return isNaN(d2.getTime()) ? null : d2;
 }
 
-function monthFromDateLike(v: any): number {
-  const s = String(v ?? "").trim();
-  if (!s) return 0;
-  const m = s.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-]((19|20)\d{2}|\d{2})/);
-  if (m) {
-    const mm = Number(m[2]);
-    if (mm >= 1 && mm <= 12) return mm;
+function stripWeirdSpaces(s: string) {
+  return s.replace(/\s+/g, " ").trim();
+}
+
+function pickField(obj: any, candidates: string[]) {
+  const keys = Object.keys(obj ?? {});
+  const map: Record<string, string> = {};
+  for (let i = 0; i < keys.length; i++) map[normKey(keys[i])] = keys[i];
+
+  for (let i = 0; i < candidates.length; i++) {
+    const c = normKey(candidates[i]);
+    if (map[c]) return obj[map[c]];
   }
-  return 0;
+  return "";
+}
+
+async function readXlsx(path: string) {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error(`No se pudo cargar ${path} (status ${res.status})`);
+  const buffer = await res.arrayBuffer();
+  const wb = XLSX.read(buffer, { type: "array" });
+  const sheetNames = wb.SheetNames || [];
+  if (sheetNames.length === 0) return { rows: [] as any[] };
+
+  // mejor hoja
+  let bestRows: any[] = [];
+  let bestScore = -1;
+
+  for (let i = 0; i < sheetNames.length; i++) {
+    const name = sheetNames[i];
+    const ws = wb.Sheets[name];
+    if (!ws) continue;
+    const rows = XLSX.utils.sheet_to_json(ws, { defval: "" }) as any[];
+
+    const keys = Object.keys(rows[0] ?? {});
+    const keySet = new Set(keys.map((k) => normKey(k)));
+    let score = keys.length + Math.min(rows.length, 200) / 10;
+    if (keySet.has("empresa") || keySet.has("hotel")) score += 40;
+    if (keySet.has("bonboy") || keySet.has("membership")) score += 30;
+    if (keySet.has("cantidad") || keySet.has("qty")) score += 20;
+    if (keySet.has("fecha") || keySet.has("date")) score += 10;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestRows = rows;
+    }
+  }
+
+  return { rows: bestRows };
 }
 
 function fmtInt(n: number) {
-  return (n ?? 0).toLocaleString("es-AR");
+  return (n || 0).toLocaleString("es-AR");
 }
+
 function fmtPct(n: number) {
-  return (n ?? 0).toLocaleString("es-AR", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + "%";
+  if (!Number.isFinite(n)) return "—";
+  return (n * 100).toLocaleString("es-AR", { maximumFractionDigits: 1 }) + "%";
 }
 
-const COLOR_BY_MEM: Record<string, string> = {
-  MRD: "#ef4444", // rojo
-  GLD: "#f59e0b", // naranja
-  TTM: "#a855f7", // violeta
-  PLT: "#94a3b8", // gris-azulado
-  SLR: "#cbd5e1", // gris claro
-  AMB: "#38bdf8", // celeste
-};
+function tierLabel(raw: string) {
+  const s = stripWeirdSpaces(raw || "").toUpperCase();
+  if (!s) return "—";
 
-function normalizeMemName(raw: string) {
-  const s = String(raw ?? "").trim();
-  if (!s) return "";
-  // Si viene "Member (MRD)" tomamos código
-  const m = s.match(/\(([^)]+)\)/);
-  if (m) return m[1].trim().toUpperCase();
-  // si viene "MRD"
-  if (s.length <= 5) return s.toUpperCase();
-  return s.toUpperCase();
+  // normalizamos a labels consistentes
+  if (s.includes("AMB")) return "Ambassador Elite (AMB)";
+  if (s.includes("SILVER") || s.includes("SLR")) return "Silver Elite (SLR)";
+  if (s.includes("PLATINUM") || s.includes("PLT")) return "Platinum Elite (PLT)";
+  if (s.includes("TITANIUM") || s.includes("TTM")) return "Titanium Elite (TTM)";
+  if (s.includes("GOLD") || s.includes("GLD")) return "Gold Elite (GLD)";
+  if (s.includes("MEMBER") || s.includes("MRD")) return "Member (MRD)";
+  return raw;
 }
 
-export default function MembershipSummary({ filePath, year, baseYear, allowedHotels, hotelFilter }: Props) {
+function tierKeyForColor(label: string) {
+  // mapea “Member (MRD)” -> “MEMBER (MRD)”
+  return stripWeirdSpaces(label).toUpperCase();
+}
+
+export default function MembershipSummary({ year, baseYear, filePath, hotelFilter }: Props) {
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+
+  const [mode, setMode] = useState<Mode>("YEAR");
+  const [month, setMonth] = useState<number>(1); // 1..12 cuando mode=MONTH
 
   useEffect(() => {
-    (async () => {
-      try {
-        setLoading(true);
-        setErr("");
+    let alive = true;
+    setLoading(true);
+    setErr(null);
 
-        const { rows: raw } = await readXlsxFromPublic(filePath);
+    readXlsx(filePath)
+      .then(({ rows: raw }) => {
+        if (!alive) return;
 
-        // Detectar headers
-        const keys = Object.keys(raw?.[0] ?? {});
-        const keyLC = keys.map((k) => String(k).trim().toLowerCase());
+        const parsed: Row[] = (raw || []).map((r: any) => {
+          const dt = parseDateAny(pickField(r, ["Fecha", "date", "Día", "Dia"]));
+          const yy = dt ? dt.getFullYear() : null;
+          const mm = dt ? dt.getMonth() + 1 : null;
 
-        const hotelKey =
-          keys[keyLC.indexOf("empresa")] ??
-          keys[keyLC.indexOf("hotel")] ??
-          keys.find((k) => String(k).toLowerCase().includes("empresa")) ??
-          "";
+          const hotel = stripWeirdSpaces(
+            String(pickField(r, ["Empresa", "Hotel", "empresa", "hotel"]) || "")
+          ).toUpperCase();
 
-        const memKey =
-          keys[keyLC.indexOf("bonboy")] ??
-          keys[keyLC.indexOf("membership")] ??
-          keys.find((k) => String(k).toLowerCase().includes("bon")) ??
-          "";
+          const tier = tierLabel(String(pickField(r, ["Bonboy", "Membership", "Tier", "bonboy"]) || ""));
 
-        const qtyKey =
-          keys[keyLC.indexOf("cantidad")] ??
-          keys[keyLC.indexOf("qty")] ??
-          keys.find((k) => String(k).toLowerCase().includes("cant")) ??
-          "";
+          const qty = safeNum(pickField(r, ["Cantidad", "qty", "Qty", "Cantidad Total"]));
 
-        const dateKey =
-          keys[keyLC.indexOf("fecha")] ??
-          keys[keyLC.indexOf("date")] ??
-          keys.find((k) => String(k).toLowerCase().includes("fec")) ??
-          "";
-
-        if (!hotelKey || !memKey || !qtyKey || !dateKey) {
-          setRows([]);
-          setErr(
-            `Headers no detectados. Detectado: hotel=${hotelKey || "—"} · membership=${memKey || "—"} · qty=${
-              qtyKey || "—"
-            } · fecha=${dateKey || "—"}`
-          );
-          return;
-        }
-
-        const parsed: Row[] = [];
-
-        for (const r of raw) {
-          const hotel = normHotel(r[hotelKey]);
-          const membership = normalizeMemName(r[memKey]);
-          const qty = parseNumberES(r[qtyKey]);
-          const y = yearFromDateLike(r[dateKey]);
-          const m = monthFromDateLike(r[dateKey]);
-
-          if (!hotel || !membership || !y) continue;
-          if (!qty) continue;
-
-          parsed.push({ hotel, membership, qty, year: y, month: m || 0 });
-        }
+          return { date: dt, year: yy, month: mm, hotel, tier, qty };
+        });
 
         setRows(parsed);
-      } catch (e: any) {
-        setErr(String(e?.message ?? e));
-        setRows([]);
-      } finally {
         setLoading(false);
-      }
-    })();
+      })
+      .catch((e) => {
+        if (!alive) return;
+        setErr(String(e?.message || e));
+        setLoading(false);
+      });
+
+    return () => {
+      alive = false;
+    };
   }, [filePath]);
 
-  // scope hotel: JCR suma 3 hoteles
-  const scopedRows = useMemo(() => {
-    const scope = hotelFilter;
+  // Filtrado por hotel
+  const rowsHotel = useMemo(() => {
+    const hf = (hotelFilter || "JCR").toUpperCase();
 
-    if (scope === "JCR") {
-      const set = new Set(["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"]);
-      return rows.filter((r) => set.has(r.hotel));
+    let out = rows.filter((r) => r.qty > 0);
+
+    if (hf === "JCR") {
+      const allow = new Set(JCR_HOTELS);
+      out = out.filter((r) => allow.has(r.hotel));
+    } else {
+      out = out.filter((r) => r.hotel === hf);
     }
-    return rows.filter((r) => r.hotel === normHotel(scope));
+
+    return out;
   }, [rows, hotelFilter]);
 
-  function sumFor(y: number) {
-    // Mapa membership -> qty
-    const map: Record<string, number> = {};
-    for (const r of scopedRows) {
-      if (r.year !== y) continue;
-      map[r.membership] = (map[r.membership] ?? 0) + r.qty;
+  // Años disponibles (para debug y para UI si querés)
+  const availableYears = useMemo(() => {
+    const s = new Set<number>();
+    for (let i = 0; i < rowsHotel.length; i++) {
+      const y = rowsHotel[i].year;
+      if (typeof y === "number") s.add(y);
     }
-    return map;
-  }
+    return Array.from(s).sort((a, b) => b - a);
+  }, [rowsHotel]);
 
-  const cur = useMemo(() => sumFor(year), [scopedRows, year]);
-  const base = useMemo(() => sumFor(baseYear), [scopedRows, baseYear]);
+  // Suma por tier según año y modo
+  const sumMap = (yy: number) => {
+    const m = new Map<string, number>();
 
-  const keys = useMemo(() => {
-    const set: Record<string, true> = {};
-    Object.keys(cur).forEach((k) => (set[k] = true));
-    Object.keys(base).forEach((k) => (set[k] = true));
-    return Object.keys(set);
-  }, [cur, base]);
+    for (let i = 0; i < rowsHotel.length; i++) {
+      const r = rowsHotel[i];
+      if (r.year !== yy) continue;
 
-  const totalCur = useMemo(() => Object.values(cur).reduce((a, b) => a + b, 0), [cur]);
-  const totalBase = useMemo(() => Object.values(base).reduce((a, b) => a + b, 0), [base]);
+      if (mode === "MONTH") {
+        if (r.month !== month) continue;
+      }
+
+      const k = r.tier || "—";
+      m.set(k, (m.get(k) || 0) + r.qty);
+    }
+    return m;
+  };
+
+  const curMap = useMemo(() => sumMap(year), [year, mode, month, rowsHotel]);       // ok aunque sumMap no esté en deps: es función local pura
+  const baseMap = useMemo(() => sumMap(baseYear), [baseYear, mode, month, rowsHotel]);
+
+  // Keys unificados (sin spread de iterators)
+  const tierKeys = useMemo(() => {
+    const set = new Set<string>();
+    Array.from(curMap.keys()).forEach((k) => set.add(k));
+    Array.from(baseMap.keys()).forEach((k) => set.add(k));
+    return Array.from(set);
+  }, [curMap, baseMap]);
+
+  // Lista final con porcentajes
+  const list = useMemo(() => {
+    const arr = tierKeys
+      .map((k) => {
+        const cur = curMap.get(k) || 0;
+        const base = baseMap.get(k) || 0;
+        return { k, cur, base };
+      })
+      .sort((a, b) => b.cur - a.cur);
+    return arr;
+  }, [tierKeys, curMap, baseMap]);
+
+  const totalCur = useMemo(() => {
+    const vals = Array.from(curMap.values());
+    let t = 0;
+    for (let i = 0; i < vals.length; i++) t += vals[i];
+    return t;
+  }, [curMap]);
+
+  const totalBase = useMemo(() => {
+    const vals = Array.from(baseMap.values());
+    let t = 0;
+    for (let i = 0; i < vals.length; i++) t += vals[i];
+    return t;
+  }, [baseMap]);
 
   const delta = useMemo(() => {
-    if (!totalBase) return 0;
-    return ((totalCur - totalBase) / totalBase) * 100;
+    if (totalBase <= 0) return null;
+    return (totalCur - totalBase) / totalBase;
   }, [totalCur, totalBase]);
 
-  const list = useMemo(() => {
-    const arr = keys
-      .map((k) => ({
-        key: k,
-        cur: cur[k] ?? 0,
-        base: base[k] ?? 0,
-      }))
-      .filter((x) => x.cur > 0 || x.base > 0)
-      .sort((a, b) => b.cur - a.cur);
+  if (loading) {
+    return (
+      <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
+        Cargando membership…
+      </div>
+    );
+  }
 
-    return arr;
-  }, [keys, cur, base]);
+  if (err) {
+    return (
+      <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
+        <div style={{ fontWeight: 900 }}>Error cargando membership</div>
+        <div style={{ opacity: 0.8, marginTop: 6 }}>{err}</div>
+      </div>
+    );
+  }
 
-  const titleHotel =
-    hotelFilter === "JCR" ? "JCR" : normHotel(hotelFilter);
+  if (rowsHotel.length === 0) {
+    return (
+      <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
+        <div style={{ fontWeight: 900 }}>Sin datos</div>
+        <div style={{ opacity: 0.8, marginTop: 6 }}>
+          No hay filas para el filtro actual. Hotel: {hotelFilter}. Años detectados:{" "}
+          {availableYears.length ? availableYears.join(", ") : "—"}.
+        </div>
+      </div>
+    );
+  }
 
-  const noData = !loading && list.length === 0;
+  // UI: tabs Año / meses
+  const Tabs = () => {
+    return (
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button
+          className={mode === "YEAR" ? "btnPrimary" : "btnOutline"}
+          type="button"
+          onClick={() => setMode("YEAR")}
+          style={{ borderRadius: 999, padding: ".5rem .85rem" }}
+        >
+          Año
+        </button>
+
+        {MONTHS.map((m, idx) => {
+          const mm = idx + 1;
+          const active = mode === "MONTH" && month === mm;
+          return (
+            <button
+              key={m}
+              className={active ? "btnPrimary" : "btnOutline"}
+              type="button"
+              onClick={() => {
+                setMode("MONTH");
+                setMonth(mm);
+              }}
+              style={{ borderRadius: 999, padding: ".5rem .75rem" }}
+            >
+              {m}
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
 
   return (
-    <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
-      <div style={{ display: "flex", gap: "1rem", alignItems: "baseline", flexWrap: "wrap" }}>
-        <div style={{ fontSize: "1.15rem", fontWeight: 950 }}>
-          Membership ({titleHotel})
+    <div className="card" style={{ padding: "1.1rem", borderRadius: 26 }}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontWeight: 950, fontSize: "1.2rem" }}>
+            Membership ({hotelFilter || "JCR"})
+          </div>
+          <div style={{ opacity: 0.75, marginTop: 4 }}>
+            {mode === "YEAR" ? "Acumulado" : `Mes: ${MONTHS[month - 1]}`} {year} · vs {baseYear}
+          </div>
         </div>
-        <div style={{ opacity: 0.75 }}>
-          Acumulado {year} · vs {baseYear}
-        </div>
-        <div style={{ marginLeft: "auto", opacity: 0.75, fontSize: ".9rem" }}>
-          Fuente: Excel ({filePath})
+
+        <div style={{ maxWidth: "100%", overflowX: "auto" }}>
+          <Tabs />
         </div>
       </div>
 
-      {loading ? (
-        <div style={{ marginTop: ".75rem", opacity: 0.75 }}>Cargando membership…</div>
-      ) : err ? (
-        <div style={{ marginTop: ".75rem", color: "crimson" }}>{err}</div>
-      ) : noData ? (
-        <div style={{ marginTop: ".75rem", opacity: 0.75 }}>
-          Sin datos para {titleHotel} en {year}.
-        </div>
-      ) : (
+      {/* Body responsive */}
+      <div
+        style={{
+          marginTop: "1rem",
+          display: "grid",
+          gridTemplateColumns: "minmax(0,1fr)",
+          gap: "1rem",
+        }}
+      >
+        {/* Total card */}
         <div
           style={{
-            marginTop: "1rem",
-            display: "grid",
-            gridTemplateColumns: "minmax(0, 420px) minmax(0, 1fr)",
-            gap: "1rem",
+            background: "rgba(0,0,0,.03)",
+            borderRadius: 22,
+            padding: "1.2rem",
+            border: "1px solid rgba(0,0,0,.06)",
           }}
         >
-          {/* Total */}
-          <div
-            style={{
-              background: "rgba(0,0,0,0.03)",
-              borderRadius: 20,
-              padding: "1rem",
-              border: "1px solid rgba(0,0,0,0.06)",
-            }}
-          >
-            <div style={{ opacity: 0.7, fontWeight: 700 }}>Total</div>
-            <div style={{ fontSize: "3rem", fontWeight: 950, lineHeight: 1.05, marginTop: ".25rem" }}>
-              {fmtInt(totalCur)}
-            </div>
-            <div
-              style={{
-                display: "inline-block",
-                marginTop: ".8rem",
-                padding: ".4rem .7rem",
-                borderRadius: 999,
-                background: "rgba(16, 185, 129, 0.12)",
-                border: "1px solid rgba(16, 185, 129, 0.25)",
-                fontWeight: 800,
-                color: "rgb(4, 120, 87)",
-              }}
-            >
-              {delta >= 0 ? "+" : ""}
-              {fmtPct(delta)} vs {baseYear}
-            </div>
-
-            <div style={{ marginTop: ".8rem", opacity: 0.65 }}>Composición</div>
+          <div style={{ opacity: 0.75, fontWeight: 800 }}>Total</div>
+          <div style={{ fontSize: "3rem", fontWeight: 950, lineHeight: 1.05, marginTop: ".35rem" }}>
+            {fmtInt(totalCur)}
+          </div>
+          <div style={{ marginTop: ".85rem" }}>
+            {delta === null ? (
+              <span style={{ opacity: 0.75 }}>Sin base {baseYear}</span>
+            ) : (
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: ".5rem .8rem",
+                  borderRadius: 999,
+                  fontWeight: 900,
+                  border: "1px solid rgba(0,0,0,.12)",
+                  background: delta >= 0 ? "rgba(34,197,94,.12)" : "rgba(239,68,68,.12)",
+                }}
+              >
+                {delta >= 0 ? "+" : ""}
+                {fmtPct(delta)} vs {baseYear}
+              </span>
+            )}
           </div>
 
-          {/* Barras por membresía (más chicas + responsive) */}
-          <div style={{ display: "grid", gap: ".65rem" }}>
-            {list.map((it) => {
-              const pct = totalCur > 0 ? (it.cur / totalCur) * 100 : 0;
-              const color = COLOR_BY_MEM[it.key] ?? "#64748b";
+          <div style={{ marginTop: ".9rem", opacity: 0.75 }}>Composición</div>
+        </div>
 
-              return (
-                <div
-                  key={it.key}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "220px minmax(0, 1fr) 90px",
-                    gap: ".75rem",
-                    alignItems: "center",
-                  }}
-                >
-                  <div style={{ fontWeight: 850 }}>
-                    {it.key === "MRD" ? "Member (MRD)" :
-                     it.key === "GLD" ? "Gold Elite (GLD)" :
-                     it.key === "TTM" ? "Titanium Elite (TTM)" :
-                     it.key === "PLT" ? "Platinum Elite (PLT)" :
-                     it.key === "SLR" ? "Silver Elite (SLR)" :
-                     it.key === "AMB" ? "Ambassador Elite (AMB)" : it.key}
-                    <div style={{ fontSize: ".9rem", opacity: 0.7, fontWeight: 700 }}>
-                      {pct.toFixed(1).replace(".", ",")}% del total
+        {/* Bars */}
+        <div style={{ display: "grid", gap: ".9rem" }}>
+          {list.map((it) => {
+            const share = totalCur > 0 ? it.cur / totalCur : 0;
+            const colorKey = tierKeyForColor(it.k);
+            const bg = TIER_COLORS[colorKey] || "linear-gradient(90deg, rgba(0,0,0,.45), rgba(0,0,0,.15))";
+
+            return (
+              <div
+                key={it.k}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "minmax(0,1fr) 90px",
+                  gap: 12,
+                  alignItems: "center",
+                }}
+              >
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                    <div style={{ fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {it.k}
                     </div>
+                    <div style={{ opacity: 0.8, fontWeight: 800 }}>{fmtPct(share)}</div>
                   </div>
 
-                  <div
-                    style={{
-                      height: 12,
-                      borderRadius: 999,
-                      background: "rgba(0,0,0,0.08)",
-                      overflow: "hidden",
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: `${Math.max(0, Math.min(100, pct))}%`,
-                        height: "100%",
-                        borderRadius: 999,
-                        background: color,
-                      }}
-                    />
-                  </div>
-
-                  <div style={{ textAlign: "right", fontWeight: 900 }}>
-                    {fmtInt(it.cur)}
+                  {/* Barra (más chica, como pediste) */}
+                  <div style={{ height: 12, background: "rgba(0,0,0,.06)", borderRadius: 999, overflow: "hidden", marginTop: 8 }}>
+                    <div style={{ width: `${Math.min(100, Math.max(2, share * 100))}%`, height: "100%", background: bg }} />
                   </div>
                 </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
-      {/* responsive tweak */}
-      <style jsx>{`
-        @media (max-width: 900px) {
-          div[style*="grid-template-columns: minmax(0, 420px)"] {
-            grid-template-columns: 1fr !important;
-          }
-        }
-        @media (max-width: 640px) {
-          div[style*="grid-template-columns: 220px"] {
-            grid-template-columns: 1fr !important;
-          }
-        }
-      `}</style>
+                <div style={{ textAlign: "right", fontWeight: 950 }}>{fmtInt(it.cur)}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }
