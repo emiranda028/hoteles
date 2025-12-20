@@ -749,19 +749,28 @@ export default function YearComparator() {
         </div>
       </div>
 
-      {/* ===== 5) NACIONALIDADES ===== */}
-      <div style={{ marginTop: "1.25rem" }}>
-        <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
-          Nacionalidades
-        </div>
-        <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-          Ranking por país + distribución por continente. Usa filtro global de año y hotel.
-        </div>
+ {/* ===== 5) NACIONALIDADES ===== */}
+<div style={{ marginTop: "1.25rem" }}>
+  <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
+    Nacionalidades
+  </div>
 
-        <div style={{ marginTop: ".85rem" }}>
-          <CountryRanking year={year} filePath={NACIONALIDADES_PATH} hotelFilter={globalHotel} />
-        </div>
-      </div>
+  <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
+    Ranking por país + distribución por continente. Usa filtro global de año y hotel.
+  </div>
+
+  <div style={{ marginTop: ".85rem" }}>
+    <CountryRanking
+      year={year}
+      baseYear={baseYear}
+      filePath={NACIONALIDADES_PATH}
+      hotel={globalHotel}                 // 👈 IMPORTANTE: es "hotel", no "hotelFilter"
+      allowedHotels={JCR_HOTELS}          // 👈 para que JCR sea la suma de los 3 hoteles
+      limit={12}
+    />
+  </div>
+</div>
+
 
       {/* ===== 6) GOTEL / MAITEI ===== */}
       <div style={{ marginTop: "1.25rem" }}>
@@ -804,3 +813,4 @@ export default function YearComparator() {
     </section>
   );
 }
+
