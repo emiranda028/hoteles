@@ -606,19 +606,23 @@ export default function YearComparator() {
         </div>
       </div>
 
-      {/* ====== 5) NACIONALIDADES ====== */}
-      <div style={{ marginTop: "1.25rem" }}>
-        <div className="sectionTitle" style={{ fontSize: "1.25rem", fontWeight: 950 }}>
-          Nacionalidades
-        </div>
-        <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-          Ranking por país + distribución global (mapa). Usa filtro global de año.
-        </div>
+ {/* ====== 5) NACIONALIDADES ====== */}
+<div style={{ marginTop: "1.25rem" }}>
+  <div className="sectionTitle" style={{ fontSize: "1.25rem", fontWeight: 950 }}>
+    Nacionalidades
+  </div>
+  <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
+    Ranking por país + distribución global (mapa). Usa filtro global de año.
+  </div>
 
-        <div className="card" style={{ marginTop: "1rem", padding: "1rem", borderRadius: 22 }}>
-          <CountryRanking year={year} />
-        </div>
-      </div>
+  <div className="card" style={{ marginTop: "1rem", padding: "1rem", borderRadius: 22 }}>
+    <CountryRanking
+      year={year}
+      filePath="/data/nacionalidades.csv"
+    />
+  </div>
+</div>
+
 
       {/* ====== 6) CARROUSEL MAITEI (GOTEL) ====== */}
       <div style={{ marginTop: "1.25rem" }}>
@@ -709,4 +713,5 @@ export default function YearComparator() {
     </section>
   );
 }
+
 
