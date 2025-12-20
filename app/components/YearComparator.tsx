@@ -1,449 +1,806 @@
 "use client";
 
-import { useMemo, useState } from "react";
-
+import { useEffect, useMemo, useState } from "react";
 import HofExplorer from "./HofExplorer";
 import MembershipSummary from "./MembershipSummary";
 import CountryRanking from "./CountryRanking";
 
-/**
- * Ajustá estos paths si tus archivos están con otro nombre.
- * Deben existir en: public/data/...
- */
-const HF_FILE = "/data/hf_diario.csv";
-const MEMBERSHIP_FILE = "/data/jcr_membership.xlsx";
-const NACIONALIDADES_FILE = "/data/nacionalidades.xlsx"; // <- si tu archivo se llama distinto, cambiá esto
+type HofRow = {
+  empresa: string;
+  fecha: Date | null;
+  year: number | null;
+  month: number | null; // 1..12
+  quarter: number | null; // 1..4
+  totalOcc: number;
+  roomRevenue: number;
+  adr: number; // average rate (si viene en el CSV)
+  guests: number;
+  hof: string; // History/Forecast
+};
 
+// ======= Config =======
 const DEFAULT_YEAR = 2025;
 const DEFAULT_BASE_YEAR = 2024;
 
-// Hoteles del grupo JCR (importante: deben matchear exactamente "Empresa" en el CSV)
-const JCR_HOTELS = ["MARRIOTT", "SHERATON MDQ", "SHERATON BCR"];
-const GOTEL_HOTELS = ["MAITEI"];
+const JCR_HOTELS = ["MARRIOTT", "SHERATON MDQ", "SHERATON BCR"] as const;
+type JcrHotel = (typeof JCR_HOTELS)[number];
 
-// Disponibilidad fija por día
-const AVAIL_PER_DAY: Record<string, number> = {
-  MARRIOTT: 300,
-  "SHERATON MDQ": 194,
-  "SHERATON BCR": 161,
-  MAITEI: 98,
-};
+const GOTEL_HOTELS = ["MAITEI"] as const;
 
-type GroupKey = "JCR" | "GOTEL";
+const HF_CSV_PATH = "/data/hf_diario.csv";
+const MEMBERSHIP_XLSX_PATH = "/data/jcr_membership.xlsx";
 
-function fmtInt(n: number) {
-  return new Intl.NumberFormat("es-AR", { maximumFractionDigits: 0 }).format(n || 0);
-}
-function fmtMoney(n: number) {
-  return new Intl.NumberFormat("es-AR", {
-    maximumFractionDigits: 2,
-    minimumFractionDigits: 0,
-  }).format(n || 0);
-}
-function fmtPct01(x: number) {
-  return new Intl.NumberFormat("es-AR", { style: "percent", maximumFractionDigits: 1 }).format(x || 0);
-}
-function safeHotelName(x: any) {
-  const s = String(x ?? "").trim();
-  return s.toUpperCase();
+// Si todavía no lo tenés, no rompe build: simplemente muestra “sin datos”.
+const NACIONALIDADES_PATH = "/data/jcr_nacionalidades.xlsx";
+
+// ======= Utils (números / fechas) =======
+function clamp(n: number, a: number, b: number) {
+  return Math.max(a, Math.min(b, n));
 }
 
-type HfRow = {
-  Empresa: string;
-  Fecha: string;
-  "Total Occ.": number | string;
-  "Room Revenue": number | string;
-  "Average Rate": number | string;
-  "Adl. & Chl.": number | string;
-};
+function normStr(s: any) {
+  return String(s ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toUpperCase();
+}
 
-function parseEsNumber(v: any): number {
-  // soporta "22.441,71" y "22441.71" y números
-  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+function safeNum(v: any): number {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
   const s = String(v ?? "").trim();
   if (!s) return 0;
 
-  // Si tiene coma como decimal estilo ES: 22.441,71
+  // Soportar formatos tipo: 22.441,71  o  22441.71  o  22,441.71
+  // Estrategia:
+  // - Si tiene ',' y '.', asumimos que el separador decimal es el último de ellos.
+  // - Si solo tiene ',', puede ser decimal (ES) => reemplazamos ',' por '.'
+  // - Si solo tiene '.', decimal (EN)
   const hasComma = s.includes(",");
   const hasDot = s.includes(".");
+  let out = s;
+
+  // quitar % y espacios
+  out = out.replace(/%/g, "").replace(/\s/g, "");
 
   if (hasComma && hasDot) {
-    // miles con dot y decimales con coma
-    const normalized = s.replace(/\./g, "").replace(",", ".");
-    const n = Number(normalized);
-    return Number.isFinite(n) ? n : 0;
+    const lastComma = out.lastIndexOf(",");
+    const lastDot = out.lastIndexOf(".");
+    const decIsComma = lastComma > lastDot;
+
+    if (decIsComma) {
+      // miles: '.' => remove ; decimal: ',' => '.'
+      out = out.replace(/\./g, "").replace(",", ".");
+    } else {
+      // miles: ',' => remove ; decimal: '.' => keep
+      out = out.replace(/,/g, "");
+    }
+  } else if (hasComma && !hasDot) {
+    // ES decimal
+    out = out.replace(/\./g, "").replace(",", ".");
+  } else {
+    // dot decimal or plain
+    out = out.replace(/,/g, "");
   }
 
-  // Si sólo coma: "123,45"
-  if (hasComma && !hasDot) {
-    const n = Number(s.replace(",", "."));
-    return Number.isFinite(n) ? n : 0;
-  }
-
-  // default
-  const n = Number(s);
+  const n = Number(out);
   return Number.isFinite(n) ? n : 0;
 }
 
-function parseYearFromFecha(fecha: any): number | null {
-  // soporta "1/6/2022", "01-06-22 Wed", etc.
-  const s = String(fecha ?? "").trim();
+function fmtInt(n: number) {
+  return new Intl.NumberFormat("es-AR", { maximumFractionDigits: 0 }).format(n);
+}
+
+function fmtMoney(n: number) {
+  // No asumimos moneda; mostramos número “completo”.
+  return new Intl.NumberFormat("es-AR", { maximumFractionDigits: 2 }).format(n);
+}
+
+function fmtPct(n: number) {
+  return new Intl.NumberFormat("es-AR", {
+    style: "percent",
+    maximumFractionDigits: 1,
+  }).format(clamp(n, 0, 1));
+}
+
+function fmtPP(n: number) {
+  // puntos porcentuales
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${new Intl.NumberFormat("es-AR", { maximumFractionDigits: 1 }).format(n)} p.p.`;
+}
+
+function monthNameEs(m: number) {
+  const names = [
+    "Enero",
+    "Febrero",
+    "Marzo",
+    "Abril",
+    "Mayo",
+    "Junio",
+    "Julio",
+    "Agosto",
+    "Septiembre",
+    "Octubre",
+    "Noviembre",
+    "Diciembre",
+  ];
+  return names[clamp(m, 1, 12) - 1] ?? `Mes ${m}`;
+}
+
+function parseDateLoose(v: any): Date | null {
+  // Tus datos tienen cosas tipo: 1/6/2022 o "01-06-22 Wed"
+  const s = String(v ?? "").trim();
   if (!s) return null;
 
-  // Caso dd/mm/yyyy
-  const m1 = s.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+  // Si viene con día de semana pegado: "01-06-22 Wed"
+  const s0 = s.split(" ")[0];
+
+  // dd/mm/yyyy
+  const m1 = s0.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (m1) {
-    let y = Number(m1[3]);
-    if (y < 100) y += 2000;
-    return Number.isFinite(y) ? y : null;
+    const dd = Number(m1[1]);
+    const mm = Number(m1[2]);
+    const yyyy = Number(m1[3]);
+    const d = new Date(yyyy, mm - 1, dd);
+    return Number.isFinite(d.getTime()) ? d : null;
   }
 
-  // Caso dd-mm-yy...
-  const m2 = s.match(/(\d{1,2})-(\d{1,2})-(\d{2,4})/);
+  // dd-mm-yy
+  const m2 = s0.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})$/);
   if (m2) {
-    let y = Number(m2[3]);
-    if (y < 100) y += 2000;
-    return Number.isFinite(y) ? y : null;
+    const dd = Number(m2[1]);
+    const mm = Number(m2[2]);
+    const yy = Number(m2[3]);
+    const yyyy = yy < 100 ? 2000 + yy : yy;
+    const d = new Date(yyyy, mm - 1, dd);
+    return Number.isFinite(d.getTime()) ? d : null;
   }
 
-  // Caso ISO yyyy-mm-dd
-  const m3 = s.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
-  if (m3) return Number(m3[1]);
-
+  // fallback Date.parse
+  const t = Date.parse(s0);
+  if (Number.isFinite(t)) return new Date(t);
   return null;
 }
 
-async function readCsv(path: string): Promise<HfRow[]> {
-  const res = await fetch(path);
-  if (!res.ok) throw new Error(`No se pudo cargar CSV: ${path}`);
-  const text = await res.text();
+// ======= CSV Parser (semicolon/comma, quoted headers) =======
+function splitCsvLine(line: string, delimiter: string) {
+  const out: string[] = [];
+  let cur = "";
+  let inQuotes = false;
 
-  // Detect delimiter ; o ,
-  const firstLine = text.split(/\r?\n/)[0] ?? "";
-  const delim = firstLine.includes(";") ? ";" : ",";
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
 
-  const lines = text.split(/\r?\n/).filter(Boolean);
-  if (lines.length < 2) return [];
+    if (ch === '"') {
+      // toggle quotes; support escaped double quotes
+      const next = line[i + 1];
+      if (inQuotes && next === '"') {
+        cur += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
 
-  const headers = lines[0].split(delim).map((h) => h.replace(/^"|"$/g, "").trim());
+    if (!inQuotes && ch === delimiter) {
+      out.push(cur);
+      cur = "";
+      continue;
+    }
 
-  const rows: any[] = [];
+    cur += ch;
+  }
+  out.push(cur);
+  return out.map((s) => String(s ?? "").trim());
+}
+
+function detectDelimiter(text: string) {
+  // mira las primeras líneas y decide ; o ,
+  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  const sample = lines.slice(0, 5).join("\n");
+  const semi = (sample.match(/;/g) ?? []).length;
+  const comma = (sample.match(/,/g) ?? []).length;
+  return semi >= comma ? ";" : ",";
+}
+
+function parseCsvToObjects(text: string) {
+  const delimiter = detectDelimiter(text);
+  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (lines.length === 0) return [];
+
+  const header = splitCsvLine(lines[0], delimiter).map((h) =>
+    String(h ?? "")
+      .replace(/\uFEFF/g, "")
+      .trim()
+  );
+
+  const rows: Record<string, string>[] = [];
   for (let i = 1; i < lines.length; i++) {
-    const parts = lines[i].split(delim).map((p) => p.replace(/^"|"$/g, "").trim());
-    if (parts.length < 3) continue;
-    const obj: any = {};
-    headers.forEach((h, idx) => (obj[h] = parts[idx] ?? ""));
+    const cells = splitCsvLine(lines[i], delimiter);
+    const obj: Record<string, string> = {};
+    for (let c = 0; c < header.length; c++) {
+      obj[header[c]] = cells[c] ?? "";
+    }
     rows.push(obj);
   }
-  return rows as HfRow[];
+  return rows;
 }
 
+// ======= Extractors (tolerantes a headers) =======
+function pick(obj: Record<string, any>, candidates: string[]) {
+  const keys = Object.keys(obj);
+  const lower = new Map(keys.map((k) => [k.toLowerCase(), k]));
+  for (const cand of candidates) {
+    const k = lower.get(cand.toLowerCase());
+    if (k != null) return obj[k];
+  }
+  return "";
+}
+
+function toHofRow(obj: Record<string, any>): HofRow {
+  const empresa = normStr(
+    pick(obj, ["Empresa", "empresa", "Hotel", "hotel", "Property"])
+  );
+
+  const fechaRaw = pick(obj, ["Fecha", "fecha", "Date", "date"]);
+  const dateRaw2 = pick(obj, ["Date", "date"]);
+  const d = parseDateLoose(fechaRaw || dateRaw2);
+
+  const year = d ? d.getFullYear() : null;
+  const month = d ? d.getMonth() + 1 : null;
+  const quarter = month ? (month <= 3 ? 1 : month <= 6 ? 2 : month <= 9 ? 3 : 4) : null;
+
+  const totalOcc = safeNum(pick(obj, ["Total Occ.", "Total Occ", "Total\nOcc.", "Total\nOcc", "Total", "Rooms Occupied"]));
+  const roomRevenue = safeNum(pick(obj, ["Room Revenue", "RoomRevenue", "Revenue", "Room_Revenue"]));
+  const adr = safeNum(pick(obj, ["Average Rate", "ADR", "AverageRate"]));
+  const guests = safeNum(pick(obj, ["Adl. & Chl.", "Adl. & Chl", "Huéspedes", "Guests", "Adl&Chl"]));
+
+  const hof = String(pick(obj, ["HoF", "Hof", "H&F", "History/Forecast"])).trim();
+
+  return {
+    empresa,
+    fecha: d,
+    year,
+    month,
+    quarter,
+    totalOcc,
+    roomRevenue,
+    adr,
+    guests,
+    hof,
+  };
+}
+
+// ======= Aggregations =======
 type Agg = {
   rooms: number;
-  guests: number;
   revenue: number;
-  adr: number;
-  occ01: number;
+  guests: number;
+  adr: number; // weighted: revenue / rooms (si rooms > 0)
+  occ: number; // no calculamos aquí porque depende de disponibilidad fija (en HofExplorer)
 };
 
-function aggregateGroup(rows: HfRow[], allowedHotels: string[], year: number): Agg {
-  const allowed = new Set(allowedHotels.map((h) => h.toUpperCase()));
-  const filtered = rows.filter((r) => {
-    const hotel = safeHotelName((r as any).Empresa);
-    if (!allowed.has(hotel)) return false;
-    const y = parseYearFromFecha((r as any).Fecha ?? (r as any).Date);
-    return y === year;
-  });
-
-  let rooms = 0;
-  let guests = 0;
-  let revenue = 0;
-
-  // Para ocupación: total disponibles = sum(availPerDay(hotel) * días_en_registros)
-  // (si el CSV trae una fila por día por hotel, esto funciona perfecto)
-  let availableRooms = 0;
-
-  for (const r of filtered) {
-    const hotel = safeHotelName((r as any).Empresa);
-    const occRooms = parseEsNumber((r as any)["Total Occ."] ?? (r as any)["Total Occ"] ?? (r as any)["Total\nOcc."]);
-    const rev = parseEsNumber((r as any)["Room Revenue"]);
-    const adl = parseEsNumber((r as any)["Adl. & Chl."] ?? (r as any)["Adl. & Chl. "]);
-
-    rooms += occRooms;
-    guests += adl;
-    revenue += rev;
-
-    const avail = AVAIL_PER_DAY[hotel] ?? 0;
-    availableRooms += avail;
-  }
-
-  const occ01 = availableRooms > 0 ? rooms / availableRooms : 0;
+function aggRows(rows: HofRow[]): Agg {
+  const rooms = rows.reduce((a, r) => a + (r.totalOcc || 0), 0);
+  const revenue = rows.reduce((a, r) => a + (r.roomRevenue || 0), 0);
+  const guests = rows.reduce((a, r) => a + (r.guests || 0), 0);
   const adr = rooms > 0 ? revenue / rooms : 0;
-
-  return { rooms, guests, revenue, adr, occ01 };
+  return { rooms, revenue, guests, adr, occ: 0 };
 }
 
-function deltaPct(cur: number, base: number): number {
+function pctDelta(cur: number, base: number) {
   if (!base) return 0;
-  return ((cur - base) / base) * 100;
+  return (cur - base) / base;
 }
 
-function deltaPp(cur01: number, base01: number): number {
-  return (cur01 - base01) * 100;
-}
-
-/** Carrousel simple (por si tu versión actual no tiene BigCarousel4). */
-function BigKpiStrip(props: {
-  title: string;
-  items: { label: string; value: string; sub?: string }[];
+// ======= UI helpers =======
+function Card({
+  children,
+  style,
+  className,
+}: {
+  children: React.ReactNode;
+  style?: React.CSSProperties;
+  className?: string;
 }) {
   return (
-    <div className="card" style={{ padding: "1.15rem", borderRadius: 26 }}>
-      <div style={{ fontWeight: 950, fontSize: "1.1rem" }}>{props.title}</div>
-
-      <div
-        style={{
-          marginTop: "0.85rem",
-          display: "grid",
-          gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-          gap: "0.75rem",
-        }}
-      >
-        {props.items.map((it) => (
-          <div
-            key={it.label}
-            style={{
-              borderRadius: 22,
-              padding: "1rem",
-              background:
-                "linear-gradient(135deg, rgba(255,255,255,.08), rgba(255,255,255,.02))",
-              border: "1px solid rgba(255,255,255,.10)",
-              minHeight: 120,
-              display: "flex",
-              flexDirection: "column",
-              justifyContent: "space-between",
-            }}
-          >
-            <div style={{ opacity: 0.8, fontWeight: 700 }}>{it.label}</div>
-            <div style={{ fontWeight: 950, fontSize: "1.9rem", lineHeight: 1.05 }}>
-              {it.value}
-            </div>
-            {it.sub ? <div style={{ opacity: 0.75, fontSize: ".92rem" }}>{it.sub}</div> : <div />}
-          </div>
-        ))}
-      </div>
+    <div
+      className={className ?? "card"}
+      style={{
+        borderRadius: 24,
+        background: "rgba(255,255,255,.72)",
+        border: "1px solid rgba(15,23,42,.10)",
+        boxShadow: "0 10px 30px rgba(2,6,23,.06)",
+        backdropFilter: "blur(10px)",
+        padding: "1rem",
+        ...style,
+      }}
+    >
+      {children}
     </div>
   );
 }
 
+function PillButton({
+  active,
+  onClick,
+  children,
+}: {
+  active?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="btnPill"
+      style={{
+        padding: ".55rem .9rem",
+        borderRadius: 999,
+        border: active ? "1px solid rgba(59,130,246,.45)" : "1px solid rgba(15,23,42,.14)",
+        background: active ? "rgba(59,130,246,.12)" : "rgba(255,255,255,.8)",
+        color: "rgba(2,6,23,.88)",
+        fontWeight: 800,
+        cursor: "pointer",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function StatTile({
+  title,
+  value,
+  sub,
+  gradient,
+}: {
+  title: string;
+  value: string;
+  sub: string;
+  gradient: string;
+}) {
+  return (
+    <div
+      style={{
+        borderRadius: 26,
+        padding: "1.1rem 1.15rem",
+        background: gradient,
+        color: "white",
+        minHeight: 108,
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "space-between",
+        boxShadow: "0 18px 40px rgba(2,6,23,.18)",
+      }}
+    >
+      <div style={{ fontSize: ".92rem", fontWeight: 900, opacity: 0.95 }}>{title}</div>
+      <div style={{ fontSize: "2rem", fontWeight: 950, letterSpacing: "-.02em", lineHeight: 1.05 }}>
+        {value}
+      </div>
+      <div style={{ fontSize: ".9rem", fontWeight: 800, opacity: 0.92 }}>{sub}</div>
+    </div>
+  );
+}
+
+function DeltaBadge({ cur, base, isPP }: { cur: number; base: number; isPP?: boolean }) {
+  if (isPP) {
+    const pp = (cur - base) * 100;
+    const pos = pp >= 0;
+    return (
+      <span
+        style={{
+          padding: ".25rem .55rem",
+          borderRadius: 999,
+          fontWeight: 950,
+          fontSize: ".82rem",
+          color: pos ? "rgb(21,128,61)" : "rgb(185,28,28)",
+          background: pos ? "rgba(34,197,94,.16)" : "rgba(239,68,68,.16)",
+          border: pos ? "1px solid rgba(34,197,94,.25)" : "1px solid rgba(239,68,68,.25)",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {fmtPP(pp)}
+      </span>
+    );
+  }
+
+  const p = pctDelta(cur, base) * 100;
+  const pos = p >= 0;
+  const sign = pos ? "+" : "";
+  return (
+    <span
+      style={{
+        padding: ".25rem .55rem",
+        borderRadius: 999,
+        fontWeight: 950,
+        fontSize: ".82rem",
+        color: pos ? "rgb(21,128,61)" : "rgb(185,28,28)",
+        background: pos ? "rgba(34,197,94,.16)" : "rgba(239,68,68,.16)",
+        border: pos ? "1px solid rgba(34,197,94,.25)" : "1px solid rgba(239,68,68,.25)",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {sign}
+      {new Intl.NumberFormat("es-AR", { maximumFractionDigits: 1 }).format(p)}%
+    </span>
+  );
+}
+
+function ResponsiveGrid({
+  children,
+  min = 260,
+  gap = 14,
+}: {
+  children: React.ReactNode;
+  min?: number;
+  gap?: number;
+}) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: `repeat(auto-fit, minmax(${min}px, 1fr))`,
+        gap,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+// ======= Main component =======
 export default function YearComparator() {
-  const [group, setGroup] = useState<GroupKey>("JCR");
-  const [year, setYear] = useState<number>(DEFAULT_YEAR);
-  const [baseYear, setBaseYear] = useState<number>(DEFAULT_BASE_YEAR);
+  const [hofRows, setHofRows] = useState<HofRow[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  const allowedHotels = useMemo(() => (group === "JCR" ? JCR_HOTELS : GOTEL_HOTELS), [group]);
+  // filtros globales (para membership + nacionalidades)
+  const [year, setYear] = useState(DEFAULT_YEAR);
+  const [baseYear, setBaseYear] = useState(DEFAULT_BASE_YEAR);
+  const [globalHotel, setGlobalHotel] = useState<string>("JCR"); // JCR / MARRIOTT / SHERATON MDQ / SHERATON BCR
 
-  const [hfRows, setHfRows] = useState<HfRow[] | null>(null);
-  const [hfErr, setHfErr] = useState<string>("");
+  useEffect(() => {
+    let alive = true;
 
-  // cargar CSV una sola vez
-  useMemo(() => {
-    let cancelled = false;
-    (async () => {
+    async function run() {
       try {
-        const rows = await readCsv(HF_FILE);
-        if (cancelled) return;
-        setHfRows(rows);
-        setHfErr("");
-      } catch (e: any) {
-        if (cancelled) return;
-        setHfRows([]);
-        setHfErr(e?.message ?? "Error cargando CSV");
+        setLoading(true);
+        const res = await fetch(HF_CSV_PATH, { cache: "no-store" });
+        if (!res.ok) throw new Error(`No se pudo cargar ${HF_CSV_PATH} (status ${res.status})`);
+        const text = await res.text();
+        const objs = parseCsvToObjects(text);
+        const rows = objs.map(toHofRow);
+
+        // filtramos los que no tengan año/empresa
+        const clean = rows.filter((r) => r.empresa && r.year && r.month && r.quarter);
+
+        if (alive) setHofRows(clean);
+      } catch (e) {
+        console.error(e);
+        if (alive) setHofRows([]);
+      } finally {
+        if (alive) setLoading(false);
       }
-    })();
+    }
+
+    run();
     return () => {
-      cancelled = true;
+      alive = false;
     };
   }, []);
 
-  const aggCur = useMemo(() => {
-    if (!hfRows) return null;
-    return aggregateGroup(hfRows, allowedHotels, year);
-  }, [hfRows, allowedHotels, year]);
+  const availableYears = useMemo(() => {
+    const ys = new Set<number>();
+    for (const r of hofRows) {
+      if (r.year) ys.add(r.year);
+    }
+    const out = Array.from(ys).sort((a, b) => b - a);
+    return out;
+  }, [hofRows]);
 
-  const aggBase = useMemo(() => {
-    if (!hfRows) return null;
-    return aggregateGroup(hfRows, allowedHotels, baseYear);
-  }, [hfRows, allowedHotels, baseYear]);
+  // Asegurar year/baseYear válidos
+  useEffect(() => {
+    if (availableYears.length === 0) return;
+    if (!availableYears.includes(year)) setYear(availableYears[0]);
+    if (!availableYears.includes(baseYear)) {
+      const candidate = year - 1;
+      if (availableYears.includes(candidate)) setBaseYear(candidate);
+      else setBaseYear(availableYears[Math.min(1, availableYears.length - 1)]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [availableYears.join(","), hofRows.length]);
 
-  const headerTitle = group === "JCR" ? "Grupo JCR" : "Gotel Management · Maitei";
+  // ===== KPIs JCR (año actual y base) =====
+  const jcrYearRows = useMemo(() => {
+    return hofRows.filter((r) => r.year === year && JCR_HOTELS.includes(r.empresa as any));
+  }, [hofRows, year]);
 
-  const kpiItems = useMemo(() => {
-    const cur = aggCur ?? { rooms: 0, revenue: 0, guests: 0, adr: 0, occ01: 0 };
-    const base = aggBase ?? { rooms: 0, revenue: 0, guests: 0, adr: 0, occ01: 0 };
+  const jcrBaseRows = useMemo(() => {
+    return hofRows.filter((r) => r.year === baseYear && JCR_HOTELS.includes(r.empresa as any));
+  }, [hofRows, baseYear]);
 
-    return [
-      {
-        label: "Rooms occupied",
-        value: fmtInt(cur.rooms),
-        sub: `vs ${baseYear}: ${deltaPct(cur.rooms, base.rooms).toFixed(1)}%`,
-      },
-      {
-        label: "Room Revenue (USD)",
-        value: fmtMoney(cur.revenue),
-        sub: `vs ${baseYear}: ${deltaPct(cur.revenue, base.revenue).toFixed(1)}%`,
-      },
-      {
-        label: "Huéspedes",
-        value: fmtInt(cur.guests),
-        sub: `vs ${baseYear}: ${deltaPct(cur.guests, base.guests).toFixed(1)}%`,
-      },
-      {
-        label: "Ocupación",
-        value: fmtPct01(cur.occ01),
-        sub: `vs ${baseYear}: ${deltaPp(cur.occ01, base.occ01).toFixed(1)} p.p.`,
-      },
-    ];
-  }, [aggCur, aggBase, baseYear]);
+  const kpiJcrCur = useMemo(() => aggRows(jcrYearRows), [jcrYearRows]);
+  const kpiJcrBase = useMemo(() => aggRows(jcrBaseRows), [jcrBaseRows]);
 
+  // ===== Comparativa 2025 vs 2024 (tabla por hotel) =====
+  const compareTable = useMemo(() => {
+    const hotels = Array.from(JCR_HOTELS);
+
+    return hotels.map((h) => {
+      const cur = aggRows(hofRows.filter((r) => r.year === year && r.empresa === h));
+      const base = aggRows(hofRows.filter((r) => r.year === baseYear && r.empresa === h));
+      return { hotel: h, cur, base };
+    });
+  }, [hofRows, year, baseYear]);
+
+  // ====== Render ======
   return (
-    <section className="section" id="comparador">
-      {/* ====== Filtros globales ====== */}
-      <div className="card" style={{ padding: "1rem", borderRadius: 24 }}>
-        <div style={{ display: "flex", gap: ".75rem", flexWrap: "wrap", alignItems: "center" }}>
-          <div style={{ fontWeight: 950, fontSize: "1.1rem" }}>{headerTitle}</div>
-
-          <div style={{ marginLeft: "auto", display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
-            <button
-              className={group === "JCR" ? "btnPrimary" : "btnOutline"}
-              type="button"
-              onClick={() => setGroup("JCR")}
-            >
-              JCR
-            </button>
-            <button
-              className={group === "GOTEL" ? "btnPrimary" : "btnOutline"}
-              type="button"
-              onClick={() => setGroup("GOTEL")}
-            >
-              GOTEL
-            </button>
-
-            <div style={{ width: 14 }} />
-
-            {/* Año global */}
-            <select
-              className="select"
-              value={year}
-              onChange={(e) => setYear(Number(e.target.value))}
-              style={{ padding: ".55rem .7rem", borderRadius: 14 }}
-            >
-              {[2022, 2023, 2024, 2025, 2026].map((y) => (
-                <option value={y} key={y}>
-                  Año {y}
-                </option>
-              ))}
-            </select>
-
-            <select
-              className="select"
-              value={baseYear}
-              onChange={(e) => setBaseYear(Number(e.target.value))}
-              style={{ padding: ".55rem .7rem", borderRadius: 14 }}
-            >
-              {[2022, 2023, 2024, 2025, 2026].map((y) => (
-                <option value={y} key={y}>
-                  Base {y}
-                </option>
-              ))}
-            </select>
+    <section className="section" id="comparador" style={{ marginTop: "1rem" }}>
+      {/* Header de sección */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: ".8rem", alignItems: "end", justifyContent: "space-between" }}>
+        <div>
+          <div className="sectionTitle" style={{ fontSize: "1.3rem", fontWeight: 950 }}>
+            Informe de Gestión · Comparativo multianual
+          </div>
+          <div className="sectionDesc" style={{ marginTop: ".25rem", opacity: 0.8, fontWeight: 700 }}>
+            KPIs del Grupo JCR + comparativa interanual + H&F + Membership + Nacionalidades.
           </div>
         </div>
 
-        {hfErr ? (
-          <div style={{ marginTop: ".75rem", color: "#ffb4b4", fontWeight: 700 }}>
-            {hfErr}
+        <Card style={{ padding: ".85rem .95rem" }}>
+          <div style={{ fontWeight: 950, marginBottom: ".45rem" }}>Filtros globales</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: ".55rem", alignItems: "center" }}>
+            <div style={{ display: "flex", gap: ".45rem", flexWrap: "wrap" }}>
+              {availableYears.slice(0, 8).map((y) => (
+                <PillButton
+                  key={y}
+                  active={y === year}
+                  onClick={() => {
+                    setYear(y);
+                    // si baseYear quedara igual al year, lo corremos a y-1 si existe
+                    if (baseYear === y && availableYears.includes(y - 1)) setBaseYear(y - 1);
+                  }}
+                >
+                  {y}
+                </PillButton>
+              ))}
+            </div>
+
+            <div style={{ width: 1, height: 26, background: "rgba(2,6,23,.12)" }} />
+
+            <div style={{ display: "flex", gap: ".45rem", flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ fontWeight: 900, opacity: 0.8 }}>vs</span>
+              {availableYears
+                .filter((y) => y !== year)
+                .slice(0, 8)
+                .map((y) => (
+                  <PillButton key={y} active={y === baseYear} onClick={() => setBaseYear(y)}>
+                    {y}
+                  </PillButton>
+                ))}
+            </div>
+
+            <div style={{ width: 1, height: 26, background: "rgba(2,6,23,.12)" }} />
+
+            <div style={{ display: "flex", gap: ".45rem", flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ fontWeight: 900, opacity: 0.8 }}>Hotel</span>
+              {["JCR", ...JCR_HOTELS].map((h) => (
+                <PillButton key={h} active={globalHotel === h} onClick={() => setGlobalHotel(h)}>
+                  {h === "JCR" ? "JCR (Total)" : h}
+                </PillButton>
+              ))}
+            </div>
           </div>
-        ) : null}
+        </Card>
       </div>
 
-      {/* ====== 1) CARROUSELES / KPIs ====== */}
+      {/* ===== 1) CARROUSELES JCR ===== */}
       <div style={{ marginTop: "1rem" }}>
-        <BigKpiStrip title={`${headerTitle} — KPIs ${year} (vs ${baseYear})`} items={kpiItems} />
-      </div>
+        <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
+          Grupo JCR — KPIs {year} (vs {baseYear})
+        </div>
+        <div className="sectionDesc" style={{ marginTop: ".3rem", opacity: 0.82 }}>
+          Datos consolidados desde H&F ({HF_CSV_PATH}). En el Explorer la ocupación se calcula con disponibilidad fija.
+        </div>
 
-      {/* ====== 2) COMPARATIVA 2025 vs 2024 (solo texto por ahora) ====== */}
-      <div style={{ marginTop: "1rem" }} className="card">
-        <div style={{ padding: "1rem", borderRadius: 24 }}>
-          <div className="sectionTitle" style={{ fontSize: "1.2rem", fontWeight: 950 }}>
-            Comparativa {year} vs {baseYear}
-          </div>
-          <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-            Resumen ejecutivo automático según el grupo seleccionado.
-          </div>
+        <div style={{ marginTop: ".9rem" }}>
+          <ResponsiveGrid min={240} gap={14}>
+            <StatTile
+              title="Habitaciones ocupadas"
+              value={loading ? "—" : fmtInt(kpiJcrCur.rooms)}
+              sub={
+                loading ? "—" : `${fmtInt(kpiJcrBase.rooms)} → ${fmtInt(kpiJcrCur.rooms)} · `
+              }
+              gradient="linear-gradient(135deg, rgb(59,130,246), rgb(34,197,94))"
+            />
+            <StatTile
+              title="Recaudación total (Room Revenue)"
+              value={loading ? "—" : fmtMoney(kpiJcrCur.revenue)}
+              sub={loading ? "—" : `${fmtMoney(kpiJcrBase.revenue)} → ${fmtMoney(kpiJcrCur.revenue)} · `}
+              gradient="linear-gradient(135deg, rgb(147,51,234), rgb(59,130,246))"
+            />
+            <StatTile
+              title="Huéspedes"
+              value={loading ? "—" : fmtInt(kpiJcrCur.guests)}
+              sub={loading ? "—" : `${fmtInt(kpiJcrBase.guests)} → ${fmtInt(kpiJcrCur.guests)} · `}
+              gradient="linear-gradient(135deg, rgb(236,72,153), rgb(147,51,234))"
+            />
+            <StatTile
+              title="Tarifa promedio anual (ADR aprox.)"
+              value={loading ? "—" : fmtMoney(kpiJcrCur.adr)}
+              sub={loading ? "—" : `${fmtMoney(kpiJcrBase.adr)} → ${fmtMoney(kpiJcrCur.adr)} · `}
+              gradient="linear-gradient(135deg, rgb(245,158,11), rgb(236,72,153))"
+            />
+          </ResponsiveGrid>
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: ".65rem", marginTop: ".85rem" }}>
-            {kpiItems.map((k) => (
-              <div
-                key={k.label}
-                style={{
-                  padding: ".85rem",
-                  borderRadius: 18,
-                  border: "1px solid rgba(255,255,255,.10)",
-                  background: "rgba(255,255,255,.03)",
-                }}
-              >
-                <div style={{ opacity: 0.85, fontWeight: 800 }}>{k.label}</div>
-                <div style={{ fontSize: "1.4rem", fontWeight: 950, marginTop: ".25rem" }}>{k.value}</div>
-                <div style={{ opacity: 0.8, marginTop: ".2rem" }}>{k.sub}</div>
+          {/* deltas */}
+          <Card style={{ marginTop: "0.9rem" }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: ".8rem", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ fontWeight: 950 }}>Variación vs {baseYear}</div>
+              <div style={{ display: "flex", gap: ".6rem", flexWrap: "wrap" }}>
+                <span style={{ display: "inline-flex", gap: ".35rem", alignItems: "center", fontWeight: 850 }}>
+                  Rooms <DeltaBadge cur={kpiJcrCur.rooms} base={kpiJcrBase.rooms} />
+                </span>
+                <span style={{ display: "inline-flex", gap: ".35rem", alignItems: "center", fontWeight: 850 }}>
+                  Revenue <DeltaBadge cur={kpiJcrCur.revenue} base={kpiJcrBase.revenue} />
+                </span>
+                <span style={{ display: "inline-flex", gap: ".35rem", alignItems: "center", fontWeight: 850 }}>
+                  Huéspedes <DeltaBadge cur={kpiJcrCur.guests} base={kpiJcrBase.guests} />
+                </span>
+                <span style={{ display: "inline-flex", gap: ".35rem", alignItems: "center", fontWeight: 850 }}>
+                  ADR <DeltaBadge cur={kpiJcrCur.adr} base={kpiJcrBase.adr} />
+                </span>
               </div>
-            ))}
-          </div>
+            </div>
+          </Card>
         </div>
       </div>
 
-      {/* ====== 3) H&F ====== */}
-      <div style={{ marginTop: "1rem" }}>
-        <HofExplorer
-          title={`H&F – Explorador (${headerTitle})`}
-          filePath={HF_FILE}
-          allowedHotels={allowedHotels}
-          defaultYear={year}
-          defaultHotel={allowedHotels[0] ?? "MARRIOTT"}
-          availPerDayByHotel={AVAIL_PER_DAY}
-        />
+      {/* ===== 2) COMPARATIVA (tabla por hotel) ===== */}
+      <div style={{ marginTop: "1.25rem" }}>
+        <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
+          Comparativa {year} vs {baseYear} — por hotel (JCR)
+        </div>
+
+        <Card style={{ marginTop: ".85rem", overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "separate", borderSpacing: 0 }}>
+            <thead>
+              <tr style={{ textAlign: "left", fontWeight: 950, opacity: 0.9 }}>
+                <th style={{ padding: ".65rem .6rem" }}>Hotel</th>
+                <th style={{ padding: ".65rem .6rem" }}>Rooms ({year})</th>
+                <th style={{ padding: ".65rem .6rem" }}>Δ</th>
+                <th style={{ padding: ".65rem .6rem" }}>Revenue ({year})</th>
+                <th style={{ padding: ".65rem .6rem" }}>Δ</th>
+                <th style={{ padding: ".65rem .6rem" }}>Guests ({year})</th>
+                <th style={{ padding: ".65rem .6rem" }}>Δ</th>
+                <th style={{ padding: ".65rem .6rem" }}>ADR ({year})</th>
+                <th style={{ padding: ".65rem .6rem" }}>Δ</th>
+              </tr>
+            </thead>
+            <tbody>
+              {compareTable.map((row) => (
+                <tr key={row.hotel} style={{ borderTop: "1px solid rgba(2,6,23,.08)" }}>
+                  <td style={{ padding: ".7rem .6rem", fontWeight: 950 }}>{row.hotel}</td>
+
+                  <td style={{ padding: ".7rem .6rem", fontWeight: 900 }}>{fmtInt(row.cur.rooms)}</td>
+                  <td style={{ padding: ".7rem .6rem" }}>
+                    <DeltaBadge cur={row.cur.rooms} base={row.base.rooms} />
+                  </td>
+
+                  <td style={{ padding: ".7rem .6rem", fontWeight: 900 }}>{fmtMoney(row.cur.revenue)}</td>
+                  <td style={{ padding: ".7rem .6rem" }}>
+                    <DeltaBadge cur={row.cur.revenue} base={row.base.revenue} />
+                  </td>
+
+                  <td style={{ padding: ".7rem .6rem", fontWeight: 900 }}>{fmtInt(row.cur.guests)}</td>
+                  <td style={{ padding: ".7rem .6rem" }}>
+                    <DeltaBadge cur={row.cur.guests} base={row.base.guests} />
+                  </td>
+
+                  <td style={{ padding: ".7rem .6rem", fontWeight: 900 }}>{fmtMoney(row.cur.adr)}</td>
+                  <td style={{ padding: ".7rem .6rem" }}>
+                    <DeltaBadge cur={row.cur.adr} base={row.base.adr} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
       </div>
 
-      {/* ====== 4) MEMBERSHIP ====== */}
+      {/* ===== 3) H&F — Explorer JCR ===== */}
       <div style={{ marginTop: "1.25rem" }}>
-        <MembershipSummary
-          year={year}
-          baseYear={baseYear}
-          allowedHotels={group === "JCR" ? JCR_HOTELS : GOTEL_HOTELS}
-          filePath={MEMBERSHIP_FILE}
-          groupLabel={headerTitle}
-          enableHotelFilter={group === "JCR"} // JCR: deja filtrar Marriott/MDQ/BCR/JCR
-        />
-      </div>
-
-      {/* ====== 5) NACIONALIDADES ====== */}
-      <div style={{ marginTop: "1.25rem" }}>
-        <div className="sectionTitle" style={{ fontSize: "1.25rem", fontWeight: 950 }}>
-          Nacionalidades
+        <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
+          H&amp;F — Grupo JCR (Explorer)
         </div>
         <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-          Ranking por país + distribución global (mapa). Usa filtro global de año.
+          Filtros por hotel + año/trimestre/mes. Incluye ranking mensual por hotel.
         </div>
 
-        <div className="card" style={{ marginTop: "1rem", padding: "1rem", borderRadius: 22 }}>
-          <CountryRanking
-            year={year}
-            filePath={NACIONALIDADES_FILE}
-            baseYear={baseYear}
-            limit={18}
+        <div style={{ marginTop: ".85rem" }}>
+          <HofExplorer
+            title="H&F – Grupo JCR"
+            filePath={HF_CSV_PATH}
+            allowedHotels={[...JCR_HOTELS]}
+            defaultYear={year}
           />
         </div>
       </div>
+
+      {/* ===== 4) MEMBERSHIP ===== */}
+      <div style={{ marginTop: "1.25rem" }}>
+        <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
+          Membership (JCR)
+        </div>
+        <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
+          Filtrado por año y hotel (JCR total o por propiedad). Gráficos compactos con colores por membresía.
+        </div>
+
+        <div style={{ marginTop: ".85rem" }}>
+          <MembershipSummary
+            year={year}
+            baseYear={baseYear}
+            allowedHotels={[...JCR_HOTELS]}
+            filePath={MEMBERSHIP_XLSX_PATH}
+            hotelFilter={globalHotel}
+          />
+        </div>
+      </div>
+
+      {/* ===== 5) NACIONALIDADES ===== */}
+      <div style={{ marginTop: "1.25rem" }}>
+        <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
+          Nacionalidades
+        </div>
+        <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
+          Ranking por país + distribución por continente. Usa filtro global de año y hotel.
+        </div>
+
+        <div style={{ marginTop: ".85rem" }}>
+          <CountryRanking year={year} filePath={NACIONALIDADES_PATH} hotelFilter={globalHotel} />
+        </div>
+      </div>
+
+      {/* ===== 6) GOTEL / MAITEI ===== */}
+      <div style={{ marginTop: "1.25rem" }}>
+        <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
+          Gotel Management — Hotel Maitei
+        </div>
+        <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
+          Bloque separado del Grupo JCR.
+        </div>
+
+        <div style={{ marginTop: ".85rem" }}>
+          <HofExplorer
+            title="H&F – Maitei (Gotel)"
+            filePath={HF_CSV_PATH}
+            allowedHotels={[...GOTEL_HOTELS]}
+            defaultYear={year}
+          />
+        </div>
+      </div>
+
+      {/* ===== Nota responsive ===== */}
+      <style jsx global>{`
+        .btnPill:hover {
+          transform: translateY(-1px);
+        }
+
+        @media (max-width: 640px) {
+          .sectionTitle {
+            font-size: 1.05rem !important;
+          }
+          .sectionDesc {
+            font-size: 0.95rem !important;
+          }
+          .btnPill {
+            padding: 0.5rem 0.75rem !important;
+            font-weight: 900 !important;
+          }
+        }
+      `}</style>
     </section>
   );
 }
