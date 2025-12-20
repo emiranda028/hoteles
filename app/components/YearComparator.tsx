@@ -1,816 +1,634 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+
 import HofExplorer from "./HofExplorer";
 import MembershipSummary from "./MembershipSummary";
 import CountryRanking from "./CountryRanking";
 
-type HofRow = {
-  empresa: string;
-  fecha: Date | null;
-  year: number | null;
-  month: number | null; // 1..12
-  quarter: number | null; // 1..4
-  totalOcc: number;
-  roomRevenue: number;
-  adr: number; // average rate (si viene en el CSV)
-  guests: number;
-  hof: string; // History/Forecast
-};
+/**
+ * AJUSTES CLAVE:
+ * - Filtros globales (AÑO + HOTEL) que aplican a:
+ *   - Comparativa
+ *   - Membership
+ *   - H&F
+ * - Nacionalidades: NO usa filtro hotel (solo Marriott)
+ */
 
-// ======= Config =======
-const DEFAULT_YEAR = 2025;
-const DEFAULT_BASE_YEAR = 2024;
-
-const JCR_HOTELS = ["MARRIOTT", "SHERATON MDQ", "SHERATON BCR"] as const;
-type JcrHotel = (typeof JCR_HOTELS)[number];
-
-const GOTEL_HOTELS = ["MAITEI"] as const;
-
-const HF_CSV_PATH = "/data/hf_diario.csv";
-const MEMBERSHIP_XLSX_PATH = "/data/jcr_membership.xlsx";
-
-// Si todavía no lo tenés, no rompe build: simplemente muestra “sin datos”.
+const HF_PATH = "/data/hf_diario.csv";
+const MEMBERSHIP_PATH = "/data/jcr_membership.xlsx";
 const NACIONALIDADES_PATH = "/data/jcr_nacionalidades.xlsx";
 
-// ======= Utils (números / fechas) =======
-function clamp(n: number, a: number, b: number) {
-  return Math.max(a, Math.min(b, n));
-}
+const JCR_HOTELS = ["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"];
+const GOTEL_HOTELS = ["MAITEI"];
+const HOTEL_GROUPS: Record<string, string[]> = {
+  JCR: JCR_HOTELS,
+  GOTEL: GOTEL_HOTELS,
+};
 
-function normStr(s: any) {
-  return String(s ?? "")
+type HofRow = {
+  empresa: string;
+  year: number;
+  month: number; // 1-12
+  occRooms: number; // occupied rooms (Total Occ.)
+  roomRevenue: number;
+  adr: number;
+  persons: number; // guests (Adl.&Chl.)
+  // ...otros si existen
+};
+
+function normHotel(x: any) {
+  const s = String(x ?? "")
     .trim()
-    .replace(/\s+/g, " ")
     .toUpperCase();
+
+  if (!s) return "";
+
+  // Normalizaciones típicas
+  if (s.includes("MARRIOTT")) return "MARRIOTT";
+  if (s.includes("BARILOCHE") || s.includes("BCR")) return "SHERATON BCR";
+  if (s.includes("MAR DEL PLATA") || s.includes("MDQ")) return "SHERATON MDQ";
+  if (s.includes("MAITEI")) return "MAITEI";
+
+  // Si ya viene ok:
+  if (JCR_HOTELS.includes(s)) return s;
+  if (GOTEL_HOTELS.includes(s)) return s;
+
+  return s;
 }
 
-function safeNum(v: any): number {
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  const s = String(v ?? "").trim();
+function parseNumberES(v: any) {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+
+  let s = String(v).trim();
   if (!s) return 0;
 
-  // Soportar formatos tipo: 22.441,71  o  22441.71  o  22,441.71
-  // Estrategia:
-  // - Si tiene ',' y '.', asumimos que el separador decimal es el último de ellos.
-  // - Si solo tiene ',', puede ser decimal (ES) => reemplazamos ',' por '.'
-  // - Si solo tiene '.', decimal (EN)
-  const hasComma = s.includes(",");
-  const hasDot = s.includes(".");
-  let out = s;
-
-  // quitar % y espacios
-  out = out.replace(/%/g, "").replace(/\s/g, "");
-
-  if (hasComma && hasDot) {
-    const lastComma = out.lastIndexOf(",");
-    const lastDot = out.lastIndexOf(".");
-    const decIsComma = lastComma > lastDot;
-
-    if (decIsComma) {
-      // miles: '.' => remove ; decimal: ',' => '.'
-      out = out.replace(/\./g, "").replace(",", ".");
-    } else {
-      // miles: ',' => remove ; decimal: '.' => keep
-      out = out.replace(/,/g, "");
-    }
-  } else if (hasComma && !hasDot) {
-    // ES decimal
-    out = out.replace(/\./g, "").replace(",", ".");
-  } else {
-    // dot decimal or plain
-    out = out.replace(/,/g, "");
-  }
-
-  const n = Number(out);
+  // Quitar separadores de miles y normalizar decimal
+  // Ej: "5.251.930,33" -> "5251930.33"
+  s = s.replace(/\./g, "").replace(/,/g, ".");
+  const n = Number(s);
   return Number.isFinite(n) ? n : 0;
 }
 
+function parseYearFromAny(d: any): number {
+  // Si ya es un año
+  if (typeof d === "number" && d > 1900 && d < 2100) return Math.floor(d);
+
+  const s = String(d ?? "").trim();
+  if (!s) return 0;
+
+  // Formatos posibles: "1/6/2022", "01-06-22 Wed", "2022-06-01"
+  // Buscamos 4 dígitos
+  const m4 = s.match(/(19|20)\d{2}/);
+  if (m4) return Number(m4[0]);
+
+  // Dos dígitos al final: "01-06-22"
+  const m2 = s.match(/(\D|^)(\d{2})(\D|$)/g);
+  // no confiable, devolvemos 0
+  return 0;
+}
+
+function parseMonthFromAny(d: any): number {
+  // busco dd/mm/yyyy o d/m/yyyy
+  const s = String(d ?? "").trim();
+  if (!s) return 0;
+
+  // 1/6/2022 -> month=6
+  const m = s.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-]((19|20)\d{2}|\d{2})/);
+  if (m) {
+    const mm = Number(m[2]);
+    if (mm >= 1 && mm <= 12) return mm;
+  }
+
+  return 0;
+}
+
 function fmtInt(n: number) {
-  return new Intl.NumberFormat("es-AR", { maximumFractionDigits: 0 }).format(n);
+  return (n ?? 0).toLocaleString("es-AR");
 }
-
 function fmtMoney(n: number) {
-  // No asumimos moneda; mostramos número “completo”.
-  return new Intl.NumberFormat("es-AR", { maximumFractionDigits: 2 }).format(n);
+  return (n ?? 0).toLocaleString("es-AR", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 }
-
 function fmtPct(n: number) {
-  return new Intl.NumberFormat("es-AR", {
-    style: "percent",
-    maximumFractionDigits: 1,
-  }).format(clamp(n, 0, 1));
+  return (n ?? 0).toLocaleString("es-AR", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + "%";
 }
 
-function fmtPP(n: number) {
-  // puntos porcentuales
-  const sign = n > 0 ? "+" : "";
-  return `${sign}${new Intl.NumberFormat("es-AR", { maximumFractionDigits: 1 }).format(n)} p.p.`;
+function availabilityPerDay(hotel: string) {
+  const h = normHotel(hotel);
+  if (h === "MARRIOTT") return 300;
+  if (h === "SHERATON MDQ") return 194;
+  if (h === "SHERATON BCR") return 161;
+  if (h === "MAITEI") return 98;
+  return 0;
 }
 
-function monthNameEs(m: number) {
-  const names = [
-    "Enero",
-    "Febrero",
-    "Marzo",
-    "Abril",
-    "Mayo",
-    "Junio",
-    "Julio",
-    "Agosto",
-    "Septiembre",
-    "Octubre",
-    "Noviembre",
-    "Diciembre",
-  ];
-  return names[clamp(m, 1, 12) - 1] ?? `Mes ${m}`;
-}
+// CSV simple reader (public/)
+async function readCsv(path: string): Promise<any[]> {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error(`No se pudo cargar CSV ${path} (status ${res.status})`);
+  const text = await res.text();
 
-function parseDateLoose(v: any): Date | null {
-  // Tus datos tienen cosas tipo: 1/6/2022 o "01-06-22 Wed"
-  const s = String(v ?? "").trim();
-  if (!s) return null;
+  // Separador probable ; (tus datos vienen con ;)
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  if (lines.length < 2) return [];
 
-  // Si viene con día de semana pegado: "01-06-22 Wed"
-  const s0 = s.split(" ")[0];
+  const header = lines[0].split(";").map((h) => h.replace(/^"|"$/g, "").trim());
+  const rows: any[] = [];
 
-  // dd/mm/yyyy
-  const m1 = s0.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (m1) {
-    const dd = Number(m1[1]);
-    const mm = Number(m1[2]);
-    const yyyy = Number(m1[3]);
-    const d = new Date(yyyy, mm - 1, dd);
-    return Number.isFinite(d.getTime()) ? d : null;
-  }
-
-  // dd-mm-yy
-  const m2 = s0.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})$/);
-  if (m2) {
-    const dd = Number(m2[1]);
-    const mm = Number(m2[2]);
-    const yy = Number(m2[3]);
-    const yyyy = yy < 100 ? 2000 + yy : yy;
-    const d = new Date(yyyy, mm - 1, dd);
-    return Number.isFinite(d.getTime()) ? d : null;
-  }
-
-  // fallback Date.parse
-  const t = Date.parse(s0);
-  if (Number.isFinite(t)) return new Date(t);
-  return null;
-}
-
-// ======= CSV Parser (semicolon/comma, quoted headers) =======
-function splitCsvLine(line: string, delimiter: string) {
-  const out: string[] = [];
-  let cur = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-
-    if (ch === '"') {
-      // toggle quotes; support escaped double quotes
-      const next = line[i + 1];
-      if (inQuotes && next === '"') {
-        cur += '"';
-        i++;
-      } else {
-        inQuotes = !inQuotes;
-      }
-      continue;
-    }
-
-    if (!inQuotes && ch === delimiter) {
-      out.push(cur);
-      cur = "";
-      continue;
-    }
-
-    cur += ch;
-  }
-  out.push(cur);
-  return out.map((s) => String(s ?? "").trim());
-}
-
-function detectDelimiter(text: string) {
-  // mira las primeras líneas y decide ; o ,
-  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  const sample = lines.slice(0, 5).join("\n");
-  const semi = (sample.match(/;/g) ?? []).length;
-  const comma = (sample.match(/,/g) ?? []).length;
-  return semi >= comma ? ";" : ",";
-}
-
-function parseCsvToObjects(text: string) {
-  const delimiter = detectDelimiter(text);
-  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  if (lines.length === 0) return [];
-
-  const header = splitCsvLine(lines[0], delimiter).map((h) =>
-    String(h ?? "")
-      .replace(/\uFEFF/g, "")
-      .trim()
-  );
-
-  const rows: Record<string, string>[] = [];
   for (let i = 1; i < lines.length; i++) {
-    const cells = splitCsvLine(lines[i], delimiter);
-    const obj: Record<string, string> = {};
+    const raw = lines[i];
+    const cols = raw.split(";");
+
+    const obj: any = {};
     for (let c = 0; c < header.length; c++) {
-      obj[header[c]] = cells[c] ?? "";
+      obj[header[c]] = (cols[c] ?? "").replace(/^"|"$/g, "").trim();
     }
     rows.push(obj);
   }
   return rows;
 }
 
-// ======= Extractors (tolerantes a headers) =======
-function pick(obj: Record<string, any>, candidates: string[]) {
-  const keys = Object.keys(obj);
-  const lower = new Map(keys.map((k) => [k.toLowerCase(), k]));
-  for (const cand of candidates) {
-    const k = lower.get(cand.toLowerCase());
-    if (k != null) return obj[k];
-  }
-  return "";
+function toHofRow(r: any): HofRow | null {
+  // Keys típicas del H&F diario:
+  // Empresa, Fecha, Total Occ., Room Revenue, Average Rate, Adl.&Chl., etc.
+
+  const empresa = normHotel(r["Empresa"] ?? r["empresa"] ?? r["HOTEL"] ?? r["Hotel"]);
+  const fecha = r["Fecha"] ?? r["fecha"] ?? r["Date"] ?? r["date"];
+
+  const year = parseYearFromAny(fecha);
+  const month = parseMonthFromAny(fecha);
+
+  if (!empresa || !year || !month) return null;
+
+  const occRooms = parseNumberES(r["Total Occ."] ?? r["Total\nOcc."] ?? r["Total Occ"] ?? r["TotalOcc"] ?? r["Occupied"]);
+  const roomRevenue = parseNumberES(r["Room Revenue"] ?? r["RoomRevenue"] ?? r["Revenue"]);
+  const adr = parseNumberES(r["Average Rate"] ?? r["Average\nRate"] ?? r["ADR"] ?? r["AverageRate"]);
+  const persons = parseNumberES(r["Adl. & Chl."] ?? r["Adl.\n&\nChl."] ?? r["Guests"] ?? r["Pax"]);
+
+  return { empresa, year, month, occRooms, roomRevenue, adr, persons };
 }
 
-function toHofRow(obj: Record<string, any>): HofRow {
-  const empresa = normStr(
-    pick(obj, ["Empresa", "empresa", "Hotel", "hotel", "Property"])
-  );
-
-  const fechaRaw = pick(obj, ["Fecha", "fecha", "Date", "date"]);
-  const dateRaw2 = pick(obj, ["Date", "date"]);
-  const d = parseDateLoose(fechaRaw || dateRaw2);
-
-  const year = d ? d.getFullYear() : null;
-  const month = d ? d.getMonth() + 1 : null;
-  const quarter = month ? (month <= 3 ? 1 : month <= 6 ? 2 : month <= 9 ? 3 : 4) : null;
-
-  const totalOcc = safeNum(pick(obj, ["Total Occ.", "Total Occ", "Total\nOcc.", "Total\nOcc", "Total", "Rooms Occupied"]));
-  const roomRevenue = safeNum(pick(obj, ["Room Revenue", "RoomRevenue", "Revenue", "Room_Revenue"]));
-  const adr = safeNum(pick(obj, ["Average Rate", "ADR", "AverageRate"]));
-  const guests = safeNum(pick(obj, ["Adl. & Chl.", "Adl. & Chl", "Huéspedes", "Guests", "Adl&Chl"]));
-
-  const hof = String(pick(obj, ["HoF", "Hof", "H&F", "History/Forecast"])).trim();
-
-  return {
-    empresa,
-    fecha: d,
-    year,
-    month,
-    quarter,
-    totalOcc,
-    roomRevenue,
-    adr,
-    guests,
-    hof,
-  };
-}
-
-// ======= Aggregations =======
-type Agg = {
-  rooms: number;
-  revenue: number;
-  guests: number;
-  adr: number; // weighted: revenue / rooms (si rooms > 0)
-  occ: number; // no calculamos aquí porque depende de disponibilidad fija (en HofExplorer)
-};
-
-function aggRows(rows: HofRow[]): Agg {
-  const rooms = rows.reduce((a, r) => a + (r.totalOcc || 0), 0);
-  const revenue = rows.reduce((a, r) => a + (r.roomRevenue || 0), 0);
-  const guests = rows.reduce((a, r) => a + (r.guests || 0), 0);
-  const adr = rooms > 0 ? revenue / rooms : 0;
-  return { rooms, revenue, guests, adr, occ: 0 };
-}
-
-function pctDelta(cur: number, base: number) {
-  if (!base) return 0;
-  return (cur - base) / base;
-}
-
-// ======= UI helpers =======
-function Card({
-  children,
-  style,
-  className,
-}: {
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-  className?: string;
-}) {
-  return (
-    <div
-      className={className ?? "card"}
-      style={{
-        borderRadius: 24,
-        background: "rgba(255,255,255,.72)",
-        border: "1px solid rgba(15,23,42,.10)",
-        boxShadow: "0 10px 30px rgba(2,6,23,.06)",
-        backdropFilter: "blur(10px)",
-        padding: "1rem",
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
-function PillButton({
-  active,
-  onClick,
-  children,
-}: {
-  active?: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="btnPill"
-      style={{
-        padding: ".55rem .9rem",
-        borderRadius: 999,
-        border: active ? "1px solid rgba(59,130,246,.45)" : "1px solid rgba(15,23,42,.14)",
-        background: active ? "rgba(59,130,246,.12)" : "rgba(255,255,255,.8)",
-        color: "rgba(2,6,23,.88)",
-        fontWeight: 800,
-        cursor: "pointer",
-        whiteSpace: "nowrap",
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function StatTile({
-  title,
-  value,
-  sub,
-  gradient,
-}: {
-  title: string;
-  value: string;
-  sub: string;
-  gradient: string;
-}) {
-  return (
-    <div
-      style={{
-        borderRadius: 26,
-        padding: "1.1rem 1.15rem",
-        background: gradient,
-        color: "white",
-        minHeight: 108,
-        display: "flex",
-        flexDirection: "column",
-        justifyContent: "space-between",
-        boxShadow: "0 18px 40px rgba(2,6,23,.18)",
-      }}
-    >
-      <div style={{ fontSize: ".92rem", fontWeight: 900, opacity: 0.95 }}>{title}</div>
-      <div style={{ fontSize: "2rem", fontWeight: 950, letterSpacing: "-.02em", lineHeight: 1.05 }}>
-        {value}
-      </div>
-      <div style={{ fontSize: ".9rem", fontWeight: 800, opacity: 0.92 }}>{sub}</div>
-    </div>
-  );
-}
-
-function DeltaBadge({ cur, base, isPP }: { cur: number; base: number; isPP?: boolean }) {
-  if (isPP) {
-    const pp = (cur - base) * 100;
-    const pos = pp >= 0;
-    return (
-      <span
-        style={{
-          padding: ".25rem .55rem",
-          borderRadius: 999,
-          fontWeight: 950,
-          fontSize: ".82rem",
-          color: pos ? "rgb(21,128,61)" : "rgb(185,28,28)",
-          background: pos ? "rgba(34,197,94,.16)" : "rgba(239,68,68,.16)",
-          border: pos ? "1px solid rgba(34,197,94,.25)" : "1px solid rgba(239,68,68,.25)",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {fmtPP(pp)}
-      </span>
-    );
-  }
-
-  const p = pctDelta(cur, base) * 100;
-  const pos = p >= 0;
-  const sign = pos ? "+" : "";
-  return (
-    <span
-      style={{
-        padding: ".25rem .55rem",
-        borderRadius: 999,
-        fontWeight: 950,
-        fontSize: ".82rem",
-        color: pos ? "rgb(21,128,61)" : "rgb(185,28,28)",
-        background: pos ? "rgba(34,197,94,.16)" : "rgba(239,68,68,.16)",
-        border: pos ? "1px solid rgba(34,197,94,.25)" : "1px solid rgba(239,68,68,.25)",
-        whiteSpace: "nowrap",
-      }}
-    >
-      {sign}
-      {new Intl.NumberFormat("es-AR", { maximumFractionDigits: 1 }).format(p)}%
-    </span>
-  );
-}
-
-function ResponsiveGrid({
-  children,
-  min = 260,
-  gap = 14,
-}: {
-  children: React.ReactNode;
-  min?: number;
-  gap?: number;
-}) {
-  return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: `repeat(auto-fit, minmax(${min}px, 1fr))`,
-        gap,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
-// ======= Main component =======
 export default function YearComparator() {
-  const [hofRows, setHofRows] = useState<HofRow[]>([]);
-  const [loading, setLoading] = useState(true);
+  // ======= filtros globales =======
+  const [group, setGroup] = useState<keyof typeof HOTEL_GROUPS>("JCR");
+  const [globalHotel, setGlobalHotel] = useState<string>("JCR"); // JCR o hotel
+  const [year, setYear] = useState<number>(2025);
+  const baseYear = year - 1;
 
-  // filtros globales (para membership + nacionalidades)
-  const [year, setYear] = useState(DEFAULT_YEAR);
-  const [baseYear, setBaseYear] = useState(DEFAULT_BASE_YEAR);
-  const [globalHotel, setGlobalHotel] = useState<string>("JCR"); // JCR / MARRIOTT / SHERATON MDQ / SHERATON BCR
+  // ======= data H&F =======
+  const [hofRows, setHofRows] = useState<HofRow[]>([]);
+  const [hofLoading, setHofLoading] = useState(true);
+  const [hofErr, setHofErr] = useState<string>("");
 
   useEffect(() => {
-    let alive = true;
-
-    async function run() {
+    (async () => {
       try {
-        setLoading(true);
-        const res = await fetch(HF_CSV_PATH, { cache: "no-store" });
-        if (!res.ok) throw new Error(`No se pudo cargar ${HF_CSV_PATH} (status ${res.status})`);
-        const text = await res.text();
-        const objs = parseCsvToObjects(text);
-        const rows = objs.map(toHofRow);
-
-        // filtramos los que no tengan año/empresa
-        const clean = rows.filter((r) => r.empresa && r.year && r.month && r.quarter);
-
-        if (alive) setHofRows(clean);
-      } catch (e) {
-        console.error(e);
-        if (alive) setHofRows([]);
+        setHofLoading(true);
+        setHofErr("");
+        const raw = await readCsv(HF_PATH);
+        const parsed: HofRow[] = [];
+        for (const r of raw) {
+          const row = toHofRow(r);
+          if (row) parsed.push(row);
+        }
+        setHofRows(parsed);
+      } catch (e: any) {
+        setHofErr(String(e?.message ?? e));
+        setHofRows([]);
       } finally {
-        if (alive) setLoading(false);
+        setHofLoading(false);
       }
-    }
-
-    run();
-    return () => {
-      alive = false;
-    };
+    })();
   }, []);
 
-  const availableYears = useMemo(() => {
-    const ys = new Set<number>();
-    for (const r of hofRows) {
-      if (r.year) ys.add(r.year);
-    }
-    const out = Array.from(ys).sort((a, b) => b - a);
-    return out;
+  const yearsAvailable = useMemo(() => {
+    const set = new Set<number>();
+    for (const r of hofRows) set.add(r.year);
+    return Array.from(set).sort((a, b) => b - a);
   }, [hofRows]);
 
-  // Asegurar year/baseYear válidos
+  // default year: si 2025 no existe, toma el máximo
   useEffect(() => {
-    if (availableYears.length === 0) return;
-    if (!availableYears.includes(year)) setYear(availableYears[0]);
-    if (!availableYears.includes(baseYear)) {
-      const candidate = year - 1;
-      if (availableYears.includes(candidate)) setBaseYear(candidate);
-      else setBaseYear(availableYears[Math.min(1, availableYears.length - 1)]);
+    if (hofRows.length === 0) return;
+    if (yearsAvailable.includes(2025)) return;
+    if (yearsAvailable.length > 0) setYear(yearsAvailable[0]);
+  }, [hofRows, yearsAvailable]);
+
+  // hoteles disponibles por grupo
+  const hotelsForGroup = useMemo(() => HOTEL_GROUPS[group], [group]);
+
+  // si cambia de grupo, reseteo hotel global
+  useEffect(() => {
+    setGlobalHotel(group === "JCR" ? "JCR" : "MAITEI");
+  }, [group]);
+
+  // ======= KPI agregados para carruseles y comparativa =======
+  function filterForHotelScope(list: HofRow[], scope: string) {
+    // scope puede ser "JCR" o "MARRIOTT" etc.
+    if (scope === "JCR") {
+      const set = new Set(JCR_HOTELS);
+      return list.filter((r) => set.has(normHotel(r.empresa)));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [availableYears.join(","), hofRows.length]);
+    if (scope === "GOTEL") {
+      const set = new Set(GOTEL_HOTELS);
+      return list.filter((r) => set.has(normHotel(r.empresa)));
+    }
+    // hotel específico
+    const h = normHotel(scope);
+    return list.filter((r) => normHotel(r.empresa) === h);
+  }
 
-  // ===== KPIs JCR (año actual y base) =====
-  const jcrYearRows = useMemo(() => {
-    return hofRows.filter((r) => r.year === year && JCR_HOTELS.includes(r.empresa as any));
-  }, [hofRows, year]);
+  function aggYear(list: HofRow[], y: number, scope: string) {
+    const rows = filterForHotelScope(list, scope).filter((r) => r.year === y);
+    if (rows.length === 0) {
+      return {
+        y,
+        rows: 0,
+        roomsOcc: 0,
+        revenue: 0,
+        guests: 0,
+        adr: 0,
+        occPct: 0,
+      };
+    }
 
-  const jcrBaseRows = useMemo(() => {
-    return hofRows.filter((r) => r.year === baseYear && JCR_HOTELS.includes(r.empresa as any));
-  }, [hofRows, baseYear]);
+    let roomsOcc = 0;
+    let revenue = 0;
+    let guests = 0;
+    let adrW = 0; // ADR ponderada por roomsOcc
+    let occPctW = 0; // ocupación ponderada por disponibilidad mensual
+    let denomOcc = 0;
 
-  const kpiJcrCur = useMemo(() => aggRows(jcrYearRows), [jcrYearRows]);
-  const kpiJcrBase = useMemo(() => aggRows(jcrBaseRows), [jcrBaseRows]);
+    // disponibilidad mensual: suma(availPerDay * daysInMonth)
+    const daysInMonth = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
-  // ===== Comparativa 2025 vs 2024 (tabla por hotel) =====
-  const compareTable = useMemo(() => {
-    const hotels = Array.from(JCR_HOTELS);
+    // para JCR: disponibilidad por hotel sumada por mes
+    for (const r of rows) {
+      roomsOcc += r.occRooms;
+      revenue += r.roomRevenue;
+      guests += r.persons;
 
-    return hotels.map((h) => {
-      const cur = aggRows(hofRows.filter((r) => r.year === year && r.empresa === h));
-      const base = aggRows(hofRows.filter((r) => r.year === baseYear && r.empresa === h));
-      return { hotel: h, cur, base };
-    });
-  }, [hofRows, year, baseYear]);
+      // ADR ponderada por rooms
+      adrW += r.adr * r.occRooms;
 
-  // ====== Render ======
+      // ocupación: roomsOcc / disponibilidad
+      const availDay =
+        scope === "JCR"
+          ? availabilityPerDay(r.empresa)
+          : availabilityPerDay(scope);
+
+      const availMonth = availDay * (daysInMonth[(r.month ?? 1) - 1] ?? 30);
+      denomOcc += availMonth;
+    }
+
+    const adr = roomsOcc > 0 ? adrW / roomsOcc : 0;
+    const occPct = denomOcc > 0 ? (roomsOcc / denomOcc) * 100 : 0;
+
+    return {
+      y,
+      rows: rows.length,
+      roomsOcc,
+      revenue,
+      guests,
+      adr,
+      occPct,
+    };
+  }
+
+  const jcrCur = useMemo(() => aggYear(hofRows, year, "JCR"), [hofRows, year]);
+  const jcrBase = useMemo(() => aggYear(hofRows, baseYear, "JCR"), [hofRows, baseYear]);
+
+  const gotelCur = useMemo(() => aggYear(hofRows, year, "MAITEI"), [hofRows, year]);
+  const gotelBase = useMemo(() => aggYear(hofRows, baseYear, "MAITEI"), [hofRows, baseYear]);
+
+  function deltaPct(cur: number, base: number) {
+    if (!base) return 0;
+    return ((cur - base) / base) * 100;
+  }
+  function deltaPP(curPct: number, basePct: number) {
+    return curPct - basePct;
+  }
+
+  // ======= UI =======
   return (
-    <section className="section" id="comparador" style={{ marginTop: "1rem" }}>
-      {/* Header de sección */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: ".8rem", alignItems: "end", justifyContent: "space-between" }}>
-        <div>
-          <div className="sectionTitle" style={{ fontSize: "1.3rem", fontWeight: 950 }}>
-            Informe de Gestión · Comparativo multianual
+    <section className="section" id="comparador">
+      {/* ====== Filtros globales ====== */}
+      <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
+        <div style={{ display: "flex", gap: ".75rem", flexWrap: "wrap", alignItems: "center" }}>
+          <div style={{ fontWeight: 900 }}>Filtros globales</div>
+
+          <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
+            <button
+              className={group === "JCR" ? "btnPrimary" : "btnOutline"}
+              type="button"
+              onClick={() => setGroup("JCR")}
+            >
+              Grupo JCR
+            </button>
+            <button
+              className={group === "GOTEL" ? "btnPrimary" : "btnOutline"}
+              type="button"
+              onClick={() => setGroup("GOTEL")}
+            >
+              Gotel (Maitei)
+            </button>
           </div>
-          <div className="sectionDesc" style={{ marginTop: ".25rem", opacity: 0.8, fontWeight: 700 }}>
-            KPIs del Grupo JCR + comparativa interanual + H&F + Membership + Nacionalidades.
+
+          <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ opacity: 0.8 }}>Año:</span>
+            <select
+              value={year}
+              onChange={(e) => setYear(Number(e.target.value))}
+              style={{ padding: ".45rem .6rem", borderRadius: 10 }}
+            >
+              {yearsAvailable.length === 0 ? (
+                <>
+                  <option value={2025}>2025</option>
+                  <option value={2024}>2024</option>
+                </>
+              ) : (
+                yearsAvailable.map((y) => (
+                  <option key={y} value={y}>
+                    {y}
+                  </option>
+                ))
+              )}
+            </select>
+          </div>
+
+          <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ opacity: 0.8 }}>Hotel:</span>
+            <select
+              value={globalHotel}
+              onChange={(e) => setGlobalHotel(e.target.value)}
+              style={{ padding: ".45rem .6rem", borderRadius: 10, minWidth: 220 }}
+            >
+              {group === "JCR" ? (
+                <>
+                  <option value="JCR">JCR (Consolidado)</option>
+                  {JCR_HOTELS.map((h) => (
+                    <option key={h} value={h}>
+                      {h}
+                    </option>
+                  ))}
+                </>
+              ) : (
+                <>
+                  <option value="MAITEI">MAITEI</option>
+                </>
+              )}
+            </select>
+          </div>
+
+          <div style={{ marginLeft: "auto", opacity: 0.8, fontSize: ".9rem" }}>
+            Año base: <b>{baseYear}</b>
           </div>
         </div>
 
-        <Card style={{ padding: ".85rem .95rem" }}>
-          <div style={{ fontWeight: 950, marginBottom: ".45rem" }}>Filtros globales</div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: ".55rem", alignItems: "center" }}>
-            <div style={{ display: "flex", gap: ".45rem", flexWrap: "wrap" }}>
-              {availableYears.slice(0, 8).map((y) => (
-                <PillButton
-                  key={y}
-                  active={y === year}
-                  onClick={() => {
-                    setYear(y);
-                    // si baseYear quedara igual al year, lo corremos a y-1 si existe
-                    if (baseYear === y && availableYears.includes(y - 1)) setBaseYear(y - 1);
-                  }}
-                >
-                  {y}
-                </PillButton>
-              ))}
-            </div>
-
-            <div style={{ width: 1, height: 26, background: "rgba(2,6,23,.12)" }} />
-
-            <div style={{ display: "flex", gap: ".45rem", flexWrap: "wrap", alignItems: "center" }}>
-              <span style={{ fontWeight: 900, opacity: 0.8 }}>vs</span>
-              {availableYears
-                .filter((y) => y !== year)
-                .slice(0, 8)
-                .map((y) => (
-                  <PillButton key={y} active={y === baseYear} onClick={() => setBaseYear(y)}>
-                    {y}
-                  </PillButton>
-                ))}
-            </div>
-
-            <div style={{ width: 1, height: 26, background: "rgba(2,6,23,.12)" }} />
-
-            <div style={{ display: "flex", gap: ".45rem", flexWrap: "wrap", alignItems: "center" }}>
-              <span style={{ fontWeight: 900, opacity: 0.8 }}>Hotel</span>
-              {["JCR", ...JCR_HOTELS].map((h) => (
-                <PillButton key={h} active={globalHotel === h} onClick={() => setGlobalHotel(h)}>
-                  {h === "JCR" ? "JCR (Total)" : h}
-                </PillButton>
-              ))}
-            </div>
+        {hofLoading ? (
+          <div style={{ marginTop: ".75rem", opacity: 0.75 }}>Cargando H&F…</div>
+        ) : hofErr ? (
+          <div style={{ marginTop: ".75rem", color: "crimson" }}>Error H&F: {hofErr}</div>
+        ) : (
+          <div style={{ marginTop: ".75rem", opacity: 0.75, fontSize: ".9rem" }}>
+            H&F rows: <b>{hofRows.length}</b> · Años:{" "}
+            <b>{yearsAvailable.length ? yearsAvailable.join(", ") : "—"}</b>
           </div>
-        </Card>
+        )}
       </div>
 
-      {/* ===== 1) CARROUSELES JCR ===== */}
-      <div style={{ marginTop: "1rem" }}>
-        <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
-          Grupo JCR — KPIs {year} (vs {baseYear})
-        </div>
-        <div className="sectionDesc" style={{ marginTop: ".3rem", opacity: 0.82 }}>
-          Datos consolidados desde H&F ({HF_CSV_PATH}). En el Explorer la ocupación se calcula con disponibilidad fija.
-        </div>
+      {/* ====== 1) Carruseles (solo JCR al inicio) ====== */}
+      {group === "JCR" && (
+        <div style={{ marginTop: "1rem" }}>
+          <div className="sectionTitle" style={{ fontSize: "1.25rem", fontWeight: 950 }}>
+            Vista ejecutiva — Grupo JCR
+          </div>
+          <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
+            KPIs {year} vs {baseYear} (auto).
+          </div>
 
-        <div style={{ marginTop: ".9rem" }}>
-          <ResponsiveGrid min={240} gap={14}>
-            <StatTile
-              title="Habitaciones ocupadas"
-              value={loading ? "—" : fmtInt(kpiJcrCur.rooms)}
-              sub={
-                loading ? "—" : `${fmtInt(kpiJcrBase.rooms)} → ${fmtInt(kpiJcrCur.rooms)} · `
-              }
-              gradient="linear-gradient(135deg, rgb(59,130,246), rgb(34,197,94))"
-            />
-            <StatTile
-              title="Recaudación total (Room Revenue)"
-              value={loading ? "—" : fmtMoney(kpiJcrCur.revenue)}
-              sub={loading ? "—" : `${fmtMoney(kpiJcrBase.revenue)} → ${fmtMoney(kpiJcrCur.revenue)} · `}
-              gradient="linear-gradient(135deg, rgb(147,51,234), rgb(59,130,246))"
-            />
-            <StatTile
-              title="Huéspedes"
-              value={loading ? "—" : fmtInt(kpiJcrCur.guests)}
-              sub={loading ? "—" : `${fmtInt(kpiJcrBase.guests)} → ${fmtInt(kpiJcrCur.guests)} · `}
-              gradient="linear-gradient(135deg, rgb(236,72,153), rgb(147,51,234))"
-            />
-            <StatTile
-              title="Tarifa promedio anual (ADR aprox.)"
-              value={loading ? "—" : fmtMoney(kpiJcrCur.adr)}
-              sub={loading ? "—" : `${fmtMoney(kpiJcrBase.adr)} → ${fmtMoney(kpiJcrCur.adr)} · `}
-              gradient="linear-gradient(135deg, rgb(245,158,11), rgb(236,72,153))"
-            />
-          </ResponsiveGrid>
-
-          {/* deltas */}
-          <Card style={{ marginTop: "0.9rem" }}>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: ".8rem", alignItems: "center", justifyContent: "space-between" }}>
-              <div style={{ fontWeight: 950 }}>Variación vs {baseYear}</div>
-              <div style={{ display: "flex", gap: ".6rem", flexWrap: "wrap" }}>
-                <span style={{ display: "inline-flex", gap: ".35rem", alignItems: "center", fontWeight: 850 }}>
-                  Rooms <DeltaBadge cur={kpiJcrCur.rooms} base={kpiJcrBase.rooms} />
-                </span>
-                <span style={{ display: "inline-flex", gap: ".35rem", alignItems: "center", fontWeight: 850 }}>
-                  Revenue <DeltaBadge cur={kpiJcrCur.revenue} base={kpiJcrBase.revenue} />
-                </span>
-                <span style={{ display: "inline-flex", gap: ".35rem", alignItems: "center", fontWeight: 850 }}>
-                  Huéspedes <DeltaBadge cur={kpiJcrCur.guests} base={kpiJcrBase.guests} />
-                </span>
-                <span style={{ display: "inline-flex", gap: ".35rem", alignItems: "center", fontWeight: 850 }}>
-                  ADR <DeltaBadge cur={kpiJcrCur.adr} base={kpiJcrBase.adr} />
-                </span>
+          <div
+            style={{
+              marginTop: "1rem",
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+              gap: "1rem",
+            }}
+          >
+            <div className="kpiCard" style={{ padding: "1.1rem", borderRadius: 22 }}>
+              <div className="kpiLabel">Rooms occupied</div>
+              <div className="kpiBig">{fmtInt(jcrCur.roomsOcc)}</div>
+              <div className="kpiDelta">
+                {deltaPct(jcrCur.roomsOcc, jcrBase.roomsOcc).toFixed(1).replace(".", ",")}%
+                <span style={{ opacity: 0.8 }}> vs {baseYear}</span>
               </div>
             </div>
-          </Card>
+
+            <div className="kpiCard" style={{ padding: "1.1rem", borderRadius: 22 }}>
+              <div className="kpiLabel">Room Revenue</div>
+              <div className="kpiBig">{fmtMoney(jcrCur.revenue)}</div>
+              <div className="kpiDelta">
+                {deltaPct(jcrCur.revenue, jcrBase.revenue).toFixed(1).replace(".", ",")}%
+                <span style={{ opacity: 0.8 }}> vs {baseYear}</span>
+              </div>
+            </div>
+
+            <div className="kpiCard" style={{ padding: "1.1rem", borderRadius: 22 }}>
+              <div className="kpiLabel">Huéspedes</div>
+              <div className="kpiBig">{fmtInt(jcrCur.guests)}</div>
+              <div className="kpiDelta">
+                {deltaPct(jcrCur.guests, jcrBase.guests).toFixed(1).replace(".", ",")}%
+                <span style={{ opacity: 0.8 }}> vs {baseYear}</span>
+              </div>
+            </div>
+
+            <div className="kpiCard" style={{ padding: "1.1rem", borderRadius: 22 }}>
+              <div className="kpiLabel">Ocupación</div>
+              <div className="kpiBig">{fmtPct(jcrCur.occPct)}</div>
+              <div className="kpiDelta">
+                {deltaPP(jcrCur.occPct, jcrBase.occPct).toFixed(1).replace(".", ",")} p.p.
+                <span style={{ opacity: 0.8 }}> vs {baseYear}</span>
+              </div>
+            </div>
+          </div>
         </div>
-      </div>
+      )}
 
-      {/* ===== 2) COMPARATIVA (tabla por hotel) ===== */}
+      {/* ====== 2) Comparativa (usa filtros globales) ====== */}
       <div style={{ marginTop: "1.25rem" }}>
-        <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
-          Comparativa {year} vs {baseYear} — por hotel (JCR)
-        </div>
-
-        <Card style={{ marginTop: ".85rem", overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "separate", borderSpacing: 0 }}>
-            <thead>
-              <tr style={{ textAlign: "left", fontWeight: 950, opacity: 0.9 }}>
-                <th style={{ padding: ".65rem .6rem" }}>Hotel</th>
-                <th style={{ padding: ".65rem .6rem" }}>Rooms ({year})</th>
-                <th style={{ padding: ".65rem .6rem" }}>Δ</th>
-                <th style={{ padding: ".65rem .6rem" }}>Revenue ({year})</th>
-                <th style={{ padding: ".65rem .6rem" }}>Δ</th>
-                <th style={{ padding: ".65rem .6rem" }}>Guests ({year})</th>
-                <th style={{ padding: ".65rem .6rem" }}>Δ</th>
-                <th style={{ padding: ".65rem .6rem" }}>ADR ({year})</th>
-                <th style={{ padding: ".65rem .6rem" }}>Δ</th>
-              </tr>
-            </thead>
-            <tbody>
-              {compareTable.map((row) => (
-                <tr key={row.hotel} style={{ borderTop: "1px solid rgba(2,6,23,.08)" }}>
-                  <td style={{ padding: ".7rem .6rem", fontWeight: 950 }}>{row.hotel}</td>
-
-                  <td style={{ padding: ".7rem .6rem", fontWeight: 900 }}>{fmtInt(row.cur.rooms)}</td>
-                  <td style={{ padding: ".7rem .6rem" }}>
-                    <DeltaBadge cur={row.cur.rooms} base={row.base.rooms} />
-                  </td>
-
-                  <td style={{ padding: ".7rem .6rem", fontWeight: 900 }}>{fmtMoney(row.cur.revenue)}</td>
-                  <td style={{ padding: ".7rem .6rem" }}>
-                    <DeltaBadge cur={row.cur.revenue} base={row.base.revenue} />
-                  </td>
-
-                  <td style={{ padding: ".7rem .6rem", fontWeight: 900 }}>{fmtInt(row.cur.guests)}</td>
-                  <td style={{ padding: ".7rem .6rem" }}>
-                    <DeltaBadge cur={row.cur.guests} base={row.base.guests} />
-                  </td>
-
-                  <td style={{ padding: ".7rem .6rem", fontWeight: 900 }}>{fmtMoney(row.cur.adr)}</td>
-                  <td style={{ padding: ".7rem .6rem" }}>
-                    <DeltaBadge cur={row.cur.adr} base={row.base.adr} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Card>
-      </div>
-
-      {/* ===== 3) H&F — Explorer JCR ===== */}
-      <div style={{ marginTop: "1.25rem" }}>
-        <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
-          H&amp;F — Grupo JCR (Explorer)
+        <div className="sectionTitle" style={{ fontSize: "1.25rem", fontWeight: 950 }}>
+          Comparativa {year} vs {baseYear}
         </div>
         <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-          Filtros por hotel + año/trimestre/mes. Incluye ranking mensual por hotel.
+          Se calcula según el hotel seleccionado (Consolidado si elegís “JCR”).
+        </div>
+
+        <div className="card" style={{ marginTop: "1rem", padding: "1rem", borderRadius: 22 }}>
+          {(() => {
+            const cur = aggYear(hofRows, year, globalHotel);
+            const base = aggYear(hofRows, baseYear, globalHotel);
+
+            if (!cur.rows && !base.rows) {
+              return <div style={{ opacity: 0.75 }}>Sin datos para {globalHotel} en {year}/{baseYear}.</div>;
+            }
+
+            return (
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+                  gap: "1rem",
+                }}
+              >
+                <div className="kpi">
+                  <div className="kpiLabel">Rooms occupied</div>
+                  <div className="kpiValue">{fmtInt(cur.roomsOcc)}</div>
+                  <div className="kpiCap">
+                    vs {baseYear}: {fmtInt(base.roomsOcc)} (
+                    {deltaPct(cur.roomsOcc, base.roomsOcc).toFixed(1).replace(".", ",")}%)
+                  </div>
+                </div>
+
+                <div className="kpi">
+                  <div className="kpiLabel">Room Revenue</div>
+                  <div className="kpiValue">{fmtMoney(cur.revenue)}</div>
+                  <div className="kpiCap">
+                    vs {baseYear}: {fmtMoney(base.revenue)} (
+                    {deltaPct(cur.revenue, base.revenue).toFixed(1).replace(".", ",")}%)
+                  </div>
+                </div>
+
+                <div className="kpi">
+                  <div className="kpiLabel">ADR</div>
+                  <div className="kpiValue">{fmtMoney(cur.adr)}</div>
+                  <div className="kpiCap">
+                    vs {baseYear}: {fmtMoney(base.adr)} (
+                    {deltaPct(cur.adr, base.adr).toFixed(1).replace(".", ",")}%)
+                  </div>
+                </div>
+
+                <div className="kpi">
+                  <div className="kpiLabel">Ocupación</div>
+                  <div className="kpiValue">{fmtPct(cur.occPct)}</div>
+                  <div className="kpiCap">
+                    vs {baseYear}: {fmtPct(base.occPct)} (
+                    {deltaPP(cur.occPct, base.occPct).toFixed(1).replace(".", ",")} p.p.)
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      </div>
+
+      {/* ====== 3) H&F Explorador (usa filtro global hotel como default) ====== */}
+      <div style={{ marginTop: "1.25rem" }}>
+        <div className="sectionTitle" style={{ fontSize: "1.25rem", fontWeight: 950 }}>
+          H&amp;F — Explorador
+        </div>
+        <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
+          Diario → mensual / trimestral / anual. Ranking por mes. Usa filtro global como valor inicial.
         </div>
 
         <div style={{ marginTop: ".85rem" }}>
           <HofExplorer
-            title="H&F – Grupo JCR"
-            filePath={HF_CSV_PATH}
-            allowedHotels={[...JCR_HOTELS]}
+            filePath={HF_PATH}
+            allowedHotels={group === "JCR" ? JCR_HOTELS : GOTEL_HOTELS}
+            title={group === "JCR" ? "Grupo JCR" : "Gotel Management — Maitei"}
             defaultYear={year}
+            defaultHotel={globalHotel === "JCR" ? (group === "JCR" ? "MARRIOTT" : "MAITEI") : globalHotel}
           />
         </div>
       </div>
 
-      {/* ===== 4) MEMBERSHIP ===== */}
+      {/* ====== 4) Membership (usa filtros globales AÑO + HOTEL) ====== */}
       <div style={{ marginTop: "1.25rem" }}>
-        <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
-          Membership (JCR)
+        <div className="sectionTitle" style={{ fontSize: "1.25rem", fontWeight: 950 }}>
+          Membership
         </div>
         <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-          Filtrado por año y hotel (JCR total o por propiedad). Gráficos compactos con colores por membresía.
+          Cantidades + gráficos. Usa filtro global de año y hotel.
         </div>
 
         <div style={{ marginTop: ".85rem" }}>
           <MembershipSummary
+            filePath={MEMBERSHIP_PATH}
             year={year}
             baseYear={baseYear}
-            allowedHotels={[...JCR_HOTELS]}
-            filePath={MEMBERSHIP_XLSX_PATH}
+            allowedHotels={group === "JCR" ? ["JCR", ...JCR_HOTELS] : ["MAITEI"]}
             hotelFilter={globalHotel}
           />
         </div>
       </div>
 
- {/* ===== 5) NACIONALIDADES ===== */}
-<div style={{ marginTop: "1.25rem" }}>
-  <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
-    Nacionalidades
-  </div>
-
-  <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-    Ranking por país + distribución por continente. Usa filtro global de año y hotel.
-  </div>
-
-  <div style={{ marginTop: ".85rem" }}>
-    <CountryRanking
-      year={year}
-      baseYear={baseYear}
-      filePath={NACIONALIDADES_PATH}
-      hotel={globalHotel}                 // 👈 IMPORTANTE: es "hotel", no "hotelFilter"
-      allowedHotels={JCR_HOTELS}          // 👈 para que JCR sea la suma de los 3 hoteles
-      limit={12}
-    />
-  </div>
-</div>
-
-
-      {/* ===== 6) GOTEL / MAITEI ===== */}
+      {/* ====== 5) Nacionalidades (SOLO Marriott) ====== */}
       <div style={{ marginTop: "1.25rem" }}>
         <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
-          Gotel Management — Hotel Maitei
+          Nacionalidades (Marriott)
         </div>
         <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-          Bloque separado del Grupo JCR.
+          Ranking por país + distribución por continente. Usa filtro global de año. (Hotel fijo: Marriott)
         </div>
 
         <div style={{ marginTop: ".85rem" }}>
-          <HofExplorer
-            title="H&F – Maitei (Gotel)"
-            filePath={HF_CSV_PATH}
-            allowedHotels={[...GOTEL_HOTELS]}
-            defaultYear={year}
-          />
+          <CountryRanking year={year} filePath={NACIONALIDADES_PATH} />
         </div>
       </div>
 
-      {/* ===== Nota responsive ===== */}
-      <style jsx global>{`
-        .btnPill:hover {
-          transform: translateY(-1px);
-        }
+      {/* ====== 6) Carrusel Maitei (si estás en GOTEL) ====== */}
+      {group === "GOTEL" && (
+        <div style={{ marginTop: "1.25rem" }}>
+          <div className="sectionTitle" style={{ fontSize: "1.25rem", fontWeight: 950 }}>
+            Vista ejecutiva — Maitei (Gotel)
+          </div>
 
-        @media (max-width: 640px) {
-          .sectionTitle {
-            font-size: 1.05rem !important;
-          }
-          .sectionDesc {
-            font-size: 0.95rem !important;
-          }
-          .btnPill {
-            padding: 0.5rem 0.75rem !important;
-            font-weight: 900 !important;
-          }
-        }
-      `}</style>
+          <div
+            style={{
+              marginTop: "1rem",
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+              gap: "1rem",
+            }}
+          >
+            <div className="kpiCard" style={{ padding: "1.1rem", borderRadius: 22 }}>
+              <div className="kpiLabel">Rooms occupied</div>
+              <div className="kpiBig">{fmtInt(gotelCur.roomsOcc)}</div>
+              <div className="kpiDelta">
+                {deltaPct(gotelCur.roomsOcc, gotelBase.roomsOcc).toFixed(1).replace(".", ",")}%
+                <span style={{ opacity: 0.8 }}> vs {baseYear}</span>
+              </div>
+            </div>
+
+            <div className="kpiCard" style={{ padding: "1.1rem", borderRadius: 22 }}>
+              <div className="kpiLabel">Room Revenue</div>
+              <div className="kpiBig">{fmtMoney(gotelCur.revenue)}</div>
+              <div className="kpiDelta">
+                {deltaPct(gotelCur.revenue, gotelBase.revenue).toFixed(1).replace(".", ",")}%
+                <span style={{ opacity: 0.8 }}> vs {baseYear}</span>
+              </div>
+            </div>
+
+            <div className="kpiCard" style={{ padding: "1.1rem", borderRadius: 22 }}>
+              <div className="kpiLabel">Huéspedes</div>
+              <div className="kpiBig">{fmtInt(gotelCur.guests)}</div>
+              <div className="kpiDelta">
+                {deltaPct(gotelCur.guests, gotelBase.guests).toFixed(1).replace(".", ",")}%
+                <span style={{ opacity: 0.8 }}> vs {baseYear}</span>
+              </div>
+            </div>
+
+            <div className="kpiCard" style={{ padding: "1.1rem", borderRadius: 22 }}>
+              <div className="kpiLabel">Ocupación</div>
+              <div className="kpiBig">{fmtPct(gotelCur.occPct)}</div>
+              <div className="kpiDelta">
+                {deltaPP(gotelCur.occPct, gotelBase.occPct).toFixed(1).replace(".", ",")} p.p.
+                <span style={{ opacity: 0.8 }}> vs {baseYear}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
-
