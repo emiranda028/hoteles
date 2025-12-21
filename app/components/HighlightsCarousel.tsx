@@ -1,184 +1,258 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { readCsvFromPublic } from "./csvClient";
+import React, { useEffect, useMemo, useState } from "react";
+import { readCsvFromPublic, CsvRow } from "./csvClient";
 
-/* =========================
-   Tipos y helpers
-========================= */
-
-type HofRow = {
-  empresa: string;
+type Props = {
   year: number;
-  occupied: number;
-  guests: number;
-  revenue: number;
+  globalHotel: string; // "MARRIOTT" | "SHERATON BCR" | "SHERATON MDQ" | "JCR" | "MAITEI"
+  filePath: string; // "/data/hf_diario.csv"
 };
 
-const AVAIL_PER_DAY: Record<string, number> = {
-  MARRIOTT: 300,
-  "SHERATON MDQ": 194,
-  "SHERATON BCR": 161,
-};
+function norm(s: any) {
+  return String(s ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toUpperCase();
+}
 
-function toNumberIntl(x: any) {
-  if (!x) return 0;
-  const s = String(x).replace("%", "").replace(/\./g, "").replace(",", ".");
-  const n = Number(s);
+function parsePercent(v: any) {
+  const s = String(v ?? "").trim();
+  if (!s) return 0;
+  // "59,40%" -> 0.594
+  const cleaned = s.replace("%", "").replace(/\./g, "").replace(/,/g, ".").replace(/[^\d.-]/g, "");
+  const n = Number(cleaned);
+  if (!Number.isFinite(n)) return 0;
+  return n > 1 ? n / 100 : n;
+}
+
+function parseMoney(v: any) {
+  const s = String(v ?? "").trim();
+  if (!s) return 0;
+  // "22.441,71" -> 22441.71
+  const cleaned = s.replace(/\./g, "").replace(/,/g, ".").replace(/[^\d.-]/g, "");
+  const n = Number(cleaned);
   return Number.isFinite(n) ? n : 0;
 }
 
-function parseYear(fecha: any) {
-  const s = String(fecha ?? "");
-  const parts = s.split(/[\/\-]/);
-  return Number(parts[2]);
+function parseDateAny(v: any): Date | null {
+  const s = String(v ?? "").trim();
+  if (!s) return null;
+
+  // 1) "1/6/2022"
+  const m1 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m1) {
+    const d = Number(m1[1]);
+    const mo = Number(m1[2]) - 1;
+    const y = Number(m1[3]);
+    const dt = new Date(y, mo, d);
+    return Number.isFinite(dt.getTime()) ? dt : null;
+  }
+
+  // 2) "01-06-22 Wed" -> dd-mm-yy
+  const m2 = s.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})/);
+  if (m2) {
+    const d = Number(m2[1]);
+    const mo = Number(m2[2]) - 1;
+    let y = Number(m2[3]);
+    if (y < 100) y = 2000 + y;
+    const dt = new Date(y, mo, d);
+    return Number.isFinite(dt.getTime()) ? dt : null;
+  }
+
+  const dt = new Date(s);
+  return Number.isFinite(dt.getTime()) ? dt : null;
 }
 
-function fmtInt(n: number) {
-  return n.toLocaleString("es-AR");
+function canonicalHotel(empresaRaw: string) {
+  const e = norm(empresaRaw);
+
+  if (!e) return "";
+
+  if (e.includes("MAITEI")) return "MAITEI";
+
+  if (e.includes("MARRIOTT")) return "MARRIOTT";
+
+  // Bariloche
+  if (e.includes("BARILOCHE") || e.includes("BRC") || e.includes("BCR")) return "SHERATON BCR";
+
+  // Mar del Plata
+  if (e.includes("MAR DEL PLATA") || e.includes("MDQ") || e.includes("MDP")) return "SHERATON MDQ";
+
+  // si ya viene exacto
+  if (e === "SHERATON BCR") return "SHERATON BCR";
+  if (e === "SHERATON MDQ") return "SHERATON MDQ";
+
+  return e;
 }
 
-function fmtMoney(n: number) {
-  return "$" + n.toLocaleString("es-AR", { maximumFractionDigits: 0 });
+function fmt(n: number, digits = 0) {
+  try {
+    return new Intl.NumberFormat("es-AR", { maximumFractionDigits: digits }).format(n);
+  } catch {
+    return String(n.toFixed(digits));
+  }
 }
 
-function fmtPct(p: number) {
-  return p.toFixed(1).replace(".", ",") + "%";
-}
-
-/* =========================
-   Componente
-========================= */
-
-export default function HighlightsCarousel({
-  filePath = "/data/hf_diario.csv",
-  year,
-  baseYear,
-}: {
-  filePath?: string;
-  year: number;
-  baseYear: number;
-}) {
-  const [rows, setRows] = useState<HofRow[]>([]);
-  const [index, setIndex] = useState(0);
+export default function HighlightsCarousel({ year, globalHotel, filePath }: Props) {
+  const [rows, setRows] = useState<CsvRow[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    readCsvFromPublic(filePath).then(({ rows }) => {
-      const parsed: HofRow[] = rows
-        .map((r: any) => ({
-          empresa: r["Empresa"],
-          year: parseYear(r["Fecha"]),
-          occupied: toNumberIntl(r["Total Occ."]),
-          guests: toNumberIntl(r["Adl. & Chl."]),
-          revenue: toNumberIntl(r["Room Revenue"]),
-        }))
-        .filter(r => r.year);
+    let alive = true;
+    setLoading(true);
 
-      setRows(parsed);
-    });
+    (async () => {
+      try {
+        const data = await readCsvFromPublic(filePath);
+        if (alive) {
+          setRows(data || []);
+          setLoading(false);
+        }
+      } catch {
+        if (alive) {
+          setRows([]);
+          setLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
   }, [filePath]);
 
-  // auto-rotación
-  useEffect(() => {
-    const id = setInterval(() => {
-      setIndex(i => (i + 1) % 4);
-    }, 5000);
-    return () => clearInterval(id);
-  }, []);
+  const filtered = useMemo(() => {
+    const out: {
+      dt: Date;
+      hotel: string;
+      hof: string;
+      occ: number;
+      adr: number;
+      roomRev: number;
+      totalRooms: number;
+    }[] = [];
 
-  const metrics = useMemo(() => {
-    const byYear = (y: number) => rows.filter(r => r.year === y);
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
 
-    const cur = byYear(year);
-    const base = byYear(baseYear);
+      // headers raros: buscamos por “contiene”
+      const keys = Object.keys(r);
+      const get = (contains: string) => {
+        const k = keys.find((x) => norm(x).includes(norm(contains)));
+        return k ? r[k] : "";
+      };
 
-    const guestsCur = cur.reduce((s, r) => s + r.guests, 0);
-    const guestsBase = base.reduce((s, r) => s + r.guests, 0);
+      const empresa = canonicalHotel(get("Empresa"));
+      const hof = String(get("HoF") || get("HOF") || "").trim();
+      const dt = parseDateAny(get("Fecha") || get("Date"));
+      if (!dt) continue;
 
-    const revCur = cur.reduce((s, r) => s + r.revenue, 0);
-    const revBase = base.reduce((s, r) => s + r.revenue, 0);
+      const y = dt.getFullYear();
+      if (y !== year) continue;
 
-    const occ = (arr: HofRow[]) => {
-      let occ = 0;
-      let avail = 0;
-      arr.forEach(r => {
-        occ += r.occupied;
-        avail += AVAIL_PER_DAY[r.empresa] ?? 0;
-      });
-      return avail > 0 ? occ / avail : 0;
-    };
+      // filtro hotel
+      if (globalHotel === "JCR") {
+        if (!(empresa === "MARRIOTT" || empresa === "SHERATON BCR" || empresa === "SHERATON MDQ")) continue;
+      } else {
+        if (empresa !== globalHotel) continue;
+      }
 
+      const occ = parsePercent(get("Occ.%") || get("Occ"));
+      const adr = parseMoney(get("Average Rate") || get("ADR") || get("Average"));
+      const roomRev = parseMoney(get("Room Revenue") || get("Room Reven"));
+      const totalRooms = parseMoney(get("Total"));
+
+      out.push({ dt, hotel: empresa, hof, occ, adr, roomRev, totalRooms });
+    }
+
+    return out;
+  }, [rows, year, globalHotel]);
+
+  const kpis = useMemo(() => {
+    if (!filtered.length) {
+      return { occAvg: 0, adrAvg: 0, roomRevSum: 0, days: 0 };
+    }
+    let occSum = 0;
+    let adrSum = 0;
+    let roomRevSum = 0;
+    for (let i = 0; i < filtered.length; i++) {
+      occSum += filtered[i].occ || 0;
+      adrSum += filtered[i].adr || 0;
+      roomRevSum += filtered[i].roomRev || 0;
+    }
     return {
-      guestsCur,
-      guestsDeltaPct: guestsBase ? ((guestsCur / guestsBase) - 1) * 100 : 0,
-      revCur,
-      revDeltaPct: revBase ? ((revCur / revBase) - 1) * 100 : 0,
-      occCur: occ(cur),
-      occDeltaPP: (occ(cur) - occ(base)) * 100,
+      occAvg: occSum / filtered.length,
+      adrAvg: adrSum / filtered.length,
+      roomRevSum,
+      days: filtered.length,
     };
-  }, [rows, year, baseYear]);
+  }, [filtered]);
 
-  const slides = [
-    {
-      bg: "linear-gradient(135deg, #1e3a8a, #2563eb)",
-      title: `${year} en el Grupo JCR`,
-      big: `${fmtInt(metrics.guestsCur)} huéspedes`,
-      sub: `${metrics.guestsDeltaPct >= 0 ? "+" : ""}${fmtPct(metrics.guestsDeltaPct)} vs ${baseYear}`,
-    },
-    {
-      bg: "linear-gradient(135deg, #065f46, #10b981)",
-      title: "Ocupación promedio",
-      big: fmtPct(metrics.occCur * 100),
-      sub: `${metrics.occDeltaPP >= 0 ? "+" : ""}${metrics.occDeltaPP.toFixed(1).replace(".", ",")} p.p.`,
-    },
-    {
-      bg: "linear-gradient(135deg, #7c2d12, #f97316)",
-      title: "Room Revenue",
-      big: fmtMoney(metrics.revCur),
-      sub: `${metrics.revDeltaPct >= 0 ? "+" : ""}${fmtPct(metrics.revDeltaPct)} interanual`,
-    },
-    {
-      bg: "linear-gradient(135deg, #312e81, #6366f1)",
-      title: "Insight clave",
-      big: "Crecimiento sostenido",
-      sub: "Mejora simultánea en ocupación y revenue",
-    },
+  const title = useMemo(() => {
+    if (globalHotel === "JCR") return "Grupo JCR — KPIs";
+    if (globalHotel === "MAITEI") return "Maitei (Gotel) — KPIs";
+    return `${globalHotel} — KPIs`;
+  }, [globalHotel]);
+
+  if (loading) {
+    return <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>Cargando KPIs…</div>;
+  }
+
+  if (!filtered.length) {
+    return (
+      <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
+        <div style={{ fontWeight: 950 }}>{title} {year}</div>
+        <div style={{ marginTop: ".35rem", opacity: 0.8 }}>
+          Sin filas H&F para el filtro actual. (Chequeá valores reales en columna Empresa del CSV)
+        </div>
+        <div style={{ marginTop: ".5rem", fontSize: ".9rem", opacity: 0.7 }}>
+          Archivo: {filePath}
+        </div>
+      </div>
+    );
+  }
+
+  const cards = [
+    { label: "Ocupación promedio", value: `${fmt(kpis.occAvg * 100, 1)}%`, sub: `${kpis.days} días` },
+    { label: "ADR promedio", value: `$ ${fmt(kpis.adrAvg, 0)}`, sub: "Average Rate" },
+    { label: "Room Revenue", value: `$ ${fmt(kpis.roomRevSum, 0)}`, sub: "Suma año" },
   ];
 
   return (
-    <section
-      style={{
-        width: "100%",
-        overflow: "hidden",
-        borderRadius: "18px",
-        marginBottom: "2rem",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          transform: `translateX(-${index * 100}%)`,
-          transition: "transform .8s ease",
-        }}
-      >
-        {slides.map((s, i) => (
+    <div style={{ display: "grid", gap: "1rem" }}>
+      <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
+        <div style={{ fontWeight: 950, fontSize: "1.1rem" }}>{title} {year} (H&F)</div>
+        <div style={{ marginTop: ".25rem", opacity: 0.75 }}>Usa filtro global de año + hotel</div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: "1rem" }}>
+        {cards.map((c) => (
           <div
-            key={i}
+            key={c.label}
+            className="card"
             style={{
-              minWidth: "100%",
-              padding: "3rem 2.5rem",
-              color: "white",
-              background: s.bg,
+              padding: "1rem",
+              borderRadius: 22,
+              background: "linear-gradient(135deg, rgba(0,0,0,.04), rgba(0,0,0,.02))",
+              minHeight: 96,
             }}
           >
-            <div style={{ fontSize: "1.1rem", opacity: .9 }}>{s.title}</div>
-            <div style={{ fontSize: "3.2rem", fontWeight: 800, margin: ".6rem 0" }}>
-              {s.big}
-            </div>
-            <div style={{ fontSize: "1.2rem", opacity: .9 }}>{s.sub}</div>
+            <div style={{ fontWeight: 800, opacity: 0.85 }}>{c.label}</div>
+            <div style={{ fontWeight: 950, fontSize: "1.8rem", marginTop: ".25rem" }}>{c.value}</div>
+            <div style={{ marginTop: ".15rem", opacity: 0.7, fontSize: ".9rem" }}>{c.sub}</div>
           </div>
         ))}
       </div>
-    </section>
+
+      {/* Responsive tweak */}
+      <style jsx>{`
+        @media (max-width: 900px) {
+          div[style*="repeat(3"] {
+            grid-template-columns: 1fr !important;
+          }
+        }
+      `}</style>
+    </div>
   );
 }
