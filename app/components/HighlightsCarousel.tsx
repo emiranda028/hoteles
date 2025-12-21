@@ -1,254 +1,186 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import { readCsvFromPublic, CsvRow } from "./csvClient";
+import { readCsvFromPublic } from "./csvClient";
 
 type Props = {
   year: number;
-  globalHotel: string; // "MARRIOTT" | "SHERATON BCR" | "SHERATON MDQ" | "JCR" | "MAITEI"
+  hotel: "JCR" | "MARRIOTT" | "SHERATON BCR" | "SHERATON MDQ" | "MAITEI";
   filePath: string; // "/data/hf_diario.csv"
+  title?: string;
 };
 
-function norm(s: any) {
-  return String(s ?? "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .toUpperCase();
+type HfRow = Record<string, string>;
+
+function toNum(s: any) {
+  if (s === null || s === undefined) return 0;
+  const raw = String(s).trim();
+  if (!raw) return 0;
+  // soporta "22.441,71" y "22441.71"
+  const normalized = raw
+    .replace(/\./g, "")
+    .replace(/,/g, ".")
+    .replace(/[^\d.-]/g, "");
+  const v = Number(normalized);
+  return Number.isFinite(v) ? v : 0;
 }
 
-function parsePercent(v: any) {
-  const s = String(v ?? "").trim();
-  if (!s) return 0;
-  // "59,40%" -> 0.594
-  const cleaned = s.replace("%", "").replace(/\./g, "").replace(/,/g, ".").replace(/[^\d.-]/g, "");
-  const n = Number(cleaned);
-  if (!Number.isFinite(n)) return 0;
-  return n > 1 ? n / 100 : n;
-}
-
-function parseMoney(v: any) {
-  const s = String(v ?? "").trim();
-  if (!s) return 0;
-  // "22.441,71" -> 22441.71
-  const cleaned = s.replace(/\./g, "").replace(/,/g, ".").replace(/[^\d.-]/g, "");
-  const n = Number(cleaned);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function parseDateAny(v: any): Date | null {
-  const s = String(v ?? "").trim();
-  if (!s) return null;
-
-  // 1) "1/6/2022"
-  const m1 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (m1) {
-    const d = Number(m1[1]);
-    const mo = Number(m1[2]) - 1;
-    const y = Number(m1[3]);
-    const dt = new Date(y, mo, d);
-    return Number.isFinite(dt.getTime()) ? dt : null;
+function parseFechaAny(row: HfRow): Date | null {
+  const f = row["Fecha"] || row["FECHA"] || "";
+  if (f && typeof f === "string" && f.includes("/")) {
+    const [d, m, y] = f.split("/").map((x) => Number(x));
+    if (y && m && d) return new Date(y, m - 1, d);
   }
-
-  // 2) "01-06-22 Wed" -> dd-mm-yy
-  const m2 = s.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})/);
-  if (m2) {
-    const d = Number(m2[1]);
-    const mo = Number(m2[2]) - 1;
-    let y = Number(m2[3]);
-    if (y < 100) y = 2000 + y;
-    const dt = new Date(y, mo, d);
-    return Number.isFinite(dt.getTime()) ? dt : null;
+  const dateStr = row["Date"] || row["DATE"] || "";
+  // ejemplo: "01-06-22 Wed"
+  if (dateStr) {
+    const m = String(dateStr).match(/^(\d{2})-(\d{2})-(\d{2})/);
+    if (m) {
+      const dd = Number(m[1]);
+      const mm = Number(m[2]);
+      const yy = Number(m[3]);
+      const yyyy = yy >= 70 ? 1900 + yy : 2000 + yy;
+      return new Date(yyyy, mm - 1, dd);
+    }
   }
-
-  const dt = new Date(s);
-  return Number.isFinite(dt.getTime()) ? dt : null;
+  return null;
 }
 
-function canonicalHotel(empresaRaw: string) {
-  const e = norm(empresaRaw);
-
-  if (!e) return "";
-
-  if (e.includes("MAITEI")) return "MAITEI";
-
-  if (e.includes("MARRIOTT")) return "MARRIOTT";
-
-  // Bariloche
-  if (e.includes("BARILOCHE") || e.includes("BRC") || e.includes("BCR")) return "SHERATON BCR";
-
-  // Mar del Plata
-  if (e.includes("MAR DEL PLATA") || e.includes("MDQ") || e.includes("MDP")) return "SHERATON MDQ";
-
-  // si ya viene exacto
-  if (e === "SHERATON BCR") return "SHERATON BCR";
-  if (e === "SHERATON MDQ") return "SHERATON MDQ";
-
-  return e;
+function getEmpresa(row: HfRow) {
+  return (row["Empresa"] || row["EMPRESA"] || "").trim().toUpperCase();
 }
 
-function fmt(n: number, digits = 0) {
-  try {
-    return new Intl.NumberFormat("es-AR", { maximumFractionDigits: digits }).format(n);
-  } catch {
-    return String(n.toFixed(digits));
-  }
+function getHoF(row: HfRow) {
+  return (row["HoF"] || row["HOF"] || row["Hof"] || "").trim().toUpperCase();
 }
 
-export default function HighlightsCarousel({ year, globalHotel, filePath }: Props) {
-  const [rows, setRows] = useState<CsvRow[]>([]);
+function sumRows(rows: HfRow[]) {
+  // intentamos agarrar métricas típicas del CSV
+  const roomsOcc = rows.reduce((a, r) => a + toNum(r["Occ.%"] || r["Occ%"] || r["Occ. %"] || 0), 0);
+  const roomRevenue = rows.reduce((a, r) => a + toNum(r["Room Revenue"] || r["Room Reven"] || r["RoomRevenue"] || 0), 0);
+  const adr = rows.reduce((a, r) => a + toNum(r["Average Rate"] || r["AverageRate"] || 0), 0);
+
+  const n = Math.max(rows.length, 1);
+  return {
+    days: rows.length,
+    occAvg: roomsOcc / n, // ojo: si Occ.% ya viene como porcentaje
+    roomRevenue,
+    adrAvg: adr / n,
+  };
+}
+
+function formatPct(v: number) {
+  if (!Number.isFinite(v)) return "—";
+  return `${v.toFixed(1).replace(".", ",")}%`;
+}
+function formatMoney(v: number) {
+  if (!Number.isFinite(v)) return "—";
+  return v.toLocaleString("es-AR", { maximumFractionDigits: 0 });
+}
+
+export default function HighlightsCarousel({ year, hotel, filePath, title }: Props) {
+  const [rows, setRows] = useState<HfRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string>("");
 
   useEffect(() => {
-    let alive = true;
+    let mounted = true;
     setLoading(true);
-
-    (async () => {
-      try {
-        const data = await readCsvFromPublic(filePath);
-        if (alive) {
-          setRows(data || []);
-          setLoading(false);
-        }
-      } catch {
-        if (alive) {
-          setRows([]);
-          setLoading(false);
-        }
-      }
-    })();
-
+    setErr("");
+    readCsvFromPublic(filePath)
+      .then(({ rows }) => {
+        if (!mounted) return;
+        setRows(rows as HfRow[]);
+        setLoading(false);
+      })
+      .catch((e: any) => {
+        if (!mounted) return;
+        setErr(e?.message || "Error leyendo CSV");
+        setLoading(false);
+      });
     return () => {
-      alive = false;
+      mounted = false;
     };
   }, [filePath]);
 
   const filtered = useMemo(() => {
-    const out: {
-      dt: Date;
-      hotel: string;
-      hof: string;
-      occ: number;
-      adr: number;
-      roomRev: number;
-      totalRooms: number;
-    }[] = [];
+    const wantedYear = year;
 
-    for (let i = 0; i < rows.length; i++) {
-      const r = rows[i];
+    const base = rows.filter((r) => {
+      const dt = parseFechaAny(r);
+      if (!dt) return false;
+      return dt.getFullYear() === wantedYear;
+    });
 
-      // headers raros: buscamos por “contiene”
-      const keys = Object.keys(r);
-      const get = (contains: string) => {
-        const k = keys.find((x) => norm(x).includes(norm(contains)));
-        return k ? r[k] : "";
-      };
-
-      const empresa = canonicalHotel(get("Empresa"));
-      const hof = String(get("HoF") || get("HOF") || "").trim();
-      const dt = parseDateAny(get("Fecha") || get("Date"));
-      if (!dt) continue;
-
-      const y = dt.getFullYear();
-      if (y !== year) continue;
-
-      // filtro hotel
-      if (globalHotel === "JCR") {
-        if (!(empresa === "MARRIOTT" || empresa === "SHERATON BCR" || empresa === "SHERATON MDQ")) continue;
-      } else {
-        if (empresa !== globalHotel) continue;
-      }
-
-      const occ = parsePercent(get("Occ.%") || get("Occ"));
-      const adr = parseMoney(get("Average Rate") || get("ADR") || get("Average"));
-      const roomRev = parseMoney(get("Room Revenue") || get("Room Reven"));
-      const totalRooms = parseMoney(get("Total"));
-
-      out.push({ dt, hotel: empresa, hof, occ, adr, roomRev, totalRooms });
+    if (hotel === "JCR") {
+      const allowed = new Set(["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"]);
+      return base.filter((r) => allowed.has(getEmpresa(r)));
     }
+    return base.filter((r) => getEmpresa(r) === hotel);
+  }, [rows, year, hotel]);
 
-    return out;
-  }, [rows, year, globalHotel]);
+  const history = useMemo(() => filtered.filter((r) => getHoF(r) === "HISTORY"), [filtered]);
+  const forecast = useMemo(() => filtered.filter((r) => getHoF(r) === "FORECAST"), [filtered]);
 
-  const kpis = useMemo(() => {
-    if (!filtered.length) {
-      return { occAvg: 0, adrAvg: 0, roomRevSum: 0, days: 0 };
-    }
-    let occSum = 0;
-    let adrSum = 0;
-    let roomRevSum = 0;
-    for (let i = 0; i < filtered.length; i++) {
-      occSum += filtered[i].occ || 0;
-      adrSum += filtered[i].adr || 0;
-      roomRevSum += filtered[i].roomRev || 0;
-    }
-    return {
-      occAvg: occSum / filtered.length,
-      adrAvg: adrSum / filtered.length,
-      roomRevSum,
-      days: filtered.length,
-    };
-  }, [filtered]);
-
-  const title = useMemo(() => {
-    if (globalHotel === "JCR") return "Grupo JCR — KPIs";
-    if (globalHotel === "MAITEI") return "Maitei (Gotel) — KPIs";
-    return `${globalHotel} — KPIs`;
-  }, [globalHotel]);
+  const kpiHistory = useMemo(() => sumRows(history), [history]);
+  const kpiForecast = useMemo(() => sumRows(forecast), [forecast]);
 
   if (loading) {
-    return <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>Cargando KPIs…</div>;
-  }
-
-  if (!filtered.length) {
     return (
-      <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
-        <div style={{ fontWeight: 950 }}>{title} {year}</div>
-        <div style={{ marginTop: ".35rem", opacity: 0.8 }}>
-          Sin filas H&F para el filtro actual. (Chequeá valores reales en columna Empresa del CSV)
-        </div>
-        <div style={{ marginTop: ".5rem", fontSize: ".9rem", opacity: 0.7 }}>
-          Archivo: {filePath}
-        </div>
+      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
+        Cargando KPIs…
+      </div>
+    );
+  }
+  if (err) {
+    return (
+      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
+        Error: {err}
       </div>
     );
   }
 
-  const cards = [
-    { label: "Ocupación promedio", value: `${fmt(kpis.occAvg * 100, 1)}%`, sub: `${kpis.days} días` },
-    { label: "ADR promedio", value: `$ ${fmt(kpis.adrAvg, 0)}`, sub: "Average Rate" },
-    { label: "Room Revenue", value: `$ ${fmt(kpis.roomRevSum, 0)}`, sub: "Suma año" },
-  ];
+  const header = title || (hotel === "JCR" ? "Grupo JCR — KPIs" : `${hotel} — KPIs`);
 
   return (
-    <div style={{ display: "grid", gap: "1rem" }}>
-      <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
-        <div style={{ fontWeight: 950, fontSize: "1.1rem" }}>{title} {year} (H&F)</div>
-        <div style={{ marginTop: ".25rem", opacity: 0.75 }}>Usa filtro global de año + hotel</div>
+    <div style={{ display: "grid", gap: ".75rem" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: ".75rem", flexWrap: "wrap" }}>
+        <div style={{ fontWeight: 950, fontSize: "1.05rem" }}>{header} {year}</div>
+        <div style={{ opacity: 0.7, fontSize: ".9rem" }}>
+          History ({kpiHistory.days}) · Forecast ({kpiForecast.days})
+        </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: "1rem" }}>
-        {cards.map((c) => (
-          <div
-            key={c.label}
-            className="card"
-            style={{
-              padding: "1rem",
-              borderRadius: 22,
-              background: "linear-gradient(135deg, rgba(0,0,0,.04), rgba(0,0,0,.02))",
-              minHeight: 96,
-            }}
-          >
-            <div style={{ fontWeight: 800, opacity: 0.85 }}>{c.label}</div>
-            <div style={{ fontWeight: 950, fontSize: "1.8rem", marginTop: ".25rem" }}>{c.value}</div>
-            <div style={{ marginTop: ".15rem", opacity: 0.7, fontSize: ".9rem" }}>{c.sub}</div>
-          </div>
-        ))}
+      <div
+        style={{
+          display: "grid",
+          gap: ".75rem",
+          gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+        }}
+        className="kpiGrid"
+      >
+        <div style={cardStyleGrad("linear-gradient(135deg, #0ea5e9, #22c55e)")}>
+          <div style={kpiLabel}>Room Revenue (History)</div>
+          <div style={kpiValue}>{formatMoney(kpiHistory.roomRevenue)}</div>
+          <div style={kpiSub}>ADR prom: {formatMoney(kpiHistory.adrAvg)}</div>
+        </div>
+
+        <div style={cardStyleGrad("linear-gradient(135deg, #a855f7, #ec4899)")}>
+          <div style={kpiLabel}>Room Revenue (Forecast)</div>
+          <div style={kpiValue}>{formatMoney(kpiForecast.roomRevenue)}</div>
+          <div style={kpiSub}>ADR prom: {formatMoney(kpiForecast.adrAvg)}</div>
+        </div>
+
+        <div style={cardStyleGrad("linear-gradient(135deg, #f59e0b, #ef4444)")}>
+          <div style={kpiLabel}>Ocupación prom. (History)</div>
+          <div style={kpiValue}>{formatPct(kpiHistory.occAvg)}</div>
+          <div style={kpiSub}>Días: {kpiHistory.days}</div>
+        </div>
       </div>
 
-      {/* Responsive tweak */}
       <style jsx>{`
         @media (max-width: 900px) {
-          div[style*="repeat(3"] {
+          .kpiGrid {
             grid-template-columns: 1fr !important;
           }
         }
@@ -256,3 +188,16 @@ export default function HighlightsCarousel({ year, globalHotel, filePath }: Prop
     </div>
   );
 }
+
+const cardStyleGrad = (bg: string): React.CSSProperties => ({
+  background: bg,
+  color: "white",
+  borderRadius: 18,
+  padding: "1rem",
+  minHeight: 110,
+  boxShadow: "0 10px 30px rgba(0,0,0,.08)",
+});
+
+const kpiLabel: React.CSSProperties = { fontSize: ".85rem", opacity: 0.9, fontWeight: 800 };
+const kpiValue: React.CSSProperties = { fontSize: "1.9rem", fontWeight: 950, marginTop: ".2rem" };
+const kpiSub: React.CSSProperties = { fontSize: ".9rem", opacity: 0.9, marginTop: ".2rem", fontWeight: 700 };
