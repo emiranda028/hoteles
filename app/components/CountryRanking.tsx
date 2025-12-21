@@ -1,432 +1,482 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import * as XLSX from "xlsx";
+import { readXlsxFromPublic } from "./readXlsxFromPublic";
 
-// ========= Types =========
 type Props = {
   year: number;
-  filePath: string;                 // ej: "/data/jcr_nacionalidades.xlsx"
-  hotelFilter?: string;             // "JCR" | "MARRIOTT" | "SHERATON BCR" | "SHERATON MDQ"
-  limit?: number;                   // default 12
+  filePath: string;
+  baseYear?: number; // opcional (si querés comparar)
+  limit?: number; // top N
+  hotelFilter?: string; // opcional: "JCR"|"MARRIOTT"|"SHERATON BCR"|"SHERATON MDQ"
 };
 
-type Row = {
-  date: Date | null;
-  year: number | null;
-  hotel: string;         // Empresa/Hotel
-  country: string;       // País/Nacionalidad
-  continent: string;     // Continente
-  qty: number;           // Cantidad
-};
+type Row = Record<string, any>;
 
-// ========= Helpers =========
-function normKey(s: any) {
-  return String(s ?? "")
+function normStr(v: any) {
+  return String(v ?? "")
     .trim()
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
+    .replace(/\s+/g, " ");
 }
 
-function safeNum(v: any) {
+function upperNoAccents(s: string) {
+  return s
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase();
+}
+
+function toNumber(v: any): number {
   if (v === null || v === undefined) return 0;
   const s = String(v).trim();
   if (!s) return 0;
-
-  // soporta "22.441,71" y "22441.71"
-  const normalized =
-    s.indexOf(",") >= 0 && s.indexOf(".") >= 0
-      ? s.replace(/\./g, "").replace(",", ".")
-      : s.replace(",", ".");
-
-  const n = Number(normalized);
+  // soporta "1.234" y "1,234" y "1.234,56"
+  const cleaned = s
+    .replace(/\./g, "")
+    .replace(/,/g, ".")
+    .replace(/[^\d.-]/g, "");
+  const n = Number(cleaned);
   return Number.isFinite(n) ? n : 0;
 }
 
-function parseDateAny(v: any): Date | null {
-  if (v instanceof Date) return isNaN(v.getTime()) ? null : v;
-  const s = String(v ?? "").trim();
+function yearFromAnyDate(value: any): number | null {
+  if (!value) return null;
+
+  // Date real
+  if (value instanceof Date && !isNaN(value.getTime())) return value.getFullYear();
+
+  // Excel serial date (XLSX a veces lo deja como número)
+  if (typeof value === "number" && value > 20000 && value < 60000) {
+    // Excel epoch 1899-12-30
+    const d = new Date(Math.round((value - 25569) * 86400 * 1000));
+    if (!isNaN(d.getTime())) return d.getFullYear();
+  }
+
+  // string
+  const s = String(value).trim();
   if (!s) return null;
 
-  // dd/mm/yyyy
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  // intenta parseo directo
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) return d.getFullYear();
+
+  // dd/mm/yyyy o dd-mm-yyyy
+  const m = s.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
   if (m) {
-    const dd = Number(m[1]);
-    const mm = Number(m[2]);
-    let yy = Number(m[3]);
-    if (yy < 100) yy += 2000;
-    const d = new Date(yy, mm - 1, dd);
-    return isNaN(d.getTime()) ? null : d;
+    const yyyy = m[3].length === 2 ? Number("20" + m[3]) : Number(m[3]);
+    if (yyyy > 1900 && yyyy < 2100) return yyyy;
   }
 
   // yyyy-mm-dd
-  const d2 = new Date(s);
-  return isNaN(d2.getTime()) ? null : d2;
-}
-
-function stripWeirdSpaces(s: string) {
-  return s.replace(/\s+/g, " ").trim();
-}
-
-// Emoji flag from ISO2 (NO spread, NO iterators)
-function flagFromISO2(code: string) {
-  const s = stripWeirdSpaces(code || "").toUpperCase();
-  if (s.length !== 2) return "";
-  const A = 0x1f1e6;
-  const c0 = s.charCodeAt(0);
-  const c1 = s.charCodeAt(1);
-  if (c0 < 65 || c0 > 90 || c1 < 65 || c1 > 90) return "";
-  return String.fromCodePoint(A + (c0 - 65), A + (c1 - 65));
-}
-
-// Muy “pragmático”: mapeo manual de países comunes a ISO2 para banderas
-const COUNTRY_TO_ISO2: Record<string, string> = {
-  "ARGENTINA": "AR",
-  "ARG": "AR",
-  "BRASIL": "BR",
-  "BRAZIL": "BR",
-  "CHILE": "CL",
-  "URUGUAY": "UY",
-  "PARAGUAY": "PY",
-  "BOLIVIA": "BO",
-  "PERU": "PE",
-  "COLOMBIA": "CO",
-  "MEXICO": "MX",
-  "MÉXICO": "MX",
-  "UNITED STATES": "US",
-  "ESTADOS UNIDOS": "US",
-  "USA": "US",
-  "ESPANA": "ES",
-  "ESPAÑA": "ES",
-  "SPAIN": "ES",
-  "FRANCIA": "FR",
-  "FRANCE": "FR",
-  "ITALIA": "IT",
-  "ITALY": "IT",
-  "ALEMANIA": "DE",
-  "GERMANY": "DE",
-  "REINO UNIDO": "GB",
-  "UNITED KINGDOM": "GB",
-  "INGLATERRA": "GB",
-  "CANADA": "CA",
-  "CANADÁ": "CA",
-  "PORTUGAL": "PT",
-  "CHINA": "CN",
-  "JAPON": "JP",
-  "JAPÓN": "JP",
-  "JAPAN": "JP",
-  "AUSTRALIA": "AU",
-};
-
-function isoFromCountry(country: string) {
-  const k = stripWeirdSpaces(country || "").toUpperCase();
-  return COUNTRY_TO_ISO2[k] || "";
-}
-
-// ========= XLSX reader =========
-async function readXlsx(path: string) {
-  const res = await fetch(path);
-  if (!res.ok) throw new Error(`No se pudo cargar ${path} (status ${res.status})`);
-  const buffer = await res.arrayBuffer();
-  const wb = XLSX.read(buffer, { type: "array" });
-
-  const sheetNames = wb.SheetNames || [];
-  if (sheetNames.length === 0) return { rows: [] as any[], sheet: "" };
-
-  // elegimos la hoja con más filas/columnas “reales”
-  let bestSheet = sheetNames[0];
-  let bestRows: any[] = [];
-  let bestScore = -1;
-
-  for (let i = 0; i < sheetNames.length; i++) {
-    const name = sheetNames[i];
-    const ws = wb.Sheets[name];
-    if (!ws) continue;
-    const rows = XLSX.utils.sheet_to_json(ws, { defval: "" }) as any[];
-
-    const keys = Object.keys(rows[0] ?? {});
-    const keySet = new Set(keys.map((k) => normKey(k)));
-
-    let score = keys.length + Math.min(rows.length, 200) / 10;
-    if (keySet.has("empresa") || keySet.has("hotel")) score += 30;
-    if (keySet.has("pais") || keySet.has("nacionalidad") || keySet.has("country")) score += 30;
-    if (keySet.has("continente") || keySet.has("continent")) score += 15;
-    if (keySet.has("cantidad") || keySet.has("qty") || keySet.has("cantidad pax")) score += 20;
-    if (keySet.has("fecha") || keySet.has("date")) score += 10;
-
-    if (score > bestScore) {
-      bestScore = score;
-      bestSheet = name;
-      bestRows = rows;
-    }
+  const m2 = s.match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+  if (m2) {
+    const yyyy = Number(m2[1]);
+    if (yyyy > 1900 && yyyy < 2100) return yyyy;
   }
 
-  return { rows: bestRows, sheet: bestSheet };
+  return null;
 }
 
-function pickField(obj: any, candidates: string[]) {
-  const keys = Object.keys(obj ?? {});
-  const map: Record<string, string> = {};
-  for (let i = 0; i < keys.length; i++) map[normKey(keys[i])] = keys[i];
+function pickKeyByCandidates(sample: Row, candidates: string[]) {
+  const keys = Object.keys(sample || {});
+  const map = new Map<string, string>();
+  keys.forEach((k) => map.set(upperNoAccents(k), k));
 
-  for (let i = 0; i < candidates.length; i++) {
-    const c = normKey(candidates[i]);
-    if (map[c]) return obj[map[c]];
+  for (const cand of candidates) {
+    const found = map.get(upperNoAccents(cand));
+    if (found) return found;
   }
   return "";
 }
 
-// ========= Component =========
-export default function CountryRanking({ year, filePath, hotelFilter, limit = 12 }: Props) {
+function countryToISO2(countryRaw: string): string {
+  const c = upperNoAccents(countryRaw);
+
+  // IMPORTANTÍSIMO: keys con espacios SIEMPRE entre comillas
+  const MAP: Record<string, string> = {
+    ARGENTINA: "AR",
+    BRASIL: "BR",
+    BRAZIL: "BR",
+    CHILE: "CL",
+    URUGUAY: "UY",
+    PARAGUAY: "PY",
+    PERU: "PE",
+    PERÚ: "PE",
+    BOLIVIA: "BO",
+    ECUADOR: "EC",
+    COLOMBIA: "CO",
+    VENEZUELA: "VE",
+    MEXICO: "MX",
+    "MÉXICO": "MX",
+    "UNITED STATES": "US",
+    "ESTADOS UNIDOS": "US",
+    USA: "US",
+    ESPANA: "ES",
+    "ESPAÑA": "ES",
+    SPAIN: "ES",
+    ITALIA: "IT",
+    ITALY: "IT",
+    FRANCIA: "FR",
+    FRANCE: "FR",
+    ALEMANIA: "DE",
+    GERMANY: "DE",
+    "REINO UNIDO": "GB",
+    "UNITED KINGDOM": "GB",
+    UK: "GB",
+    "GRAN BRETAÑA": "GB",
+  };
+
+  return MAP[c] || "";
+}
+
+function iso2ToFlagEmoji(iso2: string) {
+  const s = upperNoAccents(iso2).slice(0, 2);
+  if (s.length !== 2) return "";
+  const A = 0x1f1e6;
+  const c0 = s.charCodeAt(0) - 65;
+  const c1 = s.charCodeAt(1) - 65;
+  if (c0 < 0 || c0 > 25 || c1 < 0 || c1 > 25) return "";
+  return String.fromCodePoint(A + c0, A + c1);
+}
+
+export default function CountryRanking({
+  year,
+  filePath,
+  baseYear = 2024,
+  limit = 12,
+  hotelFilter,
+}: Props) {
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
+  const [error, setError] = useState<string>("");
 
-  // Nacionalidades: vos pediste que NO necesite filtro hotel porque es solo Marriott.
-  // Igual lo dejo opcional: si viene, filtra; si no, muestra todo.
   useEffect(() => {
     let alive = true;
     setLoading(true);
-    setErr(null);
+    setError("");
 
-    readXlsx(filePath)
-      .then(({ rows: raw }) => {
+    (async () => {
+      try {
+        const r = await readXlsxFromPublic(filePath);
         if (!alive) return;
-
-        const parsed: Row[] = (raw || []).map((r: any) => {
-          const dt = parseDateAny(pickField(r, ["Fecha", "date", "Día", "Dia"]));
-          const yy = dt ? dt.getFullYear() : null;
-
-          const hotel = stripWeirdSpaces(
-            String(pickField(r, ["Empresa", "Hotel", "empresa", "hotel"]) || "")
-          ).toUpperCase();
-
-          const country = stripWeirdSpaces(
-            String(pickField(r, ["País", "Pais", "Nacionalidad", "Country", "country"]) || "")
-          );
-
-          const continent = stripWeirdSpaces(
-            String(pickField(r, ["Continente", "continent", "Continent"]) || "")
-          );
-
-          const qty = safeNum(pickField(r, ["Cantidad", "qty", "Qty", "Pax", "Huéspedes", "Huespedes"]));
-
-          return { date: dt, year: yy, hotel, country, continent, qty };
-        });
-
-        setRows(parsed);
-        setLoading(false);
-      })
-      .catch((e) => {
+        setRows(r.rows || []);
+      } catch (e: any) {
         if (!alive) return;
-        setErr(String(e?.message || e));
+        setError(e?.message || "Error cargando archivo");
+        setRows([]);
+      } finally {
+        if (!alive) return;
         setLoading(false);
-      });
+      }
+    })();
 
     return () => {
       alive = false;
     };
   }, [filePath]);
 
-  const filtered = useMemo(() => {
-    const y = year;
-    const hf = (hotelFilter || "").toUpperCase();
+  const meta = useMemo(() => {
+    const sample = rows[0] || {};
 
-    // filtro por año
-    let out = rows.filter((r) => r.year === y);
+    const hotelKey = pickKeyByCandidates(sample, ["Hotel", "Empresa", "Property", "Propiedad"]);
+    const countryKey = pickKeyByCandidates(sample, [
+      "Pais",
+      "País",
+      "Nacionalidad",
+      "Nacionalidad País",
+      "Country",
+      "Nationality",
+    ]);
+    const continentKey = pickKeyByCandidates(sample, ["Continente", "Continent"]);
+    const qtyKey = pickKeyByCandidates(sample, ["Cantidad", "Qty", "Cantidad Pax", "Pax", "Guests"]);
+    const dateKey = pickKeyByCandidates(sample, ["Fecha", "Date", "Día", "Dia", "Day"]);
 
-    // filtro hotel opcional
-    if (hf && hf !== "ALL") {
-      if (hf === "JCR") {
-        // en nacionalidades, si llegara a venir “JCR”, lo interpretamos como Marriott + Sheratons
-        const allow = new Set(["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"]);
-        out = out.filter((r) => allow.has(r.hotel));
-      } else {
-        out = out.filter((r) => r.hotel === hf);
-      }
+    return { hotelKey, countryKey, continentKey, qtyKey, dateKey, sampleKeys: Object.keys(sample) };
+  }, [rows]);
+
+  function hotelMatches(h: string, filter?: string) {
+    if (!filter) return true;
+    const H = upperNoAccents(h);
+    const F = upperNoAccents(filter);
+
+    if (F === "JCR" || F === "GRUPO JCR") return true;
+
+    if (F.includes("MARRIOTT")) return H.includes("MARRIOTT");
+    if (F.includes("SHERATON BCR") || F.includes("BCR")) return H.includes("BCR");
+    if (F.includes("SHERATON MDQ") || F.includes("MDQ")) return H.includes("MDQ");
+
+    return H.includes(F);
+  }
+
+  const filteredRows = useMemo(() => {
+    if (!rows.length) return [];
+
+    const { hotelKey, dateKey } = meta;
+    const out: Row[] = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const hotelVal = hotelKey ? normStr(r[hotelKey]) : "";
+      if (!hotelMatches(hotelVal, hotelFilter)) continue;
+
+      const y = dateKey ? yearFromAnyDate(r[dateKey]) : null;
+      if (y !== year) continue;
+
+      out.push(r);
     }
-
-    // limpiamos rows sin qty
-    out = out.filter((r) => r.qty > 0);
-
     return out;
-  }, [rows, year, hotelFilter]);
+  }, [rows, meta, year, hotelFilter]);
 
   const byCountry = useMemo(() => {
     const m = new Map<string, number>();
-    for (let i = 0; i < filtered.length; i++) {
-      const r = filtered[i];
-      const k = stripWeirdSpaces(r.country || "—") || "—";
-      m.set(k, (m.get(k) || 0) + r.qty);
+    const { countryKey, qtyKey } = meta;
+    if (!countryKey || !qtyKey) return m;
+
+    for (let i = 0; i < filteredRows.length; i++) {
+      const r = filteredRows[i];
+      const c = normStr(r[countryKey]);
+      if (!c) continue;
+      const v = toNumber(r[qtyKey]);
+      m.set(c, (m.get(c) || 0) + v);
     }
     return m;
-  }, [filtered]);
+  }, [filteredRows, meta]);
 
   const byContinent = useMemo(() => {
     const m = new Map<string, number>();
-    for (let i = 0; i < filtered.length; i++) {
-      const r = filtered[i];
-      const k = stripWeirdSpaces(r.continent || "—") || "—";
-      m.set(k, (m.get(k) || 0) + r.qty);
+    const { continentKey, qtyKey } = meta;
+    if (!continentKey || !qtyKey) return m;
+
+    for (let i = 0; i < filteredRows.length; i++) {
+      const r = filteredRows[i];
+      const c = normStr(r[continentKey]);
+      if (!c) continue;
+      const v = toNumber(r[qtyKey]);
+      m.set(c, (m.get(c) || 0) + v);
     }
     return m;
-  }, [filtered]);
+  }, [filteredRows, meta]);
 
   const total = useMemo(() => {
-    // NO for..of values()
-    const vals = Array.from(byCountry.values());
     let t = 0;
-    for (let i = 0; i < vals.length; i++) t += vals[i];
 
-    // fallback a continente si no hay país
+    // NO usar for..of sobre iterators (downlevelIteration)
+    Array.from(byCountry.values()).forEach((v) => (t += v));
     if (t === 0) {
-      const vals2 = Array.from(byContinent.values());
-      for (let i = 0; i < vals2.length; i++) t += vals2[i];
+      Array.from(byContinent.values()).forEach((v) => (t += v));
     }
     return t;
   }, [byCountry, byContinent]);
 
   const topCountries = useMemo(() => {
-    const arr = Array.from(byCountry.entries())
-      .map(([country, qty]) => ({ country, qty }))
-      .sort((a, b) => b.qty - a.qty)
-      .slice(0, limit);
-    return arr;
+    const list = Array.from(byCountry.entries())
+      .map(([country, value]) => ({ country, value }))
+      .sort((a, b) => b.value - a.value);
+
+    return list.slice(0, limit);
   }, [byCountry, limit]);
 
-  const continents = useMemo(() => {
-    const arr = Array.from(byContinent.entries())
-      .map(([continent, qty]) => ({ continent, qty }))
-      .sort((a, b) => b.qty - a.qty);
-    return arr;
+  const topContinents = useMemo(() => {
+    const list = Array.from(byContinent.entries())
+      .map(([continent, value]) => ({ continent, value }))
+      .sort((a, b) => b.value - a.value);
+
+    return list;
   }, [byContinent]);
 
-  function fmtInt(n: number) {
-    return (n || 0).toLocaleString("es-AR");
-  }
-  function fmtPct(x: number) {
-    if (!Number.isFinite(x)) return "—";
-    return (x * 100).toLocaleString("es-AR", { maximumFractionDigits: 1 }) + "%";
-  }
+  const titleHotel = useMemo(() => {
+    const f = (hotelFilter || "").trim();
+    if (!f || upperNoAccents(f) === "JCR") return "JCR";
+    return f.toUpperCase();
+  }, [hotelFilter]);
 
   if (loading) {
     return (
-      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        Cargando nacionalidades…
+      <div style={{ padding: "1rem" }}>
+        <div style={{ fontWeight: 900 }}>Nacionalidades</div>
+        <div style={{ marginTop: ".35rem", opacity: 0.75 }}>Cargando archivo…</div>
       </div>
     );
   }
 
-  if (err) {
+  if (error) {
     return (
-      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        <div style={{ fontWeight: 800 }}>Error cargando nacionalidades</div>
-        <div style={{ opacity: 0.8, marginTop: 6 }}>{err}</div>
-      </div>
-    );
-  }
-
-  if (filtered.length === 0) {
-    return (
-      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        <div style={{ fontWeight: 800 }}>Sin datos</div>
-        <div style={{ opacity: 0.8, marginTop: 6 }}>
-          No hay filas para {year}. (Archivo: {filePath})
+      <div style={{ padding: "1rem" }}>
+        <div style={{ fontWeight: 900 }}>Nacionalidades</div>
+        <div style={{ marginTop: ".35rem", color: "#b00020" }}>{error}</div>
+        <div style={{ marginTop: ".5rem", opacity: 0.75, fontSize: 12 }}>
+          Archivo: <code>{filePath}</code>
         </div>
       </div>
     );
   }
 
+  if (!rows.length) {
+    return (
+      <div style={{ padding: "1rem" }}>
+        <div style={{ fontWeight: 900 }}>Nacionalidades</div>
+        <div style={{ marginTop: ".35rem", opacity: 0.75 }}>Sin filas en el archivo.</div>
+        <div style={{ marginTop: ".5rem", opacity: 0.75, fontSize: 12 }}>
+          Archivo: <code>{filePath}</code>
+        </div>
+      </div>
+    );
+  }
+
+  if (!filteredRows.length) {
+    return (
+      <div style={{ padding: "1rem" }}>
+        <div style={{ fontWeight: 900 }}>Nacionalidades ({titleHotel})</div>
+        <div style={{ marginTop: ".35rem", opacity: 0.75 }}>
+          Sin datos para <b>{year}</b>.
+        </div>
+        <div style={{ marginTop: ".6rem", opacity: 0.8, fontSize: 12 }}>
+          Detectado: hotel=<b>{meta.hotelKey || "—"}</b> · país=<b>{meta.countryKey || "—"}</b> ·
+          continente=<b>{meta.continentKey || "—"}</b> · qty=<b>{meta.qtyKey || "—"}</b> · fecha=
+          <b>{meta.dateKey || "—"}</b>
+        </div>
+        <div style={{ marginTop: ".4rem", opacity: 0.7, fontSize: 12 }}>
+          Keys ejemplo: {meta.sampleKeys.slice(0, 12).join(", ")}
+        </div>
+        <div style={{ marginTop: ".4rem", opacity: 0.7, fontSize: 12 }}>
+          Archivo: <code>{filePath}</code>
+        </div>
+      </div>
+    );
+  }
+
+  // UI responsive simple: 2 columnas en desktop, 1 en mobile
   return (
-    <div style={{ display: "grid", gap: "1rem" }}>
-      {/* Layout responsive: País grande + Continente chico */}
+    <div style={{ padding: "1rem" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: ".75rem" }}>
+        <div>
+          <div style={{ fontWeight: 950, fontSize: "1.15rem" }}>Nacionalidades ({titleHotel})</div>
+          <div style={{ marginTop: ".25rem", opacity: 0.75 }}>
+            Ranking por país + distribución por continente · Año {year}
+          </div>
+        </div>
+
+        <div style={{ textAlign: "right", minWidth: 160 }}>
+          <div style={{ fontWeight: 900, fontSize: "1.05rem" }}>{total.toLocaleString("es-AR")}</div>
+          <div style={{ opacity: 0.7, fontSize: 12 }}>Total (según qty)</div>
+        </div>
+      </div>
+
       <div
         style={{
+          marginTop: "1rem",
           display: "grid",
           gridTemplateColumns: "minmax(0, 1fr)",
           gap: "1rem",
         }}
       >
-        {/* Ranking País */}
-        <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-            <div>
-              <div style={{ fontWeight: 950, fontSize: "1.05rem" }}>Ranking por país</div>
-              <div style={{ opacity: 0.75, marginTop: 4 }}>
-                Total {fmtInt(total)} · Año {year}
-              </div>
-            </div>
-          </div>
+        {/* TOP PAISES */}
+        <div
+          style={{
+            border: "1px solid rgba(0,0,0,.08)",
+            borderRadius: 18,
+            padding: "1rem",
+            overflow: "hidden",
+          }}
+        >
+          <div style={{ fontWeight: 950, marginBottom: ".65rem" }}>Top países</div>
 
-          <div style={{ marginTop: "1rem", display: "grid", gap: ".55rem" }}>
-            {topCountries.map((c, idx) => {
-              const iso = isoFromCountry(c.country);
-              const flag = iso ? flagFromISO2(iso) : "";
-              const share = total > 0 ? c.qty / total : 0;
-
+          <div style={{ display: "grid", gap: ".5rem" }}>
+            {topCountries.map((it) => {
+              const pct = total > 0 ? (it.value / total) * 100 : 0;
+              const iso2 = countryToISO2(it.country);
+              const flag = iso2 ? iso2ToFlagEmoji(iso2) : "";
               return (
-                <div
-                  key={`${c.country}-${idx}`}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "26px minmax(0,1fr) 80px",
-                    alignItems: "center",
-                    gap: 10,
-                  }}
-                >
-                  <div style={{ fontSize: "1.2rem", textAlign: "center" }}>{flag || "🌍"}</div>
-
+                <div key={it.country} style={{ display: "grid", gridTemplateColumns: "1fr 80px", gap: ".75rem" }}>
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                      <div style={{ fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {idx + 1}. {c.country || "—"}
+                    <div style={{ display: "flex", alignItems: "center", gap: ".5rem" }}>
+                      <div style={{ width: 26, textAlign: "center" }}>{flag}</div>
+                      <div style={{ fontWeight: 800, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {it.country}
                       </div>
-                      <div style={{ opacity: 0.8, fontWeight: 700 }}>{fmtPct(share)}</div>
+                      <div style={{ opacity: 0.7, fontSize: 12 }}>{pct.toFixed(1)}%</div>
                     </div>
-                    <div style={{ height: 10, background: "rgba(0,0,0,.06)", borderRadius: 999, overflow: "hidden", marginTop: 6 }}>
+                    <div
+                      style={{
+                        marginTop: ".25rem",
+                        height: 10,
+                        borderRadius: 999,
+                        background: "rgba(0,0,0,.06)",
+                        overflow: "hidden",
+                      }}
+                    >
                       <div
                         style={{
-                          width: `${Math.min(100, Math.max(2, share * 100))}%`,
+                          width: `${Math.min(100, pct)}%`,
                           height: "100%",
-                          background: "linear-gradient(90deg, rgba(161,0,28,1), rgba(255,87,87,1))",
+                          borderRadius: 999,
+                          background: "linear-gradient(90deg, rgba(140,0,50,.85), rgba(255,140,0,.8))",
                         }}
                       />
                     </div>
                   </div>
 
-                  <div style={{ textAlign: "right", fontWeight: 900 }}>{fmtInt(c.qty)}</div>
+                  <div style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                    <div style={{ fontWeight: 900 }}>{it.value.toLocaleString("es-AR")}</div>
+                  </div>
                 </div>
               );
             })}
           </div>
         </div>
 
-        {/* Continente (más chico) */}
-        <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
-          <div style={{ fontWeight: 950, fontSize: "1.05rem" }}>Distribución por continente</div>
-          <div style={{ opacity: 0.75, marginTop: 4 }}>Compacto</div>
+        {/* CONTINENTES */}
+        <div
+          style={{
+            border: "1px solid rgba(0,0,0,.08)",
+            borderRadius: 18,
+            padding: "1rem",
+          }}
+        >
+          <div style={{ fontWeight: 950, marginBottom: ".65rem" }}>Continentes</div>
 
-          <div style={{ marginTop: "1rem", display: "grid", gap: ".55rem" }}>
-            {continents.map((c) => {
-              const share = total > 0 ? c.qty / total : 0;
+          <div style={{ display: "grid", gap: ".45rem" }}>
+            {topContinents.map((it) => {
+              const pct = total > 0 ? (it.value / total) * 100 : 0;
               return (
-                <div key={c.continent} style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 90px", gap: 10, alignItems: "center" }}>
+                <div key={it.continent} style={{ display: "grid", gridTemplateColumns: "1fr 90px", gap: ".75rem" }}>
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                      <div style={{ fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {c.continent || "—"}
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: ".75rem" }}>
+                      <div style={{ fontWeight: 850, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {it.continent}
                       </div>
-                      <div style={{ opacity: 0.8, fontWeight: 700 }}>{fmtPct(share)}</div>
+                      <div style={{ opacity: 0.75, fontSize: 12 }}>{pct.toFixed(1)}%</div>
                     </div>
-                    <div style={{ height: 10, background: "rgba(0,0,0,.06)", borderRadius: 999, overflow: "hidden", marginTop: 6 }}>
-                      <div style={{ width: `${Math.min(100, Math.max(2, share * 100))}%`, height: "100%", background: "rgba(0,0,0,.35)" }} />
+                    <div
+                      style={{
+                        marginTop: ".25rem",
+                        height: 8,
+                        borderRadius: 999,
+                        background: "rgba(0,0,0,.06)",
+                        overflow: "hidden",
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: `${Math.min(100, pct)}%`,
+                          height: "100%",
+                          borderRadius: 999,
+                          background: "linear-gradient(90deg, rgba(0,140,120,.85), rgba(0,100,255,.75))",
+                        }}
+                      />
                     </div>
                   </div>
-                  <div style={{ textAlign: "right", fontWeight: 900 }}>{fmtInt(c.qty)}</div>
+
+                  <div style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                    <div style={{ fontWeight: 900 }}>{it.value.toLocaleString("es-AR")}</div>
+                  </div>
                 </div>
               );
             })}
+          </div>
+
+          <div style={{ marginTop: ".85rem", opacity: 0.7, fontSize: 12 }}>
+            Archivo: <code>{filePath}</code>
           </div>
         </div>
       </div>
