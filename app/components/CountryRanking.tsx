@@ -1,246 +1,389 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { readXlsxFromPublic } from "./xlsxClient";
 
 type Props = {
   year: number;
   filePath: string; // "/data/jcr_nacionalidades.xlsx"
   limit?: number;
+  baseYear?: number; // opcional si querés comparar
 };
 
 type Row = {
-  continente: string;
-  anio: number;
-  pais: string;
-  mes: string;
-  nMes: number;
-  importe: number;
+  ["Año"]?: any;
+  ["PAÍS"]?: any;
+  ["PAÍS "]?: any;
+  ["PAÍS  "]?: any;
+  ["Pais"]?: any;
+  ["País"]?: any;
+  ["Continente"]?: any;
+  ["Mes"]?: any;
+  ["N° Mes"]?: any;
+  ["N° Mes "]?: any;
+  ["Importe"]?: any;
 };
 
-function toNumAny(v: any) {
-  if (v === null || v === undefined) return 0;
-  const raw = String(v).trim();
-  if (!raw) return 0;
-  const normalized = raw.replace(/\./g, "").replace(/,/g, ".").replace(/[^\d.-]/g, "");
-  const n = Number(normalized);
+function toNumber(x: any) {
+  if (x === null || x === undefined) return 0;
+  const s = String(x).trim();
+  if (!s) return 0;
+  const cleaned = s
+    .replace(/\./g, "")
+    .replace(",", ".")
+    .replace(/[^\d.-]/g, "");
+  const n = Number(cleaned);
   return Number.isFinite(n) ? n : 0;
 }
 
-function toIntAny(v: any) {
-  const n = Number(String(v).trim());
-  return Number.isFinite(n) ? Math.trunc(n) : 0;
+function normalizeText(s: any) {
+  return String(s ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function normalizeKey(s: any) {
-  return String(s || "")
-    .trim()
-    .toUpperCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
+function normalizeCountryName(raw: string) {
+  const s = normalizeText(raw).toUpperCase();
+  return s
+    .replace(/\./g, "")
+    .replace(/Á/g, "A")
+    .replace(/É/g, "E")
+    .replace(/Í/g, "I")
+    .replace(/Ó/g, "O")
+    .replace(/Ú/g, "U")
+    .replace(/Ü/g, "U")
+    .replace(/Ñ/g, "N");
 }
 
-function isoToFlag(code: string) {
-  const c = (code || "").toUpperCase();
-  if (c.length !== 2) return "";
-  const A = 0x1f1e6;
-  const c1 = c.charCodeAt(0) - 65;
-  const c2 = c.charCodeAt(1) - 65;
-  if (c1 < 0 || c1 > 25 || c2 < 0 || c2 > 25) return "";
-  return String.fromCodePoint(A + c1, A + c2);
-}
-
-const COUNTRY_TO_ISO: Record<string, string> = {
+// Mapa básico (extensible) país->ISO2 para bandera emoji
+const COUNTRY_TO_ISO2: Record<string, string> = {
   "ARGENTINA": "AR",
+  "URUGUAY": "UY",
   "BRASIL": "BR",
   "BRAZIL": "BR",
   "CHILE": "CL",
-  "URUGUAY": "UY",
   "PARAGUAY": "PY",
   "BOLIVIA": "BO",
   "PERU": "PE",
+  "PERÚ": "PE",
   "COLOMBIA": "CO",
   "MEXICO": "MX",
-  "UNITED STATES": "US",
-  "ESTADOS UNIDOS": "US",
-  "EEUU": "US",
-  "USA": "US",
-  "ESPANA": "ES",
+  "MÉXICO": "MX",
+  "ESPAÑA": "ES",
   "SPAIN": "ES",
   "FRANCIA": "FR",
   "FRANCE": "FR",
+  "ITALIA": "IT",
+  "ITALY": "IT",
   "ALEMANIA": "DE",
   "GERMANY": "DE",
   "REINO UNIDO": "GB",
   "UNITED KINGDOM": "GB",
   "INGLATERRA": "GB",
-  "ITALIA": "IT",
-  "ITALY": "IT",
-  "PORTUGAL": "PT",
+  "EEUU": "US",
+  "ESTADOS UNIDOS": "US",
+  "USA": "US",
+  "UNITED STATES": "US",
+  "CANADA": "CA",
+  "CHINA": "CN",
+  "JAPON": "JP",
+  "JAPÓN": "JP",
 };
 
-function guessIso(paisRaw: string) {
-  const k = normalizeKey(paisRaw);
-  return COUNTRY_TO_ISO[k] || "";
+function iso2ToFlag(iso2: string) {
+  const s = String(iso2 ?? "").trim().toUpperCase();
+  if (s.length !== 2) return "";
+  const A = 0x1f1e6;
+  const c0 = s.charCodeAt(0) - 65;
+  const c1 = s.charCodeAt(1) - 65;
+  if (c0 < 0 || c0 > 25 || c1 < 0 || c1 > 25) return "";
+  return String.fromCodePoint(A + c0, A + c1);
 }
 
-export default function CountryRanking({ year, filePath, limit = 10 }: Props) {
+function getCountry(r: Row) {
+  return (
+    normalizeText(r["PAÍS"] ?? r["PAÍS "] ?? r["PAÍS  "] ?? r["Pais"] ?? r["País"]) || "SIN DATO"
+  );
+}
+
+function getContinent(r: Row) {
+  return normalizeText(r["Continente"]) || "SIN DATO";
+}
+
+function getYear(r: Row) {
+  const y = toNumber(r["Año"]);
+  return y || null;
+}
+
+function getMonthNum(r: Row) {
+  const n = toNumber(r["N° Mes"] ?? r["N° Mes "]);
+  if (n >= 1 && n <= 12) return n;
+  // fallback: Mes como texto
+  const m = normalizeText(r["Mes"]).toLowerCase();
+  const map: Record<string, number> = {
+    enero: 1,
+    febrero: 2,
+    marzo: 3,
+    abril: 4,
+    mayo: 5,
+    junio: 6,
+    julio: 7,
+    agosto: 8,
+    septiembre: 9,
+    setiembre: 9,
+    octubre: 10,
+    noviembre: 11,
+    diciembre: 12,
+  };
+  return map[m] ?? null;
+}
+
+export default function CountryRanking({ year, filePath, limit = 12 }: Props) {
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState("");
+  const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    let mounted = true;
+    let alive = true;
     setLoading(true);
-    setErr("");
+    setErr(null);
 
     readXlsxFromPublic(filePath)
-      .then(({ rows }) => {
-        if (!mounted) return;
-
-        const parsed: Row[] = (rows || []).map((r: any) => {
-          const continente = String(r["Continente"] ?? r["CONTINENTE"] ?? "").trim();
-          const anio = toIntAny(r["Año"] ?? r["AÑO"] ?? r["Anio"] ?? r["anio"]);
-          const pais = String(r["PAÍS "] ?? r["PAÍS"] ?? r["PAIS"] ?? r["Pais"] ?? "").trim();
-          const mes = String(r["Mes"] ?? "").trim();
-          const nMes = toIntAny(r["N° Mes"] ?? r["N Mes"] ?? r["N°Mes"] ?? r["N_Mes"]);
-          const importe = toNumAny(r["Importe Date"] ?? r["Importe"] ?? r["IMPORTE"] ?? 0);
-
-          return { continente, anio, pais, mes, nMes, importe };
-        });
-
-        setRows(parsed);
-        setLoading(false);
+      .then((res) => {
+        if (!alive) return;
+        setRows((res.rows ?? []) as Row[]);
       })
       .catch((e: any) => {
-        if (!mounted) return;
-        setErr(e?.message || "Error leyendo XLSX");
+        if (!alive) return;
+        setErr(e?.message ?? "Error leyendo XLSX");
+      })
+      .finally(() => {
+        if (!alive) return;
         setLoading(false);
       });
 
     return () => {
-      mounted = false;
+      alive = false;
     };
   }, [filePath]);
 
-  const yearRows = useMemo(() => rows.filter((r) => r.anio === year), [rows, year]);
+  const yearRows = useMemo(() => {
+    return (rows ?? []).filter((r) => getYear(r) === year);
+  }, [rows, year]);
 
   const byCountry = useMemo(() => {
-    const map = new Map<string, number>();
+    const m = new Map<string, number>();
     for (const r of yearRows) {
-      const key = r.pais || "SIN PAIS";
-      map.set(key, (map.get(key) || 0) + (r.importe || 0));
+      const c = getCountry(r);
+      m.set(c, (m.get(c) ?? 0) + 1);
     }
-    return map;
+    return m;
   }, [yearRows]);
 
   const byContinent = useMemo(() => {
-    const map = new Map<string, number>();
+    const m = new Map<string, number>();
     for (const r of yearRows) {
-      const key = r.continente || "SIN CONTINENTE";
-      map.set(key, (map.get(key) || 0) + (r.importe || 0));
+      const c = getContinent(r);
+      m.set(c, (m.get(c) ?? 0) + 1);
     }
-    return map;
+    return m;
   }, [yearRows]);
 
   const total = useMemo(() => {
-    return Array.from(byCountry.values()).reduce((a, b) => a + b, 0) || Array.from(byContinent.values()).reduce((a, b) => a + b, 0);
+    let t = 0;
+    const vals = Array.from(byCountry.values());
+    for (let i = 0; i < vals.length; i++) t += vals[i];
+    if (t === 0) {
+      const vals2 = Array.from(byContinent.values());
+      for (let i = 0; i < vals2.length; i++) t += vals2[i];
+    }
+    return t;
   }, [byCountry, byContinent]);
 
   const topCountries = useMemo(() => {
     const arr = Array.from(byCountry.entries())
-      .map(([pais, val]) => ({ pais, val }))
-      .sort((a, b) => b.val - a.val)
+      .map(([k, v]) => ({ country: k, qty: v }))
+      .sort((a, b) => b.qty - a.qty)
       .slice(0, limit);
 
     return arr;
   }, [byCountry, limit]);
 
-  const continents = useMemo(() => {
-    const arr = Array.from(byContinent.entries())
-      .map(([cont, val]) => ({ cont, val }))
-      .sort((a, b) => b.val - a.val);
-    return arr;
-  }, [byContinent]);
+  // Ranking mensual: top país por mes (1..12)
+  const topByMonth = useMemo(() => {
+    const monthMap = new Map<number, Map<string, number>>();
+    for (const r of yearRows) {
+      const mn = getMonthNum(r);
+      if (!mn) continue;
+      if (!monthMap.has(mn)) monthMap.set(mn, new Map<string, number>());
+      const m = monthMap.get(mn)!;
+      const c = getCountry(r);
+      m.set(c, (m.get(c) ?? 0) + 1);
+    }
 
-  if (loading) return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Cargando nacionalidades…</div>;
-  if (err) return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Error: {err}</div>;
+    const out: { month: number; country: string; qty: number }[] = [];
+    for (let mn = 1; mn <= 12; mn++) {
+      const m = monthMap.get(mn);
+      if (!m) continue;
+      let bestC = "";
+      let bestV = 0;
+      for (const [c, v] of Array.from(m.entries())) {
+        if (v > bestV) {
+          bestV = v;
+          bestC = c;
+        }
+      }
+      if (bestC) out.push({ month: mn, country: bestC, qty: bestV });
+    }
+    return out;
+  }, [yearRows]);
 
-  if (yearRows.length === 0) {
+  if (loading) {
     return (
       <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        Sin datos — No hay filas para {year}. (Archivo: {filePath})
+        Cargando nacionalidades…
+      </div>
+    );
+  }
+
+  if (err) {
+    return (
+      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
+        Error: {err}
+      </div>
+    );
+  }
+
+  if (!yearRows.length) {
+    return (
+      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
+        Sin datos para {year}. (Archivo: {filePath})
       </div>
     );
   }
 
   return (
-    <div style={{ display: "grid", gap: ".85rem" }}>
+    <div style={{ display: "grid", gap: "1rem" }}>
+      {/* TOP PAÍSES (cards grandes) */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+          gap: ".75rem",
+        }}
+      >
+        {topCountries.map((r) => {
+          const iso2 = COUNTRY_TO_ISO2[normalizeCountryName(r.country)] ?? "";
+          const flag = iso2 ? iso2ToFlag(iso2) : "🏳️";
+          const pct = total ? (r.qty / total) * 100 : 0;
+
+          return (
+            <div key={r.country} className="card" style={{ padding: ".9rem", borderRadius: 18 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: ".6rem" }}>
+                <div style={{ fontSize: "1.35rem" }}>{flag}</div>
+                <div style={{ fontWeight: 900 }}>{r.country}</div>
+              </div>
+
+              <div style={{ marginTop: ".55rem", display: "flex", justifyContent: "space-between" }}>
+                <div style={{ opacity: 0.8, fontSize: ".85rem" }}>Total</div>
+                <div style={{ fontWeight: 900 }}>{r.qty.toLocaleString("es-AR")}</div>
+              </div>
+
+              <div style={{ marginTop: ".35rem", display: "flex", justifyContent: "space-between" }}>
+                <div style={{ opacity: 0.8, fontSize: ".85rem" }}>Participación</div>
+                <div style={{ fontWeight: 900 }}>{pct.toFixed(1)}%</div>
+              </div>
+
+              <div
+                style={{
+                  marginTop: ".6rem",
+                  height: 10,
+                  borderRadius: 999,
+                  background: "rgba(255,255,255,.08)",
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    width: `${Math.min(100, Math.max(0, pct))}%`,
+                    height: "100%",
+                    background: "rgba(255,255,255,.55)",
+                  }}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* CONTINENTES (cards chicas) */}
+      <div
+        className="card"
+        style={{
+          padding: "1rem",
+          borderRadius: 18,
+        }}
+      >
+        <div style={{ fontWeight: 950, marginBottom: ".65rem" }}>Distribución por continente</div>
+        <div style={{ display: "grid", gap: ".4rem" }}>
+          {Array.from(byContinent.entries())
+            .map(([k, v]) => ({ k, v }))
+            .sort((a, b) => b.v - a.v)
+            .map(({ k, v }) => {
+              const pct = total ? (v / total) * 100 : 0;
+              return (
+                <div
+                  key={k}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr auto",
+                    gap: ".6rem",
+                    alignItems: "center",
+                  }}
+                >
+                  <div style={{ opacity: 0.9 }}>{k}</div>
+                  <div style={{ fontWeight: 900 }}>
+                    {v.toLocaleString("es-AR")} · {pct.toFixed(1)}%
+                  </div>
+                </div>
+              );
+            })}
+        </div>
+      </div>
+
+      {/* RANKING MENSUAL */}
       <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: ".5rem" }}>
-          <div style={{ fontWeight: 950 }}>Nacionalidades — {year}</div>
-          <div style={{ opacity: 0.75 }}>Total: {total.toLocaleString("es-AR", { maximumFractionDigits: 0 })}</div>
+        <div style={{ fontWeight: 950, marginBottom: ".65rem" }}>Top país por mes</div>
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+            gap: ".6rem",
+          }}
+        >
+          {topByMonth.map((r) => {
+            const iso2 = COUNTRY_TO_ISO2[normalizeCountryName(r.country)] ?? "";
+            const flag = iso2 ? iso2ToFlag(iso2) : "🏳️";
+            return (
+              <div
+                key={r.month}
+                style={{
+                  padding: ".75rem",
+                  borderRadius: 16,
+                  background: "rgba(255,255,255,.06)",
+                }}
+              >
+                <div style={{ fontSize: ".8rem", opacity: 0.85 }}>Mes {r.month}</div>
+                <div style={{ fontWeight: 900, marginTop: ".15rem" }}>
+                  {flag} {r.country}
+                </div>
+                <div style={{ marginTop: ".2rem", opacity: 0.85 }}>{r.qty.toLocaleString("es-AR")}</div>
+              </div>
+            );
+          })}
         </div>
       </div>
-
-      <div style={{ display: "grid", gap: ".85rem", gridTemplateColumns: "minmax(0, 1.7fr) minmax(0, 1fr)" }} className="natGrid">
-        {/* Países (grande) */}
-        <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-          <div style={{ fontWeight: 950, marginBottom: ".6rem" }}>Ranking por país</div>
-
-          <div style={{ display: "grid", gap: ".55rem" }}>
-            {topCountries.map((c) => {
-              const pct = total ? (c.val / total) * 100 : 0;
-              const iso = guessIso(c.pais);
-              const flag = iso ? isoToFlag(iso) : "🏳️";
-              return (
-                <div key={c.pais} style={{ display: "grid", gridTemplateColumns: "28px 1fr auto", gap: ".65rem", alignItems: "center" }}>
-                  <div style={{ fontSize: "1.15rem" }}>{flag}</div>
-                  <div style={{ display: "grid", gap: ".25rem" }}>
-                    <div style={{ fontWeight: 900 }}>{c.pais}</div>
-                    <div style={{ height: 10, background: "rgba(0,0,0,.06)", borderRadius: 999 }}>
-                      <div style={{ width: `${Math.min(100, pct)}%`, height: "100%", borderRadius: 999, background: "linear-gradient(90deg, #22c55e, #0ea5e9)" }} />
-                    </div>
-                  </div>
-                  <div style={{ textAlign: "right" }}>
-                    <div style={{ fontWeight: 950 }}>{pct.toFixed(1).replace(".", ",")}%</div>
-                    <div style={{ opacity: 0.75, fontSize: ".9rem" }}>{c.val.toLocaleString("es-AR", { maximumFractionDigits: 0 })}</div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Continentes (chico) */}
-        <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-          <div style={{ fontWeight: 950, marginBottom: ".6rem" }}>Distribución por continente</div>
-          <div style={{ display: "grid", gap: ".55rem" }}>
-            {continents.map((c) => {
-              const pct = total ? (c.val / total) * 100 : 0;
-              return (
-                <div key={c.cont} style={{ display: "grid", gap: ".25rem" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: ".75rem" }}>
-                    <div style={{ fontWeight: 900 }}>{c.cont}</div>
-                    <div style={{ fontWeight: 950 }}>{pct.toFixed(1).replace(".", ",")}%</div>
-                  </div>
-                  <div style={{ height: 10, background: "rgba(0,0,0,.06)", borderRadius: 999 }}>
-                    <div style={{ width: `${Math.min(100, pct)}%`, height: "100%", borderRadius: 999, background: "linear-gradient(90deg, #a855f7, #ec4899)" }} />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
-      <style jsx>{`
-        @media (max-width: 1000px) {
-          .natGrid {
-            grid-template-columns: 1fr !important;
-          }
-        }
-      `}</style>
     </div>
   );
 }
