@@ -11,71 +11,48 @@ type Props = {
 
 type Row = {
   year: number;
-  month: number; // 1..12
+  monthNum: number; // 1-12
+  monthName: string;
   country: string;
   continent: string;
-  value: number;
+  amount: number;
 };
 
+const MONTHS = ["Año", "Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
+
 function norm(s: any) {
-  return String(s ?? "").trim();
-}
-function normUpper(s: any) {
-  return norm(s).toUpperCase();
-}
-function toNum(x: any) {
-  if (x === null || x === undefined) return 0;
-  if (typeof x === "number") return isFinite(x) ? x : 0;
-  const s = String(x).replace(/\./g, "").replace(",", ".").replace(/[^\d.-]/g, "");
-  const n = Number(s);
-  return isFinite(n) ? n : 0;
+  return String(s ?? "")
+    .trim()
+    .replace(/\s+/g, " ");
 }
 
-function getMonthNumber(m: any): number {
-  // Excel puede traer "Mes" como nombre, número, o "N° Mes"
-  const raw = norm(m);
-  if (!raw) return 0;
-  const n = Number(raw);
-  if (isFinite(n) && n >= 1 && n <= 12) return n;
-
-  const map: Record<string, number> = {
-    ENE: 1,
-    ENERO: 1,
-    FEB: 2,
-    FEBRERO: 2,
-    MAR: 3,
-    MARZO: 3,
-    ABR: 4,
-    ABRIL: 4,
-    MAY: 5,
-    MAYO: 5,
-    JUN: 6,
-    JUNIO: 6,
-    JUL: 7,
-    JULIO: 7,
-    AGO: 8,
-    AGOSTO: 8,
-    SEP: 9,
-    SEPT: 9,
-    SEPTIEMBRE: 9,
-    OCT: 10,
-    OCTUBRE: 10,
-    NOV: 11,
-    NOVIEMBRE: 11,
-    DIC: 12,
-    DICIEMBRE: 12,
-  };
-  const u = normUpper(raw);
-  if (map[u]) return map[u];
-  // por si viene "01" / "1" etc.
-  if (u.length <= 2) {
-    const nn = Number(u);
-    if (isFinite(nn) && nn >= 1 && nn <= 12) return nn;
-  }
-  return 0;
+function toNumber(v: any) {
+  const s = String(v ?? "").trim();
+  if (!s) return 0;
+  // soporta 1.234,56 y 1234.56
+  const cleaned = s
+    .replace(/\./g, "")
+    .replace(/,/g, ".")
+    .replace(/[^\d.-]/g, "");
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : 0;
 }
 
-// --- ISO2 mapping (keys con espacios deben ir entre comillas) ---
+function toInt(v: any) {
+  const n = Number(String(v ?? "").trim());
+  return Number.isFinite(n) ? Math.trunc(n) : 0;
+}
+
+function iso2FlagEmoji(iso2: string) {
+  const code = (iso2 || "").toUpperCase().trim();
+  if (code.length !== 2) return "🏳️";
+  const A = 0x1f1e6;
+  const c1 = code.charCodeAt(0) - 65;
+  const c2 = code.charCodeAt(1) - 65;
+  if (c1 < 0 || c1 > 25 || c2 < 0 || c2 > 25) return "🏳️";
+  return String.fromCodePoint(A + c1, A + c2);
+}
+
 const COUNTRY_TO_ISO2: Record<string, string> = {
   ARGENTINA: "AR",
   BRASIL: "BR",
@@ -88,210 +65,164 @@ const COUNTRY_TO_ISO2: Record<string, string> = {
   PERÚ: "PE",
   COLOMBIA: "CO",
   MEXICO: "MX",
-  "MÉXICO": "MX",
+  MÉXICO: "MX",
+  ESPAÑA: "ES",
+  SPAIN: "ES",
+  ITALIA: "IT",
+  ITALY: "IT",
+  FRANCIA: "FR",
+  FRANCE: "FR",
+  ALEMANIA: "DE",
+  GERMANY: "DE",
+  REINO UNIDO: "GB",
+  UNITED KINGDOM: "GB",
+  INGLATERRA: "GB",
+  EEUU: "US",
+  USA: "US",
   "UNITED STATES": "US",
   "ESTADOS UNIDOS": "US",
-  USA: "US",
   CANADA: "CA",
   CANADÁ: "CA",
-  SPAIN: "ES",
-  ESPAÑA: "ES",
-  FRANCE: "FR",
-  FRANCIA: "FR",
-  ITALY: "IT",
-  ITALIA: "IT",
-  GERMANY: "DE",
-  ALEMANIA: "DE",
-  UK: "GB",
-  "UNITED KINGDOM": "GB",
-  INGLATERRA: "GB",
-  "REINO UNIDO": "GB",
   CHINA: "CN",
   JAPON: "JP",
   JAPÓN: "JP",
-  ISRAEL: "IL",
-  TURKEY: "TR",
-  TURQUÍA: "TR",
+  INDIA: "IN",
+  AUSTRALIA: "AU",
 };
 
-function iso2ToFlag(iso2: string) {
-  const s = normUpper(iso2);
-  if (s.length !== 2) return "";
-  const A = 0x1f1e6;
-  // NO usar [...s] (iterador). Usamos charAt.
-  const c1 = s.charCodeAt(0) - 65;
-  const c2 = s.charCodeAt(1) - 65;
-  if (c1 < 0 || c1 > 25 || c2 < 0 || c2 > 25) return "";
-  return String.fromCodePoint(A + c1, A + c2);
+function flagForCountry(country: string) {
+  const key = norm(country).toUpperCase();
+  const iso2 = COUNTRY_TO_ISO2[key];
+  return iso2 ? iso2FlagEmoji(iso2) : "🏳️";
 }
 
-function monthLabel(m: number) {
-  const labels = ["", "Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
-  return labels[m] ?? "";
+function fmtMoney(n: number) {
+  try {
+    return new Intl.NumberFormat("es-AR", { maximumFractionDigits: 0 }).format(n);
+  } catch {
+    return String(Math.round(n));
+  }
+}
+function fmtPct(n: number) {
+  try {
+    return new Intl.NumberFormat("es-AR", { style: "percent", maximumFractionDigits: 1 }).format(n);
+  } catch {
+    return `${(n * 100).toFixed(1)}%`;
+  }
 }
 
-export default function CountryRanking({ year, filePath, limit = 12 }: Props) {
+export default function CountryRanking({ year, filePath, limit = 10 }: Props) {
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
-  const [sheet, setSheet] = useState<string>("");
-  const [error, setError] = useState<string>("");
-  const [selectedMonth, setSelectedMonth] = useState<number>(0); // 0 acumulado
+  const [selectedMonth, setSelectedMonth] = useState<number>(0); // 0 = año
 
   useEffect(() => {
-    let mounted = true;
+    let alive = true;
+    setLoading(true);
 
     (async () => {
       try {
-        setLoading(true);
-        setError("");
+        const { rows: raw } = await readXlsxFromPublic(filePath);
 
-        const res = await readXlsxFromPublic(filePath);
-        if (!mounted) return;
+        const parsed: Row[] = (raw || []).map((r: any) => {
+          const yy = toInt(r["Año"] ?? r["ANO"] ?? r["Year"] ?? r["year"]);
+          const cont = norm(r["Continente"] ?? r["CONTINENTE"]);
+          const pais = norm(r["PAÍS "] ?? r["PAÍS"] ?? r["PAIS"] ?? r["País"] ?? r["Pais"]);
+          const mes = norm(r["Mes"] ?? r["MES"]);
+          const nMes = toInt(r["N° Mes"] ?? r["Nº Mes"] ?? r["N Mes"] ?? r["N°Mes"] ?? r["Mes N"] ?? r["month"]);
+          const imp = toNumber(r["Importe"] ?? r["IMPORTE"] ?? r["Amount"] ?? r["amount"]);
 
-        setSheet(res.sheetName || "");
+          return {
+            year: yy,
+            monthNum: nMes >= 1 && nMes <= 12 ? nMes : 0,
+            monthName: mes || (nMes >= 1 && nMes <= 12 ? MONTHS[nMes] : ""),
+            country: pais,
+            continent: cont,
+            amount: imp,
+          };
+        });
 
-        const raw = res.rows || [];
-        if (!raw.length) {
+        if (alive) {
+          setRows(parsed.filter((r) => r.year && r.country));
+          setLoading(false);
+        }
+      } catch (e) {
+        if (alive) {
           setRows([]);
           setLoading(false);
-          return;
         }
-
-        // Detectar headers habituales
-        // Keys en tu ejemplo: Continente, Año, PAÍS , Mes, N° Mes, Importe ...
-        const keys = Object.keys(raw[0] || {});
-        const keyMap = keys.reduce((acc: Record<string, string>, k: string) => {
-          acc[normUpper(k)] = k;
-          return acc;
-        }, {});
-
-        const kYear =
-          keyMap["AÑO"] || keyMap["ANO"] || keyMap["YEAR"] || keyMap["ANIO"] || "";
-        const kMonth =
-          keyMap["N° MES"] ||
-          keyMap["Nº MES"] ||
-          keyMap["N MES"] ||
-          keyMap["MES"] ||
-          "";
-        const kCountry = keyMap["PAÍS"] || keyMap["PAIS"] || keyMap["PAÍS "] || keyMap["PAIS "] || "";
-        const kCont = keyMap["CONTINENTE"] || "";
-        // Valor: puede ser Importe / Total / Qty / Cantidad / etc.
-        const kVal =
-          keyMap["IMPORTE"] ||
-          keyMap["TOTAL"] ||
-          keyMap["CANTIDAD"] ||
-          keyMap["QTY"] ||
-          keyMap["VALOR"] ||
-          "";
-
-        const parsed: Row[] = raw
-          .map((r: any) => {
-            const y = Number(r[kYear]);
-            const m = getMonthNumber(r[kMonth] || r["Mes"] || r["MES"]);
-            const country = norm(r[kCountry]);
-            const cont = norm(r[kCont]);
-            const val = toNum(kVal ? r[kVal] : r["Importe"] ?? r["TOTAL"] ?? r["Cantidad"]);
-            return {
-              year: isFinite(y) ? y : 0,
-              month: m || 0,
-              country,
-              continent: cont,
-              value: val,
-            };
-          })
-          .filter((r) => r.year > 0 && r.month >= 0);
-
-        setRows(parsed);
-        setLoading(false);
-      } catch (e: any) {
-        setError(e?.message || "Error cargando nacionalidades");
-        setRows([]);
-        setLoading(false);
       }
     })();
 
     return () => {
-      mounted = false;
+      alive = false;
     };
   }, [filePath]);
 
   const yearRows = useMemo(() => rows.filter((r) => r.year === year), [rows, year]);
 
-  const monthsAvailable = useMemo(() => {
-    const set = new Set<number>();
-    for (let i = 0; i < yearRows.length; i++) {
-      const m = yearRows[i].month;
-      if (m >= 1 && m <= 12) set.add(m);
-    }
-    return Array.from(set).sort((a, b) => a - b);
-  }, [yearRows]);
-
-  const filtered = useMemo(() => {
-    if (selectedMonth === 0) return yearRows;
-    return yearRows.filter((r) => r.month === selectedMonth);
-  }, [yearRows, selectedMonth]);
-
   const byCountry = useMemo(() => {
     const map: Record<string, number> = {};
-    for (let i = 0; i < filtered.length; i++) {
-      const c = normUpper(filtered[i].country) || "SIN PAÍS";
-      map[c] = (map[c] || 0) + filtered[i].value;
+    for (let i = 0; i < yearRows.length; i++) {
+      const c = yearRows[i].country || "—";
+      map[c] = (map[c] || 0) + (yearRows[i].amount || 0);
     }
     return map;
-  }, [filtered]);
-
-  const byContinent = useMemo(() => {
-    const map: Record<string, number> = {};
-    for (let i = 0; i < filtered.length; i++) {
-      const c = normUpper(filtered[i].continent) || "OTROS";
-      map[c] = (map[c] || 0) + filtered[i].value;
-    }
-    return map;
-  }, [filtered]);
+  }, [yearRows]);
 
   const total = useMemo(() => {
     const vals = Object.values(byCountry);
     let t = 0;
-    for (let i = 0; i < vals.length; i++) t += vals[i];
-    // fallback si no hay país, pero sí continente
-    if (t === 0) {
-      const v2 = Object.values(byContinent);
-      for (let i = 0; i < v2.length; i++) t += v2[i];
-    }
+    for (let i = 0; i < vals.length; i++) t += vals[i] || 0;
     return t;
-  }, [byCountry, byContinent]);
+  }, [byCountry]);
 
   const topCountries = useMemo(() => {
-    const arr = Object.entries(byCountry)
-      .map(([k, v]) => ({ country: k, value: v }))
-      .sort((a, b) => b.value - a.value)
-      .slice(0, Math.max(3, limit));
-    return arr;
+    const entries = Object.entries(byCountry)
+      .sort((a, b) => (b[1] || 0) - (a[1] || 0))
+      .slice(0, limit)
+      .map(([country, amount]) => ({ country, amount }));
+    return entries;
   }, [byCountry, limit]);
 
-  const topContinents = useMemo(() => {
-    const arr = Object.entries(byContinent)
-      .map(([k, v]) => ({ continent: k, value: v }))
-      .sort((a, b) => b.value - a.value)
-      .slice(0, 6);
-    return arr;
+  const byContinent = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (let i = 0; i < yearRows.length; i++) {
+      const k = yearRows[i].continent || "—";
+      map[k] = (map[k] || 0) + (yearRows[i].amount || 0);
+    }
+    return map;
+  }, [yearRows]);
+
+  const continentsSorted = useMemo(() => {
+    return Object.entries(byContinent).sort((a, b) => (b[1] || 0) - (a[1] || 0));
   }, [byContinent]);
 
-  if (loading) {
-    return (
-      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        Cargando nacionalidades…
-      </div>
-    );
-  }
+  const monthRows = useMemo(() => {
+    if (selectedMonth === 0) return yearRows;
+    return yearRows.filter((r) => r.monthNum === selectedMonth);
+  }, [yearRows, selectedMonth]);
 
-  if (error) {
-    return (
-      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        <div style={{ fontWeight: 800 }}>Nacionalidades</div>
-        <div style={{ marginTop: ".35rem", opacity: 0.8 }}>{error}</div>
-      </div>
-    );
+  const monthTop = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (let i = 0; i < monthRows.length; i++) {
+      const c = monthRows[i].country || "—";
+      map[c] = (map[c] || 0) + (monthRows[i].amount || 0);
+    }
+    const t = Object.values(map).reduce((acc, v) => acc + (v || 0), 0);
+    const list = Object.entries(map)
+      .sort((a, b) => (b[1] || 0) - (a[1] || 0))
+      .slice(0, 8)
+      .map(([country, amount]) => ({
+        country,
+        amount,
+        pct: t > 0 ? amount / t : 0,
+      }));
+    return { list, total: t };
+  }, [monthRows]);
+
+  if (loading) {
+    return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Cargando nacionalidades…</div>;
   }
 
   if (!yearRows.length) {
@@ -301,182 +232,103 @@ export default function CountryRanking({ year, filePath, limit = 12 }: Props) {
         <div style={{ marginTop: ".35rem", opacity: 0.8 }}>
           Sin datos para {year}. (Archivo: {filePath})
         </div>
-        <div style={{ marginTop: ".35rem", fontSize: ".85rem", opacity: 0.7 }}>
-          Sheet: {sheet || "—"}
-        </div>
       </div>
     );
   }
 
-  // Responsive: 2 columnas en desktop, 1 en mobile
   return (
     <div style={{ display: "grid", gap: "1rem" }}>
-      {/* Filtro mensual */}
-      <div
-        className="card"
-        style={{
-          padding: "1rem",
-          borderRadius: 18,
-          display: "flex",
-          gap: ".75rem",
-          alignItems: "center",
-          flexWrap: "wrap",
-        }}
-      >
-        <div style={{ fontWeight: 900 }}>Nacionalidades {year}</div>
-        <div style={{ opacity: 0.65 }}>• Sheet: {sheet || "—"}</div>
+      {/* Header */}
+      <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
+        <div style={{ display: "flex", gap: ".75rem", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            <div style={{ fontWeight: 950, fontSize: "1.1rem" }}>Ranking por país</div>
+            <div style={{ marginTop: ".2rem", opacity: 0.8 }}>
+              Total año {year}: <b>{fmtMoney(total)}</b>
+            </div>
+          </div>
 
-        <div style={{ marginLeft: "auto", display: "flex", gap: ".5rem", alignItems: "center" }}>
-          <div style={{ fontSize: ".85rem", opacity: 0.8 }}>Mes:</div>
-          <select
-            value={selectedMonth}
-            onChange={(e) => setSelectedMonth(Number(e.target.value))}
-            style={{ padding: ".45rem .6rem", borderRadius: 10 }}
-          >
-            <option value={0}>Acumulado</option>
-            {monthsAvailable.map((m) => (
-              <option key={m} value={m}>
-                {monthLabel(m)}
-              </option>
+          {/* Tabs meses */}
+          <div style={{ display: "flex", gap: ".25rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            {MONTHS.map((m, idx) => (
+              <button
+                key={m}
+                onClick={() => setSelectedMonth(idx)}
+                style={{
+                  border: "1px solid rgba(0,0,0,.2)",
+                  padding: ".35rem .55rem",
+                  borderRadius: 10,
+                  background: selectedMonth === idx ? "rgba(0,0,0,.07)" : "white",
+                  fontWeight: selectedMonth === idx ? 900 : 650,
+                  cursor: "pointer",
+                }}
+              >
+                {m}
+              </button>
             ))}
-          </select>
+          </div>
         </div>
       </div>
 
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(12, minmax(0, 1fr))",
-          gap: "1rem",
-        }}
-      >
-        {/* Ranking países (más grande) */}
-        <div
-          className="card"
-          style={{
-            gridColumn: "span 12",
-            padding: "1rem",
-            borderRadius: 18,
-          }}
-        >
-          <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap" }}>
-            <div>
-              <div style={{ fontWeight: 950, fontSize: "1.05rem" }}>Ranking por país</div>
-              <div style={{ marginTop: ".25rem", opacity: 0.75 }}>
-                Total: <b>{Math.round(total).toLocaleString("es-AR")}</b>
-              </div>
-            </div>
-            <div style={{ opacity: 0.7, fontSize: ".9rem" }}>
-              {selectedMonth === 0 ? "Acumulado" : `Mes: ${monthLabel(selectedMonth)}`}
-            </div>
+      {/* Grid principal */}
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.2fr) minmax(0, .8fr)", gap: "1rem" }}>
+        {/* Top países */}
+        <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
+          <div style={{ fontWeight: 950, marginBottom: ".75rem" }}>
+            Top países ({selectedMonth === 0 ? "Año" : MONTHS[selectedMonth]})
           </div>
 
-          <div style={{ marginTop: ".8rem", display: "grid", gap: ".5rem" }}>
-            {topCountries.map((r, idx) => {
-              const iso2 = COUNTRY_TO_ISO2[r.country] || COUNTRY_TO_ISO2[normUpper(r.country)] || "";
-              const flag = iso2 ? iso2ToFlag(iso2) : "";
-              const pct = total > 0 ? (r.value / total) * 100 : 0;
+          <div style={{ display: "grid", gap: ".55rem" }}>
+            {(selectedMonth === 0 ? topCountries.map((x) => ({ ...x, pct: total > 0 ? x.amount / total : 0 })) : monthTop.list).map((x, i) => {
+              const pct = (x as any).pct ?? 0;
+              const amount = (x as any).amount ?? 0;
+              const country = (x as any).country ?? "—";
 
               return (
-                <div
-                  key={r.country}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "minmax(0, 1fr) 120px",
-                    gap: ".75rem",
-                    alignItems: "center",
-                  }}
-                >
-                  <div style={{ display: "flex", gap: ".6rem", alignItems: "center", minWidth: 0 }}>
-                    <div style={{ width: 28, textAlign: "center", fontWeight: 900, opacity: 0.7 }}>
-                      {idx + 1}
+                <div key={`${country}-${i}`} style={{ display: "grid", gridTemplateColumns: "28px minmax(0, 1fr) 90px", gap: ".6rem", alignItems: "center" }}>
+                  <div style={{ fontSize: "1.1rem" }}>{flagForCountry(country)}</div>
+
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: ".75rem" }}>
+                      <div style={{ fontWeight: 850, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {country}
+                      </div>
+                      <div style={{ fontWeight: 800, opacity: 0.8 }}>{fmtPct(pct)}</div>
                     </div>
-                    <div style={{ fontSize: "1.1rem", width: 26, textAlign: "center" }}>{flag}</div>
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ fontWeight: 900, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                        {r.country}
-                      </div>
-                      <div style={{ opacity: 0.7, fontSize: ".85rem" }}>
-                        {Math.round(r.value).toLocaleString("es-AR")} • {pct.toFixed(1)}%
-                      </div>
+                    <div style={{ height: 8, borderRadius: 999, background: "rgba(0,0,0,.08)", overflow: "hidden", marginTop: ".25rem" }}>
+                      <div style={{ width: `${Math.max(0, Math.min(100, pct * 100))}%`, height: "100%", background: "rgba(0,0,0,.35)" }} />
                     </div>
                   </div>
 
-                  <div
-                    style={{
-                      height: 10,
-                      borderRadius: 999,
-                      background: "rgba(255,255,255,0.08)",
-                      overflow: "hidden",
-                    }}
-                  >
-                    <div
-                      style={{
-                        height: "100%",
-                        width: `${Math.min(100, Math.max(0, pct))}%`,
-                        borderRadius: 999,
-                        background: "linear-gradient(90deg, rgba(99,102,241,.9), rgba(236,72,153,.85))",
-                      }}
-                    />
-                  </div>
+                  <div style={{ textAlign: "right", fontWeight: 900 }}>{fmtMoney(amount)}</div>
                 </div>
               );
             })}
-
-            {topCountries.length === 0 && (
-              <div style={{ opacity: 0.75, marginTop: ".5rem" }}>
-                No hay países en {year} para {selectedMonth === 0 ? "acumulado" : monthLabel(selectedMonth)}.
-              </div>
-            )}
           </div>
         </div>
 
-        {/* Continentes (más chico) */}
-        <div
-          className="card"
-          style={{
-            gridColumn: "span 12",
-            padding: "1rem",
-            borderRadius: 18,
-          }}
-        >
-          <div style={{ fontWeight: 950, fontSize: "1.0rem" }}>Distribución por continente</div>
-
-          <div style={{ marginTop: ".75rem", display: "grid", gap: ".55rem" }}>
-            {topContinents.map((c) => {
-              const pct = total > 0 ? (c.value / total) * 100 : 0;
+        {/* Continentes */}
+        <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
+          <div style={{ fontWeight: 950, marginBottom: ".75rem" }}>Distribución por continente</div>
+          <div style={{ display: "grid", gap: ".6rem" }}>
+            {continentsSorted.map(([cont, amount]) => {
+              const pct = total > 0 ? amount / total : 0;
               return (
-                <div key={c.continent} style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 90px", gap: ".75rem" }}>
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontWeight: 900, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                      {c.continent}
-                    </div>
-                    <div style={{ opacity: 0.7, fontSize: ".85rem" }}>
-                      {Math.round(c.value).toLocaleString("es-AR")} • {pct.toFixed(1)}%
-                    </div>
+                <div key={cont}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: ".75rem" }}>
+                    <div style={{ fontWeight: 850 }}>{cont}</div>
+                    <div style={{ fontWeight: 800, opacity: 0.85 }}>{fmtPct(pct)}</div>
                   </div>
-                  <div
-                    style={{
-                      height: 10,
-                      borderRadius: 999,
-                      background: "rgba(255,255,255,0.08)",
-                      overflow: "hidden",
-                    }}
-                  >
-                    <div
-                      style={{
-                        height: "100%",
-                        width: `${Math.min(100, Math.max(0, pct))}%`,
-                        borderRadius: 999,
-                        background: "linear-gradient(90deg, rgba(16,185,129,.85), rgba(59,130,246,.85))",
-                      }}
-                    />
+                  <div style={{ height: 8, borderRadius: 999, background: "rgba(0,0,0,.08)", overflow: "hidden", marginTop: ".25rem" }}>
+                    <div style={{ width: `${Math.max(0, Math.min(100, pct * 100))}%`, height: "100%", background: "rgba(0,0,0,.35)" }} />
                   </div>
                 </div>
               );
             })}
+          </div>
 
-            {topContinents.length === 0 && <div style={{ opacity: 0.75 }}>Sin continentes para mostrar.</div>}
+          <div style={{ marginTop: ".9rem", opacity: 0.75, fontSize: ".9rem" }}>
+            * Importes según archivo de nacionalidades (Marriott).
           </div>
         </div>
       </div>
