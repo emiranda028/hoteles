@@ -22,7 +22,7 @@ function detectDelimiter(line: string): string {
   return best;
 }
 
-// CSV parser minimal (soporta comillas dobles)
+// Parser simple con soporte de comillas dobles
 function parseLine(line: string, delimiter: string): string[] {
   const out: string[] = [];
   let cur = "";
@@ -32,7 +32,7 @@ function parseLine(line: string, delimiter: string): string[] {
     const ch = line[i];
 
     if (ch === '"') {
-      // "" -> comilla escapada
+      // "" => " escapada
       const next = line[i + 1];
       if (inQuotes && next === '"') {
         cur += '"';
@@ -51,6 +51,7 @@ function parseLine(line: string, delimiter: string): string[] {
 
     cur += ch;
   }
+
   out.push(cur);
   return out.map((s) => s.trim());
 }
@@ -78,4 +79,16 @@ export function parseCsv(text: string): CsvParseResult {
   }
 
   return { delimiter, headers, rows };
+}
+
+export async function readCsvFromPublic(path?: string): Promise<CsvParseResult> {
+  if (!path) throw new Error("No se pudo cargar: filePath está vacío/undefined");
+
+  const res = await fetch(path);
+  if (!res.ok) {
+    throw new Error(`No se pudo cargar ${path} (status ${res.status})`);
+  }
+
+  const text = await res.text();
+  return parseCsv(text);
 }
