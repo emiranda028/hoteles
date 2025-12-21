@@ -8,56 +8,46 @@ export type ReadResult = {
   sheetNames: string[];
 };
 
-function normKey(k: any) {
-  return String(k ?? "").trim().toLowerCase();
-}
-
 function scoreRows(rows: any[]) {
   if (!rows || rows.length === 0) return 0;
 
   const keys = Object.keys(rows[0] ?? {});
-  const keySet = new Set(keys.map((k) => normKey(k)));
+  const keySet = new Set(keys.map((k) => String(k).trim().toLowerCase()));
 
   const hasEmpresa = keySet.has("empresa");
   const hasBonboy = keySet.has("bonboy");
   const hasCantidad = keySet.has("cantidad");
-  const hasFecha = keySet.has("fecha") || keySet.has("date") || keySet.has("día") || keySet.has("dia");
+  const hasFecha = keySet.has("fecha") || keySet.has("date") || keySet.has("año");
 
-  // Base: más columnas = mejor
   let score = keys.length;
-
-  // Señales típicas
   if (hasEmpresa) score += 50;
   if (hasBonboy) score += 25;
   if (hasCantidad) score += 25;
   if (hasFecha) score += 15;
 
-  // Bonus por cantidad de filas (evita hojas vacías)
-  score += Math.min(rows.length, 300) / 10;
-
+  score += Math.min(rows.length, 200) / 10;
   return score;
 }
 
 export async function readXlsxFromPublic(path?: string): Promise<ReadResult> {
   if (!path) throw new Error("No se pudo cargar: filePath está vacío/undefined");
 
-  const res = await fetch(path);
+  const res = await fetch(path, { cache: "no-store" });
   if (!res.ok) throw new Error(`No se pudo cargar ${path} (status ${res.status})`);
 
   const buffer = await res.arrayBuffer();
-
-  // cellDates true ayuda a traer fechas como Date cuando Excel lo permite
-  const wb = XLSX.read(buffer, { type: "array", cellDates: true });
+  const wb = XLSX.read(buffer, { type: "array" });
 
   const sheetNames = wb.SheetNames ?? [];
-  if (sheetNames.length === 0) return { rows: [], sheetName: "", sheetNames: [] };
+  if (sheetNames.length === 0) {
+    return { rows: [], sheetName: "", sheetNames: [] };
+  }
 
   let bestSheet = sheetNames[0];
   let bestRows: any[] = [];
   let bestScore = -1;
 
-  for (let i = 0; i < sheetNames.length; i++) {
-    const name = sheetNames[i];
+  for (const name of sheetNames) {
     const ws = wb.Sheets[name];
     if (!ws) continue;
 
