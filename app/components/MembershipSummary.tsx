@@ -1,324 +1,484 @@
-// app/components/MembershipSummary.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { readXlsxFromPublic } from "./xlsxClient"; // (usa el que ya tenés)
-import {
-  GlobalHotel,
-  hotelMatches,
-  getYearSafe,
-  getMonthSafe,
-  monthNameEs,
-  normalizeHotel,
-  normStr,
-  normUpper,
-  toNumber,
-} from "./dataUtils";
+import React, { useEffect, useMemo, useState } from "react";
+import { readXlsxFromPublic } from "./xlsxClient";
+
+type Row = Record<string, any>;
+
+export type MembershipHotelFilter = "JCR" | "MARRIOTT" | "SHERATON MDQ" | "SHERATON BCR";
 
 type Props = {
+  filePath: string;
   year: number;
-  baseYear?: number;
-  filePath: string; // ej "/data/jcr_membership.xlsx"
-  hotelFilter: GlobalHotel; // global
-  title?: string;
+  baseYear: number;
+  hotelFilter?: MembershipHotelFilter; // NO incluye MAITEI
 };
 
-type Row = {
-  empresa: string; // hotel
-  bonboy: string; // tipo membresía
-  cantidad: number;
-  fecha: any;
+type NormRow = {
+  hotel: string;
+  membership: string;
+  qty: number;
+  date: Date | null;
+  year: number;
+  month: number;
 };
+
+const JCR_HOTELS = ["MARRIOTT", "SHERATON MDQ", "SHERATON BCR"] as const;
+
+function normKey(s: any) {
+  return String(s ?? "").trim().toLowerCase();
+}
+
+function parseNum(x: any) {
+  if (typeof x === "number") return x;
+  const s = String(x ?? "").trim();
+  if (!s) return 0;
+  const norm = s.includes(",") && s.includes(".")
+    ? s.replace(/\./g, "").replace(",", ".")
+    : s.replace(",", ".");
+  const n = Number(norm);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function parseDateAny(v: any): Date | null {
+  if (!v) return null;
+  if (v instanceof Date && !isNaN(v.getTime())) return v;
+
+  // excel numeric date
+  if (typeof v === "number") {
+    const d = new Date(Math.round((v - 25569) * 86400 * 1000));
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  const s = String(v).trim();
+  if (!s) return null;
+
+  const d1 = new Date(s);
+  if (!isNaN(d1.getTime())) return d1;
+
+  const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (m) {
+    const dd = Number(m[1]);
+    const mm = Number(m[2]);
+    const yy = Number(m[3].length === 2 ? `20${m[3]}` : m[3]);
+    const d2 = new Date(yy, mm - 1, dd);
+    return isNaN(d2.getTime()) ? null : d2;
+  }
+
+  return null;
+}
+
+function pickColumn(keys: string[], wanted: string[]) {
+  const lower = keys.map((k) => k.toLowerCase());
+  for (let i = 0; i < wanted.length; i++) {
+    const w = wanted[i];
+    const idx = lower.indexOf(w.toLowerCase());
+    if (idx >= 0) return keys[idx];
+  }
+  return "";
+}
 
 function fmtInt(n: number) {
   return new Intl.NumberFormat("es-AR").format(Math.round(n || 0));
 }
 
-function pct(cur: number, base: number) {
-  if (!base || base === 0) return null;
-  return ((cur - base) / base) * 100;
-}
+const MONTHS_ES = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
 
-// colores fijos por membresía (ajustalos si querés)
-function colorForKey(k: string) {
-  const s = normUpper(k);
-  if (s.includes("AMBASSADOR")) return "linear-gradient(135deg,#4f46e5,#0ea5e9)";
-  if (s.includes("TITANIUM")) return "linear-gradient(135deg,#111827,#6b7280)";
-  if (s.includes("PLATINUM")) return "linear-gradient(135deg,#0f766e,#14b8a6)";
-  if (s.includes("GOLD")) return "linear-gradient(135deg,#b45309,#f59e0b)";
-  if (s.includes("SILVER")) return "linear-gradient(135deg,#334155,#94a3b8)";
-  if (s.includes("MEMBER")) return "linear-gradient(135deg,#1f2937,#9ca3af)";
-  return "linear-gradient(135deg,#1d4ed8,#22c55e)";
-}
-
-export default function MembershipSummary({
-  year,
-  baseYear = year - 1,
-  filePath,
-  hotelFilter,
-  title = "Membership",
-}: Props) {
-  const [rows, setRows] = useState<Row[]>([]);
+export default function MembershipSummary({ filePath, year, baseYear, hotelFilter = "JCR" }: Props) {
+  const [rows, setRows] = useState<NormRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [debug, setDebug] = useState<{ sheetName: string; sheetNames: string[]; keys: string[] }>({
-    sheetName: "",
-    sheetNames: [],
-    keys: [],
-  });
+  const [err, setErr] = useState("");
 
   useEffect(() => {
-    let alive = true;
+    let ok = true;
     setLoading(true);
+    setErr("");
 
     readXlsxFromPublic(filePath)
-      .then(({ rows: raw, sheetName, sheetNames }) => {
-        if (!alive) return;
+      .then(({ rows }) => {
+        if (!ok) return;
 
-        const keys = Object.keys(raw?.[0] ?? {});
-        setDebug({ sheetName, sheetNames, keys });
+        const first = rows?.[0] ?? {};
+        const keys = Object.keys(first);
 
-        // mapeo flexible de headers
-        const keyEmpresa =
-          keys.find((k) => normUpper(k) === "EMPRESA" || normUpper(k) === "HOTEL") ?? "Empresa";
-        const keyMemb =
-          keys.find((k) => normUpper(k) === "BONBOY" || normUpper(k).includes("MEMBERSHIP")) ??
-          "Bonboy";
-        const keyQty =
-          keys.find((k) => normUpper(k) === "CANTIDAD" || normUpper(k).includes("QTY")) ??
-          "Cantidad";
-        const keyFecha =
-          keys.find((k) => normUpper(k) === "FECHA" || normUpper(k) === "DATE") ?? "Fecha";
+        const colHotel = pickColumn(keys, ["empresa", "hotel"]);
+        const colMembership = pickColumn(keys, ["bonboy", "membership", "membresia", "membresía"]);
+        const colQty = pickColumn(keys, ["cantidad", "qty", "quantity"]);
+        const colDate = pickColumn(keys, ["fecha", "date"]);
 
-        const mapped: Row[] = (raw ?? []).map((r: any) => ({
-          empresa: normalizeHotel(r[keyEmpresa]),
-          bonboy: normStr(r[keyMemb]),
-          cantidad: toNumber(r[keyQty]),
-          fecha: r[keyFecha],
-        }));
+        const out: NormRow[] = (rows as Row[]).map((r) => {
+          const hotel = String(r[colHotel] ?? "").trim();
+          const membership = String(r[colMembership] ?? "").trim();
+          const qty = parseNum(r[colQty]);
+          const date = parseDateAny(r[colDate]);
 
-        setRows(mapped.filter((r) => r.empresa && r.bonboy));
+          const yy = date ? date.getFullYear() : 0;
+          const mm = date ? date.getMonth() + 1 : 0;
+
+          return { hotel, membership, qty, date, year: yy, month: mm };
+        });
+
+        setRows(out);
+        setLoading(false);
       })
-      .catch(() => {
-        if (!alive) return;
+      .catch((e) => {
+        if (!ok) return;
+        setErr(String(e?.message ?? e));
         setRows([]);
-      })
-      .finally(() => {
-        if (!alive) return;
         setLoading(false);
       });
 
     return () => {
-      alive = false;
+      ok = false;
     };
   }, [filePath]);
 
-  const filteredYear = useMemo(() => {
-    return rows.filter((r) => {
-      if (!hotelMatches(r.empresa, hotelFilter)) return false;
-      const y = getYearSafe(r.fecha);
-      return y === year;
-    });
-  }, [rows, hotelFilter, year]);
+  const hotelsToUse = useMemo(() => {
+    if (hotelFilter === "JCR") return Array.from(JCR_HOTELS);
+    return [hotelFilter];
+  }, [hotelFilter]);
 
-  const filteredBase = useMemo(() => {
-    return rows.filter((r) => {
-      if (!hotelMatches(r.empresa, hotelFilter)) return false;
-      const y = getYearSafe(r.fecha);
-      return y === baseYear;
-    });
-  }, [rows, hotelFilter, baseYear]);
+  const yearRows = useMemo(() => {
+    return rows.filter((r) => r.year === year && hotelsToUse.includes(r.hotel));
+  }, [rows, year, hotelsToUse]);
 
-  // total anual (suma cantidades)
-  const totalCur = useMemo(
-    () => filteredYear.reduce((acc, r) => acc + (r.cantidad || 0), 0),
-    [filteredYear]
-  );
-  const totalBase = useMemo(
-    () => filteredBase.reduce((acc, r) => acc + (r.cantidad || 0), 0),
-    [filteredBase]
-  );
+  const baseRows = useMemo(() => {
+    return rows.filter((r) => r.year === baseYear && hotelsToUse.includes(r.hotel));
+  }, [rows, baseYear, hotelsToUse]);
 
-  // por mes (1..12)
-  const byMonth = useMemo(() => {
-    const arr = Array.from({ length: 12 }, () => 0);
-    filteredYear.forEach((r) => {
-      const m = getMonthSafe(r.fecha);
-      if (!m || m < 1 || m > 12) return;
-      arr[m - 1] += r.cantidad || 0;
-    });
-    return arr;
-  }, [filteredYear]);
+  const memberships = useMemo(() => {
+    const s = new Set<string>();
+    for (let i = 0; i < yearRows.length; i++) {
+      const m = yearRows[i].membership;
+      if (m) s.add(m);
+    }
+    // fallback: si year no tiene pero base sí
+    if (s.size === 0) {
+      for (let i = 0; i < baseRows.length; i++) {
+        const m = baseRows[i].membership;
+        if (m) s.add(m);
+      }
+    }
+    return Array.from(s).sort((a, b) => a.localeCompare(b, "es"));
+  }, [yearRows, baseRows]);
 
-  const byMonthBase = useMemo(() => {
-    const arr = Array.from({ length: 12 }, () => 0);
-    filteredBase.forEach((r) => {
-      const m = getMonthSafe(r.fecha);
-      if (!m || m < 1 || m > 12) return;
-      arr[m - 1] += r.cantidad || 0;
-    });
-    return arr;
-  }, [filteredBase]);
+  // matriz meses x membership
+  const table = useMemo(() => {
+    const byMem = new Map<string, number[]>();
+    for (let i = 0; i < memberships.length; i++) byMem.set(memberships[i], new Array(12).fill(0));
 
-  // composición por membresía (año actual)
+    for (let i = 0; i < yearRows.length; i++) {
+      const r = yearRows[i];
+      const mem = r.membership || "—";
+      const m = r.month;
+      if (!m || m < 1 || m > 12) continue;
+      if (!byMem.has(mem)) byMem.set(mem, new Array(12).fill(0));
+      const arr = byMem.get(mem)!;
+      arr[m - 1] += r.qty || 0;
+    }
+
+    return byMem;
+  }, [yearRows, memberships]);
+
+  const totalYear = useMemo(() => {
+    let t = 0;
+    const vals = Array.from(table.values());
+    for (let i = 0; i < vals.length; i++) {
+      const arr = vals[i];
+      for (let j = 0; j < arr.length; j++) t += arr[j] || 0;
+    }
+    return t;
+  }, [table]);
+
+  const totalBase = useMemo(() => {
+    let t = 0;
+    for (let i = 0; i < baseRows.length; i++) t += baseRows[i].qty || 0;
+    return t;
+  }, [baseRows]);
+
   const composition = useMemo(() => {
-    const map = new Map<string, number>();
-    filteredYear.forEach((r) => {
-      const k = normStr(r.bonboy) || "OTROS";
-      map.set(k, (map.get(k) || 0) + (r.cantidad || 0));
-    });
-    const list = Array.from(map.entries())
-      .map(([k, v]) => ({ k, v }))
-      .sort((a, b) => b.v - a.v);
+    // total por membresía (año)
+    const totals = new Map<string, number>();
+    const keys = Array.from(table.keys());
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      const arr = table.get(k) || [];
+      let sum = 0;
+      for (let j = 0; j < arr.length; j++) sum += arr[j] || 0;
+      totals.set(k, sum);
+    }
+
+    const list = Array.from(totals.entries())
+      .map(([k, v]) => ({ membership: k, total: v }))
+      .sort((a, b) => b.total - a.total);
+
     return list;
-  }, [filteredYear]);
+  }, [table]);
 
-  const variation = useMemo(() => pct(totalCur, totalBase), [totalCur, totalBase]);
-
-  const hasData = filteredYear.length > 0;
+  const title =
+    hotelFilter === "JCR"
+      ? "Membership (JCR)"
+      : `Membership (${hotelFilter})`;
 
   return (
-    <section>
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+    <div className="msCard">
+      <div className="msHead">
         <div>
-          <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
-            {title} ({hotelFilter})
-          </div>
-          <div className="sectionDesc" style={{ marginTop: 4 }}>
+          <div className="msTitle">{title}</div>
+          <div className="msSub">
             Acumulado {year} · vs {baseYear}
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <div className="pill" style={{ padding: ".45rem .7rem", borderRadius: 999, border: "1px solid rgba(255,255,255,.12)" }}>
-            Año: <strong>{year}</strong>
-          </div>
-          <div className="pill" style={{ padding: ".45rem .7rem", borderRadius: 999, border: "1px solid rgba(255,255,255,.12)" }}>
-            Hotel: <strong>{hotelFilter}</strong>
-          </div>
+        <div className="msPills">
+          <span className="pill">{year}</span>
+          <span className="pill ghost">vs {baseYear}</span>
         </div>
       </div>
 
-      <div className="card" style={{ marginTop: ".9rem", padding: "1rem", borderRadius: 22 }}>
-        {loading ? (
-          <div style={{ opacity: 0.8 }}>Cargando membership…</div>
-        ) : !hasData ? (
-          <div style={{ opacity: 0.9 }}>
-            <div style={{ fontWeight: 800, marginBottom: 8 }}>Sin datos</div>
-            <div style={{ fontSize: 13, opacity: 0.8 }}>
-              Archivo: <code>{filePath}</code>
-              <br />
-              Sheet: <code>{debug.sheetName}</code> (hojas: {debug.sheetNames.join(", ") || "—"})
-              <br />
-              Keys ejemplo: {debug.keys.slice(0, 12).join(", ") || "—"}
+      {loading ? (
+        <div className="msEmpty">Cargando membership…</div>
+      ) : err ? (
+        <div className="msEmpty">Error: {err}</div>
+      ) : yearRows.length === 0 ? (
+        <div className="msEmpty">
+          Sin datos para {hotelFilter} en {year}. (Archivo: {filePath})
+        </div>
+      ) : (
+        <>
+          {/* resumen */}
+          <div className="msTop">
+            <div className="msKpi">
+              <div className="msKLabel">Total</div>
+              <div className="msKValue">{fmtInt(totalYear)}</div>
+              <div className="msKNote">
+                {totalBase > 0 ? `${Math.round(((totalYear - totalBase) / totalBase) * 100)}% vs ${baseYear}` : `Sin base ${baseYear}`}
+              </div>
             </div>
-            <div style={{ marginTop: 10, fontSize: 13, opacity: 0.8 }}>
-              Si el año existe pero igual da 0: es casi siempre por formato de fecha (string / serial). Ya lo estamos normalizando;
-              si sigue, revisamos el header de Fecha/Cantidad/Bonboy.
+
+            <div className="msKpi">
+              <div className="msKLabel">Hoteles</div>
+              <div className="msKValue">{hotelFilter === "JCR" ? "3" : "1"}</div>
+              <div className="msKNote">{hotelFilter === "JCR" ? "Marriott + Sheratons" : "Filtro hotel"}</div>
+            </div>
+
+            <div className="msKpi">
+              <div className="msKLabel">Membresías</div>
+              <div className="msKValue">{fmtInt(memberships.length)}</div>
+              <div className="msKNote">Tipos detectados</div>
             </div>
           </div>
-        ) : (
-          <>
-            {/* KPIs */}
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-                gap: 12,
-              }}
-            >
-              <div className="kpiCard" style={{ borderRadius: 18, padding: "1rem", background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.10)" }}>
-                <div style={{ opacity: 0.8, fontSize: 13 }}>Total {year}</div>
-                <div style={{ fontSize: 28, fontWeight: 950, marginTop: 6 }}>{fmtInt(totalCur)}</div>
-              </div>
 
-              <div className="kpiCard" style={{ borderRadius: 18, padding: "1rem", background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.10)" }}>
-                <div style={{ opacity: 0.8, fontSize: 13 }}>Total {baseYear}</div>
-                <div style={{ fontSize: 28, fontWeight: 950, marginTop: 6 }}>{fmtInt(totalBase)}</div>
-              </div>
+          {/* tabla mensual */}
+          <div className="msTableWrap">
+            <table className="msTable">
+              <thead>
+                <tr>
+                  <th style={{ textAlign: "left" }}>Año</th>
+                  {MONTHS_ES.map((m) => (
+                    <th key={m}>{m}</th>
+                  ))}
+                  <th>Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {memberships.map((mem) => {
+                  const arr = table.get(mem) || new Array(12).fill(0);
+                  let sum = 0;
+                  for (let i = 0; i < arr.length; i++) sum += arr[i] || 0;
+                  return (
+                    <tr key={mem}>
+                      <td style={{ textAlign: "left", fontWeight: 900 }}>{mem}</td>
+                      {arr.map((v, i) => (
+                        <td key={i}>{v ? fmtInt(v) : "0"}</td>
+                      ))}
+                      <td style={{ fontWeight: 950 }}>{fmtInt(sum)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
 
-              <div className="kpiCard" style={{ borderRadius: 18, padding: "1rem", background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.10)" }}>
-                <div style={{ opacity: 0.8, fontSize: 13 }}>Variación</div>
-                <div style={{ fontSize: 28, fontWeight: 950, marginTop: 6 }}>
-                  {variation === null ? "Sin base" : `${variation >= 0 ? "+" : ""}${variation.toFixed(1)}%`}
-                </div>
-              </div>
-            </div>
-
-            {/* Tabla mensual + mini barras */}
-            <div style={{ marginTop: "1rem", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 14 }}>
-              <div style={{ border: "1px solid rgba(255,255,255,.10)", borderRadius: 18, padding: "1rem", background: "rgba(255,255,255,.03)" }}>
-                <div style={{ fontWeight: 900, marginBottom: 10 }}>Evolución mensual</div>
-
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                    <thead>
-                      <tr style={{ textAlign: "left", opacity: 0.8 }}>
-                        <th style={{ padding: "8px 6px" }}>Mes</th>
-                        <th style={{ padding: "8px 6px" }}>Total</th>
-                        <th style={{ padding: "8px 6px" }}>{baseYear}</th>
-                        <th style={{ padding: "8px 6px" }}>Δ</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {byMonth.map((v, i) => {
-                        const b = byMonthBase[i] || 0;
-                        const delta = b ? ((v - b) / b) * 100 : null;
-                        return (
-                          <tr key={i} style={{ borderTop: "1px solid rgba(255,255,255,.06)" }}>
-                            <td style={{ padding: "8px 6px" }}>{monthNameEs(i + 1)}</td>
-                            <td style={{ padding: "8px 6px", fontWeight: 800 }}>{fmtInt(v)}</td>
-                            <td style={{ padding: "8px 6px", opacity: 0.9 }}>{fmtInt(b)}</td>
-                            <td style={{ padding: "8px 6px", opacity: 0.9 }}>
-                              {delta === null ? "—" : `${delta >= 0 ? "+" : ""}${delta.toFixed(1)}%`}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                      <tr style={{ borderTop: "1px solid rgba(255,255,255,.12)" }}>
-                        <td style={{ padding: "10px 6px", fontWeight: 950 }}>Total</td>
-                        <td style={{ padding: "10px 6px", fontWeight: 950 }}>{fmtInt(totalCur)}</td>
-                        <td style={{ padding: "10px 6px", fontWeight: 950 }}>{fmtInt(totalBase)}</td>
-                        <td style={{ padding: "10px 6px", fontWeight: 950 }}>
-                          {variation === null ? "—" : `${variation >= 0 ? "+" : ""}${variation.toFixed(1)}%`}
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* Composición */}
-              <div style={{ border: "1px solid rgba(255,255,255,.10)", borderRadius: 18, padding: "1rem", background: "rgba(255,255,255,.03)" }}>
-                <div style={{ fontWeight: 900, marginBottom: 10 }}>Composición</div>
-
-                <div style={{ display: "grid", gap: 10 }}>
-                  {composition.slice(0, 10).map((it) => {
-                    const p = totalCur ? (it.v / totalCur) * 100 : 0;
-                    return (
-                      <div key={it.k} style={{ display: "grid", gap: 6 }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                          <div style={{ fontWeight: 850, fontSize: 13, opacity: 0.95 }}>{it.k}</div>
-                          <div style={{ fontWeight: 900, fontSize: 13 }}>{fmtInt(it.v)} · {p.toFixed(1)}%</div>
-                        </div>
-                        <div style={{ height: 10, borderRadius: 999, background: "rgba(255,255,255,.08)", overflow: "hidden" }}>
-                          <div
-                            style={{
-                              width: `${Math.min(100, p)}%`,
-                              height: "100%",
-                              borderRadius: 999,
-                              background: colorForKey(it.k),
-                            }}
-                          />
-                        </div>
+          {/* composición (mini charts) */}
+          <div className="msCharts">
+            <div className="msChartCard">
+              <div className="msChartTitle">Composición</div>
+              <div className="msBars">
+                {composition.slice(0, 8).map((x) => {
+                  const pct = totalYear > 0 ? (x.total / totalYear) * 100 : 0;
+                  return (
+                    <div key={x.membership} className="barRow">
+                      <div className="barLabel">{x.membership}</div>
+                      <div className="barTrack">
+                        <div className="barFill" style={{ width: `${pct}%` }} />
                       </div>
-                    );
-                  })}
-                </div>
+                      <div className="barVal">{Math.round(pct)}%</div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
-          </>
-        )}
-      </div>
-    </section>
+
+            <div className="msChartCard">
+              <div className="msChartTitle">Top 5 (totales)</div>
+              <div className="msTopList">
+                {composition.slice(0, 5).map((x, idx) => (
+                  <div key={x.membership} className="topItem">
+                    <div className="topIdx">{idx + 1}</div>
+                    <div className="topName">{x.membership}</div>
+                    <div className="topVal">{fmtInt(x.total)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      <style jsx>{`
+        .msCard{
+          border-radius:22px;
+          padding:16px;
+          background:rgba(255,255,255,.05);
+          border:1px solid rgba(255,255,255,.08);
+        }
+        .msHead{
+          display:flex;
+          justify-content:space-between;
+          gap:12px;
+          flex-wrap:wrap;
+          align-items:flex-end;
+          margin-bottom:12px;
+        }
+        .msTitle{ font-weight:950; font-size:1.15rem; }
+        .msSub{ opacity:.8; margin-top:2px; font-size:.92rem; }
+        .msPills{ display:flex; gap:8px; flex-wrap:wrap; }
+        .pill{
+          font-size:.85rem;
+          font-weight:850;
+          padding:6px 10px;
+          border-radius:999px;
+          background:rgba(255,255,255,.10);
+          border:1px solid rgba(255,255,255,.12);
+        }
+        .pill.ghost{ background:transparent; }
+
+        .msEmpty{ opacity:.85; padding:10px 2px; }
+
+        .msTop{
+          display:grid;
+          grid-template-columns: repeat(3, minmax(0,1fr));
+          gap:10px;
+          margin-bottom:12px;
+        }
+        .msKpi{
+          border-radius:18px;
+          padding:12px;
+          background:rgba(0,0,0,.20);
+          border:1px solid rgba(255,255,255,.08);
+        }
+        .msKLabel{ font-weight:900; opacity:.82; font-size:.9rem; }
+        .msKValue{ font-weight:950; font-size:1.25rem; margin-top:6px; }
+        .msKNote{ opacity:.78; font-size:.85rem; margin-top:6px; }
+
+        .msTableWrap{
+          overflow:auto;
+          border-radius:16px;
+          border:1px solid rgba(255,255,255,.08);
+          background:rgba(0,0,0,.18);
+        }
+        .msTable{
+          width:100%;
+          border-collapse:collapse;
+          font-size:.88rem;
+          min-width:720px;
+        }
+        .msTable th, .msTable td{
+          padding:10px 10px;
+          border-bottom:1px solid rgba(255,255,255,.06);
+          text-align:right;
+          white-space:nowrap;
+        }
+        .msTable thead th{
+          position:sticky;
+          top:0;
+          background:rgba(0,0,0,.45);
+          backdrop-filter: blur(10px);
+          font-weight:950;
+        }
+
+        .msCharts{
+          margin-top:12px;
+          display:grid;
+          grid-template-columns: minmax(0,1.4fr) minmax(0,.9fr);
+          gap:12px;
+        }
+        .msChartCard{
+          border-radius:18px;
+          padding:12px;
+          background:rgba(0,0,0,.20);
+          border:1px solid rgba(255,255,255,.08);
+        }
+        .msChartTitle{
+          font-weight:950;
+          margin-bottom:10px;
+          opacity:.9;
+        }
+
+        .barRow{
+          display:grid;
+          grid-template-columns: 160px 1fr 46px;
+          gap:8px;
+          align-items:center;
+          margin:8px 0;
+        }
+        .barLabel{
+          font-weight:850;
+          font-size:.86rem;
+          opacity:.9;
+          overflow:hidden;
+          text-overflow:ellipsis;
+          white-space:nowrap;
+        }
+        .barTrack{
+          height:10px;
+          border-radius:999px;
+          background:rgba(255,255,255,.08);
+          overflow:hidden;
+        }
+        .barFill{
+          height:100%;
+          border-radius:999px;
+          background:linear-gradient(90deg, rgba(94,232,255,.9), rgba(210,160,255,.9));
+        }
+        .barVal{ font-weight:900; font-size:.86rem; opacity:.9; text-align:right; }
+
+        .msTopList{ display:grid; gap:8px; }
+        .topItem{
+          display:grid;
+          grid-template-columns: 28px 1fr auto;
+          gap:10px;
+          align-items:center;
+          padding:10px 10px;
+          border-radius:14px;
+          background:rgba(255,255,255,.05);
+          border:1px solid rgba(255,255,255,.06);
+        }
+        .topIdx{ font-weight:950; opacity:.9; }
+        .topName{ font-weight:900; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .topVal{ font-weight:950; }
+
+        @media (max-width: 980px){
+          .msTop{ grid-template-columns: 1fr; }
+          .msCharts{ grid-template-columns: 1fr; }
+          .barRow{ grid-template-columns: 140px 1fr 44px; }
+        }
+        @media (max-width: 520px){
+          .barRow{ grid-template-columns: 120px 1fr 40px; }
+          .msTitle{ font-size:1.05rem; }
+        }
+      `}</style>
+    </div>
   );
 }
