@@ -13,7 +13,7 @@ type Row = {
   year: number;
   country: string;
   continent: string;
-  value: number; // cantidad (o importe, si tu archivo usa importes)
+  value: number;
 };
 
 function norm(s: any) {
@@ -99,6 +99,7 @@ export default function CountryRanking({ year, filePath, limit = 12 }: Props) {
       try {
         const rr = await readXlsxFromPublic(filePath);
         const raw = rr.rows ?? [];
+
         if (raw.length === 0) {
           if (!mounted) return;
           setRows([]);
@@ -109,7 +110,7 @@ export default function CountryRanking({ year, filePath, limit = 12 }: Props) {
 
         const hmap = normalizeHeaderMap(raw[0]);
 
-        // En tu Excel vimos: Continente, Año, PAÍS, Mes, N° Mes
+        // En tu Excel vimos: Continente, Año, PAÍS, Mes, N° Mes (y a veces "Importe")
         const kYear = pickKey(hmap, ["Año", "Ano", "Year"]);
         const kCountry = pickKey(hmap, ["PAÍS", "PAIS", "Pais", "Country"]);
         const kCont = pickKey(hmap, ["Continente", "Continent"]);
@@ -121,7 +122,6 @@ export default function CountryRanking({ year, filePath, limit = 12 }: Props) {
         for (let i = 0; i < raw.length; i++) {
           const r: any = raw[i];
 
-          // year: prefer kYear; fallback: fecha
           let yy = 0;
           if (kYear) yy = Number(r[kYear]) || 0;
 
@@ -132,7 +132,6 @@ export default function CountryRanking({ year, filePath, limit = 12 }: Props) {
 
           const country = kCountry ? String(r[kCountry] ?? "").trim() : "";
           const continent = kCont ? String(r[kCont] ?? "").trim() : "";
-
           const value = kVal ? toNum(r[kVal]) : 0;
 
           if (!yy || !country) continue;
@@ -276,7 +275,6 @@ export default function CountryRanking({ year, filePath, limit = 12 }: Props) {
         )}
       </div>
 
-      {/* Continentes MÁS CHICO (como querés) */}
       <div className="card" style={{ padding: ".85rem", borderRadius: 22 }}>
         <div style={{ fontWeight: 950, fontSize: ".95rem" }}>Distribución por continente</div>
         <div style={{ marginTop: ".6rem", display: "grid", gap: ".45rem" }}>
