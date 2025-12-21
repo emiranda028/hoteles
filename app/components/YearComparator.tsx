@@ -20,6 +20,9 @@ const HOTEL_OPTIONS: { key: GlobalHotel; label: string }[] = [
   { key: "MAITEI", label: "MAITEI" },
 ];
 
+// ✅ lista de hoteles válidos para Membership (NO incluye MAITEI)
+const MEMBERSHIP_ALLOWED_HOTELS = ["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"] as const;
+
 function chipStyle(active: boolean): React.CSSProperties {
   return {
     borderRadius: 999,
@@ -40,28 +43,27 @@ export default function YearComparator() {
   const [baseYear, setBaseYear] = useState<number>(2024);
   const [globalHotel, setGlobalHotel] = useState<GlobalHotel>("JCR");
 
-  // years disponibles (simple: permitimos 2022-2026 y el user elige; no te rompe)
+  // years disponibles
   const years = useMemo(() => [2022, 2023, 2024, 2025, 2026], []);
 
-  // Para membership: MAITEI no aplica, lo “mapeamos” a JCR para evitar errores y mantener UI coherente.
+  // ✅ Membership: MAITEI no aplica. Si globalHotel=MAITEI, mostramos el grupo (JCR)
   const membershipHotelFilter = useMemo(() => {
     if (globalHotel === "MAITEI") return "JCR";
     return globalHotel;
   }, [globalHotel]);
 
-  // Para H&F: hotel real (incluye MAITEI)
+  // H&F: hotel real (incluye MAITEI)
   const hfHotel = globalHotel;
 
-  // Comparativa (texto) — muy estable y sin romper
   const comparativeTitle = useMemo(() => {
     const hotelLabel = globalHotel === "JCR" ? "Grupo JCR" : globalHotel;
     return `Comparativa ${hotelLabel} — ${year} vs ${baseYear}`;
   }, [globalHotel, year, baseYear]);
 
-  // Ajuste: si el baseYear coincide con year, lo corregimos suave
+  // Ajuste: si baseYear == year, lo corregimos a year-1
   useEffect(() => {
     if (baseYear === year) setBaseYear(year - 1);
-  }, [year]); // intencional
+  }, [year, baseYear]);
 
   return (
     <section className="section" id="comparador">
@@ -137,7 +139,7 @@ export default function YearComparator() {
         <div className="card" style={{ marginTop: ".85rem", padding: "1rem", borderRadius: 22 }}>
           <div style={{ fontWeight: 950 }}>{comparativeTitle}</div>
           <div style={{ marginTop: ".5rem", opacity: 0.8 }}>
-            (Este bloque queda listo para que vuelvas a meter el comparativo “lindo” si lo tenías; por ahora no rompe el deploy y mantiene el layout.)
+            (Bloque estable — después lo dejamos “lindo” sin romper el deploy.)
           </div>
         </div>
       </div>
@@ -171,6 +173,7 @@ export default function YearComparator() {
             baseYear={baseYear}
             filePath={MEMBERSHIP_PATH}
             title="Membership (JCR)"
+            allowedHotels={Array.from(MEMBERSHIP_ALLOWED_HOTELS)}
             hotelFilter={membershipHotelFilter as any}
             compactCharts={true}
           />
