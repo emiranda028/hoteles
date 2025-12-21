@@ -1,35 +1,40 @@
 "use client";
 
 /**
- * Parser CSV robusto (soporta comillas, comas, saltos de línea dentro de campos)
- * porque tu hf_diario.csv viene exportado tipo Excel con headers multi-línea.
+ * csvClient.ts
+ * - readCsvFromPublic(filePath): fetch + parse CSV robusto (comillas, separador , o ;)
+ * - devuelve rows como objetos por header
  */
 
-export type CsvRow = Record<string, string>;
+export type CsvReadResult = {
+  rows: Record<string, string>[];
+  headers: string[];
+};
 
-function normalizeHeader(h: string) {
-  return String(h ?? "")
-    .replace(/\uFEFF/g, "")
-    .replace(/\r/g, "")
-    .replace(/\n/g, " ")
-    .replace(/\t/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+async function fetchText(path: string) {
+  const res = await fetch(path, { cache: "no-store" });
+  if (!res.ok) throw new Error(`No se pudo cargar ${path} (status ${res.status})`);
+  return await res.text();
 }
 
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = "";
+function detectDelimiter(firstLine: string) {
+  const comma = (firstLine.match(/,/g) || []).length;
+  const semicolon = (firstLine.match(/;/g) || []).length;
+  return semicolon > comma ? ";" : ",";
+}
+
+function splitCsvLine(line: string, delim: string): string[] {
+  const out: string[] = [];
+  let cur = "";
   let inQuotes = false;
 
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
 
     if (ch === '"') {
-      const next = text[i + 1];
-      if (inQuotes && next === '"') {
-        cell += '"';
+      // doble comilla escapada
+      if (inQuotes && line[i + 1] === '"') {
+        cur += '"';
         i++;
       } else {
         inQuotes = !inQuotes;
@@ -37,59 +42,48 @@ function parseCsv(text: string): string[][] {
       continue;
     }
 
-    if (!inQuotes && ch === ",") {
-      row.push(cell);
-      cell = "";
+    if (!inQuotes && ch === delim) {
+      out.push(cur);
+      cur = "";
       continue;
     }
 
-    if (!inQuotes && (ch === "\n")) {
-      row.push(cell);
-      cell = "";
-      // evitar filas vacías fantasma
-      const isAllEmpty = row.every((c) => String(c ?? "").trim() === "");
-      if (!isAllEmpty) rows.push(row);
-      row = [];
-      continue;
-    }
-
-    cell += ch;
+    cur += ch;
   }
 
-  // último
-  if (cell.length || row.length) {
-    row.push(cell);
-    const isAllEmpty = row.every((c) => String(c ?? "").trim() === "");
-    if (!isAllEmpty) rows.push(row);
-  }
-
-  return rows;
+  out.push(cur);
+  return out.map((s) => s.trim());
 }
 
-export async function readCsvFromPublic(path?: string): Promise<CsvRow[]> {
-  if (!path) throw new Error("No se pudo cargar: filePath está vacío/undefined");
+function normalizeHeader(h: string) {
+  return String(h || "")
+    .replace(/^\uFEFF/, "")
+    .trim();
+}
 
-  const res = await fetch(path, { cache: "no-store" });
-  if (!res.ok) throw new Error(`No se pudo cargar ${path} (status ${res.status})`);
+export async function readCsvFromPublic(path: string): Promise<CsvReadResult> {
+  const text = await fetchText(path);
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trimEnd())
+    .filter((l) => l.length > 0);
 
-  const text = await res.text();
-  const matrix = parseCsv(text);
+  if (lines.length === 0) return { rows: [], headers: [] };
 
-  if (!matrix.length) return [];
+  const delim = detectDelimiter(lines[0]);
+  const headersRaw = splitCsvLine(lines[0], delim).map(normalizeHeader);
+  const headers = headersRaw;
 
-  // Headers: algunos vienen “partidos”, pero el parser ya los unió.
-  const rawHeaders = matrix[0].map((h) => normalizeHeader(h));
-  const headers = rawHeaders.map((h, idx) => (h ? h : `__col_${idx}`));
+  const rows: Record<string, string>[] = [];
 
-  const out: CsvRow[] = [];
-  for (let r = 1; r < matrix.length; r++) {
-    const rowArr = matrix[r];
-    const obj: CsvRow = {};
+  for (let i = 1; i < lines.length; i++) {
+    const cols = splitCsvLine(lines[i], delim);
+    const obj: Record<string, string> = {};
     for (let c = 0; c < headers.length; c++) {
-      obj[headers[c]] = String(rowArr[c] ?? "").trim();
+      obj[headers[c]] = cols[c] ?? "";
     }
-    out.push(obj);
+    rows.push(obj);
   }
 
-  return out;
+  return { rows, headers };
 }
