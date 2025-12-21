@@ -718,31 +718,18 @@ export default function YearComparator() {
         </div>
       </div>
 
-      {/* ====== 5) NACIONALIDADES ====== */}
-      <div style={{ marginTop: "1.25rem" }}>
-        <div className="sectionTitle" style={{ fontSize: "1.2rem", fontWeight: 950 }}>
-          Nacionalidades
-        </div>
-        <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-          Ranking por país + distribución por continente. (Archivo Marriott). Usa filtro global de año.
-        </div>
+ {/* ====== 5) Nacionalidades ====== */}
+<div style={{ marginTop: "1.25rem" }}>
+  <div className="sectionTitle" style={{ fontSize: "1.2rem", fontWeight: 950 }}>
+    Nacionalidades
+  </div>
+  <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
+    Ranking por país + distribución por continente. (Archivo Marriott). Usa filtro global de año.
+  </div>
 
-        <div style={{ marginTop: ".85rem" }}>
-          <CountryRanking year={year} filePath={NACIONALIDADES_PATH} hotelFilter={""} />
-        </div>
-      </div>
+  <div style={{ marginTop: ".85rem" }}>
+    <CountryRanking year={year} filePath={NACIONALIDADES_PATH} />
+  </div>
+</div>
 
-      {/* ===== Responsive tweaks ===== */}
-      <style jsx>{`
-        @media (max-width: 900px) {
-          .sectionTitle {
-            font-size: 1.2rem !important;
-          }
-          table {
-            font-size: 12px !important;
-          }
-        }
-      `}</style>
-    </section>
-  );
-}
+
