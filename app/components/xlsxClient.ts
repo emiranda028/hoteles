@@ -33,15 +33,15 @@ export async function readXlsxFromPublic(path?: string): Promise<ReadResult> {
   if (!path) throw new Error("No se pudo cargar: filePath está vacío/undefined");
 
   const res = await fetch(path, { cache: "no-store" });
-  if (!res.ok) throw new Error(`No se pudo cargar ${path} (status ${res.status})`);
+  if (!res.ok) {
+    throw new Error(`No se pudo cargar ${path} (status ${res.status})`);
+  }
 
   const buffer = await res.arrayBuffer();
   const wb = XLSX.read(buffer, { type: "array" });
 
   const sheetNames = wb.SheetNames ?? [];
-  if (sheetNames.length === 0) {
-    return { rows: [], sheetName: "", sheetNames: [] };
-  }
+  if (sheetNames.length === 0) return { rows: [], sheetName: "", sheetNames: [] };
 
   let bestSheet = sheetNames[0];
   let bestRows: any[] = [];
