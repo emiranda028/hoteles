@@ -1,89 +1,60 @@
 "use client";
 
-/**
- * csvClient.ts
- * - readCsvFromPublic(filePath): fetch + parse CSV robusto (comillas, separador , o ;)
- * - devuelve rows como objetos por header
- */
+import * as XLSX from "xlsx";
 
-export type CsvReadResult = {
-  rows: Record<string, string>[];
-  headers: string[];
+export type CsvReadResult<T = any> = {
+  rows: T[];
+  sheetName: string;
+  sheetNames: string[];
 };
 
-async function fetchText(path: string) {
-  const res = await fetch(path, { cache: "no-store" });
-  if (!res.ok) throw new Error(`No se pudo cargar ${path} (status ${res.status})`);
-  return await res.text();
-}
-
-function detectDelimiter(firstLine: string) {
-  const comma = (firstLine.match(/,/g) || []).length;
-  const semicolon = (firstLine.match(/;/g) || []).length;
-  return semicolon > comma ? ";" : ",";
-}
-
-function splitCsvLine(line: string, delim: string): string[] {
-  const out: string[] = [];
-  let cur = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-
-    if (ch === '"') {
-      // doble comilla escapada
-      if (inQuotes && line[i + 1] === '"') {
-        cur += '"';
-        i++;
-      } else {
-        inQuotes = !inQuotes;
-      }
-      continue;
-    }
-
-    if (!inQuotes && ch === delim) {
-      out.push(cur);
-      cur = "";
-      continue;
-    }
-
-    cur += ch;
-  }
-
-  out.push(cur);
-  return out.map((s) => s.trim());
-}
-
+/**
+ * Normaliza headers “raros”:
+ * - quita saltos de línea
+ * - colapsa espacios
+ * - trim
+ */
 function normalizeHeader(h: string) {
-  return String(h || "")
-    .replace(/^\uFEFF/, "")
+  return String(h ?? "")
+    .replace(/\r/g, "")
+    .replace(/\n/g, " ")
+    .replace(/\s+/g, " ")
     .trim();
 }
 
-export async function readCsvFromPublic(path: string): Promise<CsvReadResult> {
-  const text = await fetchText(path);
-  const lines = text
-    .split(/\r?\n/)
-    .map((l) => l.trimEnd())
-    .filter((l) => l.length > 0);
+function normalizeObjKeys(obj: any) {
+  const out: any = {};
+  for (const k of Object.keys(obj ?? {})) {
+    out[normalizeHeader(k)] = obj[k];
+  }
+  return out;
+}
 
-  if (lines.length === 0) return { rows: [], headers: [] };
+/**
+ * Lee CSV desde /public usando XLSX (mucho más robusto que split por \n porque
+ * soporta comillas, separadores, y headers con newlines).
+ */
+export async function readCsvFromPublic(path?: string): Promise<CsvReadResult> {
+  if (!path) throw new Error("No se pudo cargar CSV: filePath vacío/undefined");
 
-  const delim = detectDelimiter(lines[0]);
-  const headersRaw = splitCsvLine(lines[0], delim).map(normalizeHeader);
-  const headers = headersRaw;
-
-  const rows: Record<string, string>[] = [];
-
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitCsvLine(lines[i], delim);
-    const obj: Record<string, string> = {};
-    for (let c = 0; c < headers.length; c++) {
-      obj[headers[c]] = cols[c] ?? "";
-    }
-    rows.push(obj);
+  const res = await fetch(path, { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error(`No se pudo cargar ${path} (status ${res.status})`);
   }
 
-  return { rows, headers };
+  const text = await res.text();
+
+  // XLSX puede “leer” CSV como workbook (1 hoja)
+  const wb = XLSX.read(text, { type: "string" });
+  const sheetNames = wb.SheetNames ?? [];
+  if (sheetNames.length === 0) return { rows: [], sheetName: "", sheetNames: [] };
+
+  const bestSheet = sheetNames[0];
+  const ws = wb.Sheets[bestSheet];
+  if (!ws) return { rows: [], sheetName: bestSheet, sheetNames };
+
+  const rawRows = XLSX.utils.sheet_to_json(ws, { defval: "" }) as any[];
+  const rows = rawRows.map(normalizeObjKeys);
+
+  return { rows, sheetName: bestSheet, sheetNames };
 }
