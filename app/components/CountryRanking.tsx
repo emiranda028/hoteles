@@ -1,485 +1,283 @@
+// app/components/CountryRanking.tsx
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
-import { readXlsxFromPublic } from "./readXlsxFromPublic";
+import { useEffect, useMemo, useState } from "react";
+import { readXlsxFromPublic } from "./xlsxClient";
+import { getYearSafe, normStr, normUpper, toNumber } from "./dataUtils";
 
 type Props = {
   year: number;
-  filePath: string;
-  baseYear?: number; // opcional (si querés comparar)
-  limit?: number; // top N
-  hotelFilter?: string; // opcional: "JCR"|"MARRIOTT"|"SHERATON BCR"|"SHERATON MDQ"
+  filePath: string; // "/data/jcr_nacionalidades.xlsx"
+  limit?: number;
 };
 
-type Row = Record<string, any>;
+type Row = {
+  fecha: any;
+  pais: string;
+  continente: string;
+  cantidad: number;
+};
 
-function normStr(v: any) {
-  return String(v ?? "")
-    .trim()
-    .replace(/\s+/g, " ");
+function fmtInt(n: number) {
+  return new Intl.NumberFormat("es-AR").format(Math.round(n || 0));
 }
 
-function upperNoAccents(s: string) {
-  return s
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toUpperCase();
-}
+// Mapeo básico país -> ISO2 (para emoji bandera)
+const ISO2: Record<string, string> = {
+  // LATAM
+  "ARGENTINA": "AR",
+  "BRASIL": "BR",
+  "BRAZIL": "BR",
+  "CHILE": "CL",
+  "URUGUAY": "UY",
+  "PARAGUAY": "PY",
+  "BOLIVIA": "BO",
+  "PERU": "PE",
+  "PERÚ": "PE",
+  "COLOMBIA": "CO",
+  "VENEZUELA": "VE",
+  "ECUADOR": "EC",
+  "MEXICO": "MX",
+  "MÉXICO": "MX",
+  "PANAMA": "PA",
+  "PANAMÁ": "PA",
+  // NA / EU
+  "UNITED STATES": "US",
+  "ESTADOS UNIDOS": "US",
+  "USA": "US",
+  "CANADA": "CA",
+  "CANADÁ": "CA",
+  "SPAIN": "ES",
+  "ESPAÑA": "ES",
+  "FRANCE": "FR",
+  "FRANCIA": "FR",
+  "ITALY": "IT",
+  "ITALIA": "IT",
+  "GERMANY": "DE",
+  "ALEMANIA": "DE",
+  "UNITED KINGDOM": "GB",
+  "REINO UNIDO": "GB",
+  "PORTUGAL": "PT",
+  // otros comunes
+  "ISRAEL": "IL",
+  "CHINA": "CN",
+  "JAPAN": "JP",
+  "JAPÓN": "JP",
+  "AUSTRALIA": "AU",
+};
 
-function toNumber(v: any): number {
-  if (v === null || v === undefined) return 0;
-  const s = String(v).trim();
-  if (!s) return 0;
-  // soporta "1.234" y "1,234" y "1.234,56"
-  const cleaned = s
-    .replace(/\./g, "")
-    .replace(/,/g, ".")
-    .replace(/[^\d.-]/g, "");
-  const n = Number(cleaned);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function yearFromAnyDate(value: any): number | null {
-  if (!value) return null;
-
-  // Date real
-  if (value instanceof Date && !isNaN(value.getTime())) return value.getFullYear();
-
-  // Excel serial date (XLSX a veces lo deja como número)
-  if (typeof value === "number" && value > 20000 && value < 60000) {
-    // Excel epoch 1899-12-30
-    const d = new Date(Math.round((value - 25569) * 86400 * 1000));
-    if (!isNaN(d.getTime())) return d.getFullYear();
-  }
-
-  // string
-  const s = String(value).trim();
-  if (!s) return null;
-
-  // intenta parseo directo
-  const d = new Date(s);
-  if (!isNaN(d.getTime())) return d.getFullYear();
-
-  // dd/mm/yyyy o dd-mm-yyyy
-  const m = s.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-  if (m) {
-    const yyyy = m[3].length === 2 ? Number("20" + m[3]) : Number(m[3]);
-    if (yyyy > 1900 && yyyy < 2100) return yyyy;
-  }
-
-  // yyyy-mm-dd
-  const m2 = s.match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
-  if (m2) {
-    const yyyy = Number(m2[1]);
-    if (yyyy > 1900 && yyyy < 2100) return yyyy;
-  }
-
-  return null;
-}
-
-function pickKeyByCandidates(sample: Row, candidates: string[]) {
-  const keys = Object.keys(sample || {});
-  const map = new Map<string, string>();
-  keys.forEach((k) => map.set(upperNoAccents(k), k));
-
-  for (const cand of candidates) {
-    const found = map.get(upperNoAccents(cand));
-    if (found) return found;
-  }
-  return "";
-}
-
-function countryToISO2(countryRaw: string): string {
-  const c = upperNoAccents(countryRaw);
-
-  // IMPORTANTÍSIMO: keys con espacios SIEMPRE entre comillas
-  const MAP: Record<string, string> = {
-    ARGENTINA: "AR",
-    BRASIL: "BR",
-    BRAZIL: "BR",
-    CHILE: "CL",
-    URUGUAY: "UY",
-    PARAGUAY: "PY",
-    PERU: "PE",
-    PERÚ: "PE",
-    BOLIVIA: "BO",
-    ECUADOR: "EC",
-    COLOMBIA: "CO",
-    VENEZUELA: "VE",
-    MEXICO: "MX",
-    "MÉXICO": "MX",
-    "UNITED STATES": "US",
-    "ESTADOS UNIDOS": "US",
-    USA: "US",
-    ESPANA: "ES",
-    "ESPAÑA": "ES",
-    SPAIN: "ES",
-    ITALIA: "IT",
-    ITALY: "IT",
-    FRANCIA: "FR",
-    FRANCE: "FR",
-    ALEMANIA: "DE",
-    GERMANY: "DE",
-    "REINO UNIDO": "GB",
-    "UNITED KINGDOM": "GB",
-    UK: "GB",
-    "GRAN BRETAÑA": "GB",
-  };
-
-  return MAP[c] || "";
-}
-
-function iso2ToFlagEmoji(iso2: string) {
-  const s = upperNoAccents(iso2).slice(0, 2);
+function flagEmojiFromISO2(code: string): string {
+  const s = normUpper(code);
   if (s.length !== 2) return "";
   const A = 0x1f1e6;
-  const c0 = s.charCodeAt(0) - 65;
-  const c1 = s.charCodeAt(1) - 65;
-  if (c0 < 0 || c0 > 25 || c1 < 0 || c1 > 25) return "";
-  return String.fromCodePoint(A + c0, A + c1);
+  const c1 = s.charCodeAt(0) - 65;
+  const c2 = s.charCodeAt(1) - 65;
+  if (c1 < 0 || c1 > 25 || c2 < 0 || c2 > 25) return "";
+  return String.fromCodePoint(A + c1, A + c2);
 }
 
-export default function CountryRanking({
-  year,
-  filePath,
-  baseYear = 2024,
-  limit = 12,
-  hotelFilter,
-}: Props) {
+function flagForCountry(country: string) {
+  const key = normUpper(country);
+  const iso2 = ISO2[key];
+  return iso2 ? flagEmojiFromISO2(iso2) : "🏳️";
+}
+
+export default function CountryRanking({ year, filePath, limit = 12 }: Props) {
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string>("");
+  const [debug, setDebug] = useState<{ sheetName: string; sheetNames: string[]; keys: string[] }>({
+    sheetName: "",
+    sheetNames: [],
+    keys: [],
+  });
 
   useEffect(() => {
     let alive = true;
     setLoading(true);
-    setError("");
 
-    (async () => {
-      try {
-        const r = await readXlsxFromPublic(filePath);
+    readXlsxFromPublic(filePath)
+      .then(({ rows: raw, sheetName, sheetNames }) => {
         if (!alive) return;
-        setRows(r.rows || []);
-      } catch (e: any) {
+
+        const keys = Object.keys(raw?.[0] ?? {});
+        setDebug({ sheetName, sheetNames, keys });
+
+        // headers flexibles
+        const keyFecha =
+          keys.find((k) => ["FECHA", "DATE"].includes(normUpper(k))) ?? "Fecha";
+
+        const keyPais =
+          keys.find((k) =>
+            ["PAIS", "PAÍS", "NACIONALIDAD", "COUNTRY"].includes(normUpper(k))
+          ) ?? "País";
+
+        const keyCont =
+          keys.find((k) =>
+            ["CONTINENTE", "CONTINENT", "REGION"].includes(normUpper(k))
+          ) ?? "Continente";
+
+        const keyQty =
+          keys.find((k) => ["CANTIDAD", "QTY", "TOTAL"].includes(normUpper(k))) ?? "Cantidad";
+
+        const mapped: Row[] = (raw ?? []).map((r: any) => ({
+          fecha: r[keyFecha],
+          pais: normStr(r[keyPais]),
+          continente: normStr(r[keyCont]),
+          cantidad: toNumber(r[keyQty]),
+        }));
+
+        setRows(mapped);
+      })
+      .catch(() => {
         if (!alive) return;
-        setError(e?.message || "Error cargando archivo");
         setRows([]);
-      } finally {
+      })
+      .finally(() => {
         if (!alive) return;
         setLoading(false);
-      }
-    })();
+      });
 
     return () => {
       alive = false;
     };
   }, [filePath]);
 
-  const meta = useMemo(() => {
-    const sample = rows[0] || {};
-
-    const hotelKey = pickKeyByCandidates(sample, ["Hotel", "Empresa", "Property", "Propiedad"]);
-    const countryKey = pickKeyByCandidates(sample, [
-      "Pais",
-      "País",
-      "Nacionalidad",
-      "Nacionalidad País",
-      "Country",
-      "Nationality",
-    ]);
-    const continentKey = pickKeyByCandidates(sample, ["Continente", "Continent"]);
-    const qtyKey = pickKeyByCandidates(sample, ["Cantidad", "Qty", "Cantidad Pax", "Pax", "Guests"]);
-    const dateKey = pickKeyByCandidates(sample, ["Fecha", "Date", "Día", "Dia", "Day"]);
-
-    return { hotelKey, countryKey, continentKey, qtyKey, dateKey, sampleKeys: Object.keys(sample) };
-  }, [rows]);
-
-  function hotelMatches(h: string, filter?: string) {
-    if (!filter) return true;
-    const H = upperNoAccents(h);
-    const F = upperNoAccents(filter);
-
-    if (F === "JCR" || F === "GRUPO JCR") return true;
-
-    if (F.includes("MARRIOTT")) return H.includes("MARRIOTT");
-    if (F.includes("SHERATON BCR") || F.includes("BCR")) return H.includes("BCR");
-    if (F.includes("SHERATON MDQ") || F.includes("MDQ")) return H.includes("MDQ");
-
-    return H.includes(F);
-  }
-
-  const filteredRows = useMemo(() => {
-    if (!rows.length) return [];
-
-    const { hotelKey, dateKey } = meta;
-    const out: Row[] = [];
-
-    for (let i = 0; i < rows.length; i++) {
-      const r = rows[i];
-      const hotelVal = hotelKey ? normStr(r[hotelKey]) : "";
-      if (!hotelMatches(hotelVal, hotelFilter)) continue;
-
-      const y = dateKey ? yearFromAnyDate(r[dateKey]) : null;
-      if (y !== year) continue;
-
-      out.push(r);
-    }
-    return out;
-  }, [rows, meta, year, hotelFilter]);
+  const filtered = useMemo(() => {
+    return rows.filter((r) => getYearSafe(r.fecha) === year);
+  }, [rows, year]);
 
   const byCountry = useMemo(() => {
-    const m = new Map<string, number>();
-    const { countryKey, qtyKey } = meta;
-    if (!countryKey || !qtyKey) return m;
-
-    for (let i = 0; i < filteredRows.length; i++) {
-      const r = filteredRows[i];
-      const c = normStr(r[countryKey]);
-      if (!c) continue;
-      const v = toNumber(r[qtyKey]);
-      m.set(c, (m.get(c) || 0) + v);
-    }
-    return m;
-  }, [filteredRows, meta]);
+    const map = new Map<string, number>();
+    filtered.forEach((r) => {
+      const k = normStr(r.pais) || "OTROS";
+      map.set(k, (map.get(k) || 0) + (r.cantidad || 0));
+    });
+    return map;
+  }, [filtered]);
 
   const byContinent = useMemo(() => {
-    const m = new Map<string, number>();
-    const { continentKey, qtyKey } = meta;
-    if (!continentKey || !qtyKey) return m;
-
-    for (let i = 0; i < filteredRows.length; i++) {
-      const r = filteredRows[i];
-      const c = normStr(r[continentKey]);
-      if (!c) continue;
-      const v = toNumber(r[qtyKey]);
-      m.set(c, (m.get(c) || 0) + v);
-    }
-    return m;
-  }, [filteredRows, meta]);
+    const map = new Map<string, number>();
+    filtered.forEach((r) => {
+      const k = normStr(r.continente) || "Sin continente";
+      map.set(k, (map.get(k) || 0) + (r.cantidad || 0));
+    });
+    return map;
+  }, [filtered]);
 
   const total = useMemo(() => {
-    let t = 0;
-
-    // NO usar for..of sobre iterators (downlevelIteration)
-    Array.from(byCountry.values()).forEach((v) => (t += v));
-    if (t === 0) {
-      Array.from(byContinent.values()).forEach((v) => (t += v));
-    }
-    return t;
+    const vals = Array.from(byCountry.values());
+    const t1 = vals.reduce((a, b) => a + b, 0);
+    if (t1 > 0) return t1;
+    const vals2 = Array.from(byContinent.values());
+    return vals2.reduce((a, b) => a + b, 0);
   }, [byCountry, byContinent]);
 
   const topCountries = useMemo(() => {
     const list = Array.from(byCountry.entries())
-      .map(([country, value]) => ({ country, value }))
-      .sort((a, b) => b.value - a.value);
-
-    return list.slice(0, limit);
+      .map(([k, v]) => ({ k, v }))
+      .sort((a, b) => b.v - a.v)
+      .slice(0, limit);
+    return list;
   }, [byCountry, limit]);
 
-  const topContinents = useMemo(() => {
+  const contList = useMemo(() => {
     const list = Array.from(byContinent.entries())
-      .map(([continent, value]) => ({ continent, value }))
-      .sort((a, b) => b.value - a.value);
-
+      .map(([k, v]) => ({ k, v }))
+      .sort((a, b) => b.v - a.v);
     return list;
   }, [byContinent]);
 
-  const titleHotel = useMemo(() => {
-    const f = (hotelFilter || "").trim();
-    if (!f || upperNoAccents(f) === "JCR") return "JCR";
-    return f.toUpperCase();
-  }, [hotelFilter]);
+  const hasData = filtered.length > 0 && total > 0;
 
-  if (loading) {
-    return (
-      <div style={{ padding: "1rem" }}>
-        <div style={{ fontWeight: 900 }}>Nacionalidades</div>
-        <div style={{ marginTop: ".35rem", opacity: 0.75 }}>Cargando archivo…</div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div style={{ padding: "1rem" }}>
-        <div style={{ fontWeight: 900 }}>Nacionalidades</div>
-        <div style={{ marginTop: ".35rem", color: "#b00020" }}>{error}</div>
-        <div style={{ marginTop: ".5rem", opacity: 0.75, fontSize: 12 }}>
-          Archivo: <code>{filePath}</code>
-        </div>
-      </div>
-    );
-  }
-
-  if (!rows.length) {
-    return (
-      <div style={{ padding: "1rem" }}>
-        <div style={{ fontWeight: 900 }}>Nacionalidades</div>
-        <div style={{ marginTop: ".35rem", opacity: 0.75 }}>Sin filas en el archivo.</div>
-        <div style={{ marginTop: ".5rem", opacity: 0.75, fontSize: 12 }}>
-          Archivo: <code>{filePath}</code>
-        </div>
-      </div>
-    );
-  }
-
-  if (!filteredRows.length) {
-    return (
-      <div style={{ padding: "1rem" }}>
-        <div style={{ fontWeight: 900 }}>Nacionalidades ({titleHotel})</div>
-        <div style={{ marginTop: ".35rem", opacity: 0.75 }}>
-          Sin datos para <b>{year}</b>.
-        </div>
-        <div style={{ marginTop: ".6rem", opacity: 0.8, fontSize: 12 }}>
-          Detectado: hotel=<b>{meta.hotelKey || "—"}</b> · país=<b>{meta.countryKey || "—"}</b> ·
-          continente=<b>{meta.continentKey || "—"}</b> · qty=<b>{meta.qtyKey || "—"}</b> · fecha=
-          <b>{meta.dateKey || "—"}</b>
-        </div>
-        <div style={{ marginTop: ".4rem", opacity: 0.7, fontSize: 12 }}>
-          Keys ejemplo: {meta.sampleKeys.slice(0, 12).join(", ")}
-        </div>
-        <div style={{ marginTop: ".4rem", opacity: 0.7, fontSize: 12 }}>
-          Archivo: <code>{filePath}</code>
-        </div>
-      </div>
-    );
-  }
-
-  // UI responsive simple: 2 columnas en desktop, 1 en mobile
   return (
-    <div style={{ padding: "1rem" }}>
-      <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: ".75rem" }}>
-        <div>
-          <div style={{ fontWeight: 950, fontSize: "1.15rem" }}>Nacionalidades ({titleHotel})</div>
-          <div style={{ marginTop: ".25rem", opacity: 0.75 }}>
-            Ranking por país + distribución por continente · Año {year}
+    <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
+      {loading ? (
+        <div style={{ opacity: 0.8 }}>Cargando nacionalidades…</div>
+      ) : !hasData ? (
+        <div style={{ opacity: 0.9 }}>
+          <div style={{ fontWeight: 900, marginBottom: 8 }}>Sin datos</div>
+          <div style={{ fontSize: 13, opacity: 0.8 }}>
+            No hay filas para <strong>{year}</strong>. (Archivo: <code>{filePath}</code>)
+            <br />
+            Sheet: <code>{debug.sheetName}</code> · Keys ejemplo: {debug.keys.slice(0, 12).join(", ") || "—"}
           </div>
         </div>
-
-        <div style={{ textAlign: "right", minWidth: 160 }}>
-          <div style={{ fontWeight: 900, fontSize: "1.05rem" }}>{total.toLocaleString("es-AR")}</div>
-          <div style={{ opacity: 0.7, fontSize: 12 }}>Total (según qty)</div>
-        </div>
-      </div>
-
-      <div
-        style={{
-          marginTop: "1rem",
-          display: "grid",
-          gridTemplateColumns: "minmax(0, 1fr)",
-          gap: "1rem",
-        }}
-      >
-        {/* TOP PAISES */}
+      ) : (
         <div
           style={{
-            border: "1px solid rgba(0,0,0,.08)",
-            borderRadius: 18,
-            padding: "1rem",
-            overflow: "hidden",
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+            gap: 14,
+            alignItems: "start",
           }}
         >
-          <div style={{ fontWeight: 950, marginBottom: ".65rem" }}>Top países</div>
+          {/* Países (grande) */}
+          <div style={{ border: "1px solid rgba(255,255,255,.10)", borderRadius: 18, padding: "1rem", background: "rgba(255,255,255,.03)" }}>
+            <div style={{ fontWeight: 950, marginBottom: 10 }}>Ranking por país</div>
 
-          <div style={{ display: "grid", gap: ".5rem" }}>
-            {topCountries.map((it) => {
-              const pct = total > 0 ? (it.value / total) * 100 : 0;
-              const iso2 = countryToISO2(it.country);
-              const flag = iso2 ? iso2ToFlagEmoji(iso2) : "";
-              return (
-                <div key={it.country} style={{ display: "grid", gridTemplateColumns: "1fr 80px", gap: ".75rem" }}>
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: ".5rem" }}>
-                      <div style={{ width: 26, textAlign: "center" }}>{flag}</div>
-                      <div style={{ fontWeight: 800, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                        {it.country}
+            <div style={{ display: "grid", gap: 10 }}>
+              {topCountries.map((it, idx) => {
+                const p = total ? (it.v / total) * 100 : 0;
+                return (
+                  <div
+                    key={it.k}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "44px 1fr auto",
+                      gap: 10,
+                      alignItems: "center",
+                      padding: ".65rem .7rem",
+                      borderRadius: 16,
+                      background: "rgba(255,255,255,.04)",
+                      border: "1px solid rgba(255,255,255,.08)",
+                    }}
+                  >
+                    <div style={{ fontSize: 22, textAlign: "center" }}>{flagForCountry(it.k)}</div>
+
+                    <div>
+                      <div style={{ fontWeight: 900 }}>{idx + 1}. {it.k}</div>
+                      <div style={{ height: 10, borderRadius: 999, background: "rgba(255,255,255,.08)", overflow: "hidden", marginTop: 6 }}>
+                        <div style={{ width: `${Math.min(100, p)}%`, height: "100%", borderRadius: 999, background: "linear-gradient(135deg,#06b6d4,#22c55e)" }} />
                       </div>
-                      <div style={{ opacity: 0.7, fontSize: 12 }}>{pct.toFixed(1)}%</div>
                     </div>
-                    <div
-                      style={{
-                        marginTop: ".25rem",
-                        height: 10,
-                        borderRadius: 999,
-                        background: "rgba(0,0,0,.06)",
-                        overflow: "hidden",
-                      }}
-                    >
-                      <div
-                        style={{
-                          width: `${Math.min(100, pct)}%`,
-                          height: "100%",
-                          borderRadius: 999,
-                          background: "linear-gradient(90deg, rgba(140,0,50,.85), rgba(255,140,0,.8))",
-                        }}
-                      />
-                    </div>
-                  </div>
 
-                  <div style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-                    <div style={{ fontWeight: 900 }}>{it.value.toLocaleString("es-AR")}</div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontWeight: 950, fontSize: 14 }}>{fmtInt(it.v)}</div>
+                      <div style={{ opacity: 0.8, fontSize: 12 }}>{p.toFixed(1)}%</div>
+                    </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Continente (más chico) */}
+          <div style={{ border: "1px solid rgba(255,255,255,.10)", borderRadius: 18, padding: "1rem", background: "rgba(255,255,255,.03)" }}>
+            <div style={{ fontWeight: 950, marginBottom: 10 }}>Distribución por continente</div>
+
+            <div style={{ display: "grid", gap: 10 }}>
+              {contList.slice(0, 8).map((it) => {
+                const p = total ? (it.v / total) * 100 : 0;
+                return (
+                  <div key={it.k} style={{ display: "grid", gap: 6 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                      <div style={{ fontWeight: 850 }}>{it.k}</div>
+                      <div style={{ fontWeight: 950 }}>{fmtInt(it.v)} · {p.toFixed(1)}%</div>
+                    </div>
+                    <div style={{ height: 10, borderRadius: 999, background: "rgba(255,255,255,.08)", overflow: "hidden" }}>
+                      <div style={{ width: `${Math.min(100, p)}%`, height: "100%", borderRadius: 999, background: "linear-gradient(135deg,#a855f7,#f97316)" }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
+              Total {year}: <strong>{fmtInt(total)}</strong>
+            </div>
           </div>
         </div>
-
-        {/* CONTINENTES */}
-        <div
-          style={{
-            border: "1px solid rgba(0,0,0,.08)",
-            borderRadius: 18,
-            padding: "1rem",
-          }}
-        >
-          <div style={{ fontWeight: 950, marginBottom: ".65rem" }}>Continentes</div>
-
-          <div style={{ display: "grid", gap: ".45rem" }}>
-            {topContinents.map((it) => {
-              const pct = total > 0 ? (it.value / total) * 100 : 0;
-              return (
-                <div key={it.continent} style={{ display: "grid", gridTemplateColumns: "1fr 90px", gap: ".75rem" }}>
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: ".75rem" }}>
-                      <div style={{ fontWeight: 850, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                        {it.continent}
-                      </div>
-                      <div style={{ opacity: 0.75, fontSize: 12 }}>{pct.toFixed(1)}%</div>
-                    </div>
-                    <div
-                      style={{
-                        marginTop: ".25rem",
-                        height: 8,
-                        borderRadius: 999,
-                        background: "rgba(0,0,0,.06)",
-                        overflow: "hidden",
-                      }}
-                    >
-                      <div
-                        style={{
-                          width: `${Math.min(100, pct)}%`,
-                          height: "100%",
-                          borderRadius: 999,
-                          background: "linear-gradient(90deg, rgba(0,140,120,.85), rgba(0,100,255,.75))",
-                        }}
-                      />
-                    </div>
-                  </div>
-
-                  <div style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-                    <div style={{ fontWeight: 900 }}>{it.value.toLocaleString("es-AR")}</div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          <div style={{ marginTop: ".85rem", opacity: 0.7, fontSize: 12 }}>
-            Archivo: <code>{filePath}</code>
-          </div>
-        </div>
-      </div>
+      )}
     </div>
   );
 }
