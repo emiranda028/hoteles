@@ -1,100 +1,169 @@
-"use client";
-
-/**
- * Lector CSV robusto (sin libs extra)
- * - Soporta separador , o ;
- * - Soporta comillas
- * - Devuelve { rows, headers }
- * - Evita que tengas que hacer then(({rows})...) y rompa tipos.
- */
-
+// app/components/csvClient.ts
 export type CsvRow = Record<string, string>;
 
-export type CsvReadResult = {
-  rows: CsvRow[];
-  headers: string[];
-  text: string;
-};
-
-function splitCsvLine(line: string, delimiter: string): string[] {
-  const out: string[] = [];
-  let cur = "";
+function parseCsvText(text: string): { columns: string[]; rows: CsvRow[] } {
+  // CSV parser robusto (maneja comillas, comas dentro de valores, CRLF, etc.)
+  const rows: string[][] = [];
+  let cur: string[] = [];
+  let field = "";
   let inQuotes = false;
 
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
+  const pushField = () => {
+    cur.push(field);
+    field = "";
+  };
+  const pushRow = () => {
+    // Evitar filas vacías completas
+    const allEmpty = cur.every((x) => (x ?? "").trim() === "");
+    if (!allEmpty) rows.push(cur);
+    cur = [];
+  };
 
-    if (ch === '"') {
-      // doble comilla escape
-      if (inQuotes && line[i + 1] === '"') {
-        cur += '"';
-        i++;
+  // Normalizar newlines
+  const s = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+
+    if (inQuotes) {
+      if (ch === '"') {
+        // "" dentro de comillas => "
+        const next = s[i + 1];
+        if (next === '"') {
+          field += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
       } else {
-        inQuotes = !inQuotes;
+        field += ch;
       }
-      continue;
+    } else {
+      if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === ",") {
+        pushField();
+      } else if (ch === "\n") {
+        pushField();
+        pushRow();
+      } else {
+        field += ch;
+      }
     }
-
-    if (!inQuotes && ch === delimiter) {
-      out.push(cur);
-      cur = "";
-      continue;
-    }
-
-    cur += ch;
   }
 
-  out.push(cur);
-  return out.map((s) => s.trim());
-}
+  // flush final
+  pushField();
+  pushRow();
 
-function detectDelimiter(lines: string[]): string {
-  // Mira primeras líneas con contenido
-  const sample = lines.slice(0, 10).filter((l) => l.trim().length > 0);
-  if (sample.length === 0) return ",";
+  if (rows.length === 0) return { columns: [], rows: [] };
 
-  let commaScore = 0;
-  let semiScore = 0;
+  const rawColumns = rows[0].map((h) => (h ?? "").trim());
+  const columns = rawColumns.map((c, idx) => (c && c.length ? c : `col_${idx}`));
 
-  for (const l of sample) {
-    commaScore += (l.match(/,/g) || []).length;
-    semiScore += (l.match(/;/g) || []).length;
+  const outRows: CsvRow[] = [];
+  for (let r = 1; r < rows.length; r++) {
+    const arr = rows[r];
+    const obj: CsvRow = {};
+    for (let c = 0; c < columns.length; c++) {
+      obj[columns[c]] = (arr[c] ?? "").trim();
+    }
+    outRows.push(obj);
   }
 
-  return semiScore > commaScore ? ";" : ",";
+  return { columns, rows: outRows };
 }
 
-function normalizeHeader(h: string): string {
-  // Conservamos header original, pero recortado (sin cambiarlo a lower)
-  return (h ?? "").replace(/\uFEFF/g, "").trim();
-}
-
-export async function readCsvFromPublic(path: string): Promise<CsvReadResult> {
-  if (!path) throw new Error("No se pudo cargar CSV: filePath vacío");
-
-  const res = await fetch(path);
-  if (!res.ok) throw new Error(`No se pudo cargar ${path} (status ${res.status})`);
-
+export async function readCsvFromPublic(filePath: string): Promise<{ columns: string[]; rows: CsvRow[] }> {
+  const res = await fetch(filePath, { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error(`No se pudo leer CSV: ${filePath} (${res.status})`);
+  }
   const text = await res.text();
-  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  if (lines.length === 0) return { rows: [], headers: [], text };
+  return parseCsvText(text);
+}
 
-  const delimiter = detectDelimiter(lines);
+// Helpers numéricos (para H&F)
+export function toNumberSmart(v: unknown): number {
+  if (v == null) return NaN;
+  const s0 = String(v).trim();
+  if (!s0) return NaN;
 
-  const rawHeaders = splitCsvLine(lines[0], delimiter).map(normalizeHeader);
-  const headers = rawHeaders.filter((h) => h.length > 0);
+  // quitar % y espacios
+  const s1 = s0.replace(/\s+/g, "").replace(/%/g, "");
 
-  const rows: CsvRow[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitCsvLine(lines[i], delimiter);
-    if (cols.every((c) => c.trim() === "")) continue;
+  // Si viene como "22,441.71" (USA) o "22.441,71" (EU)
+  const hasComma = s1.includes(",");
+  const hasDot = s1.includes(".");
 
-    const row: CsvRow = {};
-    for (let j = 0; j < headers.length; j++) {
-      row[headers[j]] = (cols[j] ?? "").trim();
+  if (hasComma && hasDot) {
+    // Decidir decimal por último separador
+    const lastComma = s1.lastIndexOf(",");
+    const lastDot = s1.lastIndexOf(".");
+    if (lastDot > lastComma) {
+      // 22,441.71 => sacar comas miles
+      return Number(s1.replace(/,/g, ""));
+    } else {
+      // 22.441,71 => sacar puntos miles, coma decimal
+      return Number(s1.replace(/\./g, "").replace(",", "."));
     }
-    rows.push(row);
   }
 
-  return { rows, headers, text };
+  if (hasComma && !hasDot) {
+    // podría ser decimal coma
+    // pero si hay más de una coma, asumimos miles
+    const commas = (s1.match(/,/g) || []).length;
+    if (commas > 1) return Number(s1.replace(/,/g, ""));
+    return Number(s1.replace(",", "."));
+  }
+
+  // solo dot
+  return Number(s1);
+}
+
+export function toPercent01(v: unknown): number {
+  const n = toNumberSmart(v);
+  if (!isFinite(n)) return NaN;
+  // Si venía como 59.40 (ya sin %), lo interpretamos como %
+  return n > 1 ? n / 100 : n;
+}
+
+export function safeDiv(a: number, b: number): number {
+  if (!isFinite(a) || !isFinite(b) || b === 0) return NaN;
+  return a / b;
+}
+
+export function formatInt(n: number): string {
+  if (!isFinite(n)) return "—";
+  return Math.round(n).toLocaleString("es-AR");
+}
+
+export function formatMoney(n: number): string {
+  if (!isFinite(n)) return "—";
+  return n.toLocaleString("es-AR", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+}
+
+export function formatPct(n01: number): string {
+  if (!isFinite(n01)) return "—";
+  return `${(n01 * 100).toFixed(1)}%`;
+}
+
+export function monthKeyFromFecha(fecha: string): string {
+  // Espera dd/mm/yyyy o d/m/yyyy o yyyy-mm-dd
+  const s = (fecha || "").trim();
+  if (!s) return "";
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 7);
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m) return "";
+  const mm = String(m[2]).padStart(2, "0");
+  return `${m[3]}-${mm}`;
+}
+
+export function yearFromFecha(fecha: string): number | null {
+  const s = (fecha || "").trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return Number(s.slice(0, 4));
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m) return Number(m[3]);
+  return null;
 }
