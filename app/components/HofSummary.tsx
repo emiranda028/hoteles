@@ -1,377 +1,346 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { readCsvFromPublic } from "./csvClient";
+import React, { useEffect, useMemo, useState } from "react";
+import { readCsvFromPublic, CsvRow } from "./csvClient";
+import type { HofHotel } from "./HofExplorer";
 
-type HofRow = {
-  empresa: string;
-  fecha: string;
+type Props = {
+  filePath: string;
   year: number;
-  month: number; // 1-12
-  occupied: number; // Total Occ.
-  revenue: number;  // Room Revenue
-  guests: number;   // Adl. & Chl.
+  baseYear: number;
+  hotel: HofHotel;
 };
 
-const AVAIL_PER_DAY: Record<string, number> = {
-  MARRIOTT: 300,
-  "SHERATON MDQ": 194,
-  "SHERATON BCR": 161,
+type Hf = {
+  empresa: string;
+  year: number;
+  month: number;
+  totalRooms: number;
+  occ: number;
+  inHouse: number;
+  adrWsum: number;
+  adrW: number;
+  roomRevenue: number;
+  totalRevenue: number;
 };
 
-const MONTHS = [
-  "Enero","Febrero","Marzo","Abril","Mayo","Junio",
-  "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre",
-];
+const MONTHS = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
 
-function toNumberIntl(x: any) {
-  // "22.441,71" -> 22441.71, "59,40%" -> 59.40
-  if (x === null || x === undefined) return 0;
-  const s = String(x).trim();
+function norm(s: any) {
+  return String(s ?? "")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function parseNumber(v: any): number {
+  const s = norm(v);
   if (!s) return 0;
-
-  const noPct = s.replace("%", "").trim();
-  const normalized = noPct.replace(/\./g, "").replace(",", ".");
-  const n = Number(normalized);
+  const cleaned = s.replace(/\./g, "").replace(/,/g, ".").replace(/[^\d.-]/g, "");
+  const n = parseFloat(cleaned);
   return Number.isFinite(n) ? n : 0;
 }
 
-function clampMonth(m: number) {
-  if (!Number.isFinite(m)) return 0;
-  if (m < 1 || m > 12) return 0;
-  return m;
+function parseDateFlexible(v: any): Date | null {
+  const s = norm(v);
+  if (!s) return null;
+
+  const d1 = new Date(s);
+  if (!isNaN(d1.getTime())) return d1;
+
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) {
+    const dd = parseInt(m[1], 10);
+    const mm = parseInt(m[2], 10);
+    const yy = parseInt(m[3].length === 2 ? "20" + m[3] : m[3], 10);
+    const d = new Date(yy, mm - 1, dd);
+    if (!isNaN(d.getTime())) return d;
+  }
+
+  const n = parseInt(s, 10);
+  if (Number.isFinite(n) && n > 20000 && n < 90000) {
+    const base = new Date(Date.UTC(1899, 11, 30));
+    base.setUTCDate(base.getUTCDate() + n);
+    return new Date(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate());
+  }
+
+  return null;
 }
 
-function parseYearMonthFromFecha(fecha: any) {
-  // Soporta "1/6/2022" (dd/mm/yyyy) y "6/1/2022" (mm/dd/yyyy) y también con "-"
-  const s = String(fecha ?? "").trim();
-  if (!s) return { year: 0, month: 0 };
-
-  const parts = s.split(/[\/\-]/).map((p) => p.trim());
-  if (parts.length < 3) return { year: 0, month: 0 };
-
-  const a = Number(parts[0]); // puede ser día o mes
-  const b = Number(parts[1]); // puede ser mes o día
-  const y = Number(parts[2]);
-
-  const year = Number.isFinite(y) ? y : 0;
-
-  // Heurística robusta:
-  // - si a > 12 => a es día, b es mes
-  // - si b > 12 => b es día, a es mes
-  // - si ambos <= 12 (ambiguo), preferimos b como mes (formato típico AR: dd/mm/yyyy)
-  let month = 0;
-  if (a > 12 && b >= 1 && b <= 12) month = b;
-  else if (b > 12 && a >= 1 && a <= 12) month = a;
-  else month = b;
-
-  return { year, month: clampMonth(month) };
+function getField(row: CsvRow, wanted: string[]): string {
+  for (let i = 0; i < wanted.length; i++) {
+    const k = wanted[i];
+    if (k in row) return row[k] || "";
+  }
+  return "";
 }
 
-function fmtMoney(n: number) {
-  // “as-is” (no asumimos IVA ni conversión)
-  return Math.round(n).toLocaleString("es-AR");
-}
-function fmtPct01(p01: number) {
-  return (p01 * 100).toFixed(1).replace(".", ",") + "%";
+function normalizeEmpresa(e: string): string {
+  const up = norm(e).toUpperCase();
+  if (!up) return "";
+  if (up.includes("MARRIOTT")) return "MARRIOTT";
+  if (up.includes("SHERATON") && (up.includes("BCR") || up.includes("BUENOS"))) return "SHERATON BCR";
+  if (up.includes("SHERATON") && (up.includes("MDQ") || up.includes("MAR DEL") || up.includes("MDP"))) return "SHERATON MDQ";
+  if (up.includes("MAITEI") || up.includes("GOTEL") || up.includes("POSADAS")) return "MAITEI";
+  if (up === "SHERATON BCR" || up === "SHERATON MDQ" || up === "MARRIOTT" || up === "MAITEI") return up;
+  return up;
 }
 
-export default function HofSummary({
-  year,
-  baseYear = 2024,
-  filePath = "/data/hf_diario.csv",
-  empresa = "MARRIOTT",
-}: {
-  year: number;
-  baseYear?: number;
-  filePath?: string;
-  empresa?: "MARRIOTT" | "SHERATON MDQ" | "SHERATON BCR";
-}) {
-  const [rows, setRows] = useState<HofRow[]>([]);
+function expandHotel(h: HofHotel): string[] {
+  if (h === "JCR") return ["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"];
+  return [h];
+}
+
+function safeDiv(a: number, b: number) {
+  if (!b) return 0;
+  const x = a / b;
+  return Number.isFinite(x) ? x : 0;
+}
+
+export default function HofSummary({ filePath, year, baseYear, hotel }: Props) {
+  const [rows, setRows] = useState<Hf[]>([]);
   const [loading, setLoading] = useState(true);
-  const avail = AVAIL_PER_DAY[empresa] ?? 0;
+  const [err, setErr] = useState("");
 
   useEffect(() => {
     let alive = true;
     setLoading(true);
+    setErr("");
 
     readCsvFromPublic(filePath)
-      .then(({ rows }) => {
+      .then((res) => {
         if (!alive) return;
 
-        const normalized: HofRow[] = rows
-          .map((r: any) => {
-            const emp = String(r["Empresa"] ?? r["empresa"] ?? "")
-              .trim()
-              .toUpperCase();
+        const raw = res.rows || [];
+        const out: Hf[] = [];
 
-            const fecha = r["Fecha"] ?? r["fecha"];
-            const { year: yy, month: mm } = parseYearMonthFromFecha(fecha);
+        for (let i = 0; i < raw.length; i++) {
+          const r = raw[i];
+          const empresa = normalizeEmpresa(getField(r, ["Empresa", "empresa", "Hotel", "hotel"]));
+          const dateStr = getField(r, ["Fecha", "fecha", "Date", "date", "Día", "Dia"]);
+          const fecha = parseDateFlexible(dateStr);
+          if (!empresa || !fecha) continue;
 
-            const occupied = toNumberIntl(
-              r["Total Occ."] ??
-              r["Total Occ"] ??
-              r["Total\nOcc."] ??
-              r["Total Occ "] ??
-              r["Total Occ. "] ??
-              r["Total Occ.\u00A0"]
-            );
+          const y = fecha.getFullYear();
+          const m = fecha.getMonth() + 1;
 
-            const revenue = toNumberIntl(
-              r["Room Revenue"] ??
-              r["RoomRevenue"] ??
-              r["Room Revenue "] ??
-              r["Room Revenue\u00A0"]
-            );
+          const totalRooms = parseNumber(getField(r, ["Total Rooms in Hotel", "Total Rooms", "TotalRooms"]));
+          const occ = parseNumber(getField(r, ["Rooms Occupied minus House Use", "Rooms Occ minus HU", "Occupied Rooms"]));
+          const inHouse = parseNumber(getField(r, ["Total In-House Persons", "In-House", "InHousePersons"]));
 
-            const guests = toNumberIntl(
-              r["Adl. & Chl."] ??
-              r["Adl. & Chl"] ??
-              r["Adl. &\nChl."] ??
-              r["Adl. & Chl. "] ??
-              r["Adl. & Chl.\u00A0"]
-            );
+          const adr = parseNumber(getField(r, ["ADR", "Average Rate", "AverageRate"]));
+          const roomRevenue = parseNumber(getField(r, ["Room Revenue", "RoomRevenue"]));
+          const totalRevenue = parseNumber(getField(r, ["Ventas Totales", "Total Revenue", "TotalRevenue", "Total Sales"]));
 
-            return {
-              empresa: emp,
-              fecha: String(fecha ?? "").trim(),
-              year: yy,
-              month: mm,
-              occupied,
-              revenue,
-              guests,
-            };
-          })
-          .filter((x) => x.empresa && x.year && x.month); // month ya viene 1..12
+          out.push({
+            empresa,
+            year: y,
+            month: m,
+            totalRooms,
+            occ,
+            inHouse,
+            adrWsum: adr * (occ || 0),
+            adrW: occ || 0,
+            roomRevenue,
+            totalRevenue,
+          });
+        }
 
-        setRows(normalized);
+        setRows(out);
+        setLoading(false);
       })
-      .catch(() => setRows([]))
-      .finally(() => setLoading(false));
+      .catch((e) => {
+        if (!alive) return;
+        setErr(e?.message || "Error leyendo CSV");
+        setRows([]);
+        setLoading(false);
+      });
 
     return () => {
       alive = false;
     };
   }, [filePath]);
 
-  const availableYears = useMemo(() => {
-    return Array.from(new Set(rows.filter(r => r.empresa === empresa).map(r => r.year))).sort((a,b)=>a-b);
-  }, [rows, empresa]);
+  const allowed = useMemo(() => expandHotel(hotel), [hotel]);
 
-  const rowsY = useMemo(() => rows.filter(r => r.empresa === empresa && r.year === year), [rows, empresa, year]);
-  const rowsBase = useMemo(() => rows.filter(r => r.empresa === empresa && r.year === baseYear), [rows, empresa, baseYear]);
+  const agg = useMemo(() => {
+    const build = (yy: number) => {
+      const byM: Record<number, Hf> = {};
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        if (r.year !== yy) continue;
+        if (allowed.indexOf(r.empresa) === -1) continue;
 
-  const annual = useMemo(() => {
-    const days = rowsY.length;
-    const occRooms = rowsY.reduce((s, r) => s + r.occupied, 0);
-    const rev = rowsY.reduce((s, r) => s + r.revenue, 0);
-    const guests = rowsY.reduce((s, r) => s + r.guests, 0);
+        const key = r.month;
+        if (!byM[key]) {
+          byM[key] = {
+            empresa: "—",
+            year: yy,
+            month: key,
+            totalRooms: 0,
+            occ: 0,
+            inHouse: 0,
+            adrWsum: 0,
+            adrW: 0,
+            roomRevenue: 0,
+            totalRevenue: 0,
+          };
+        }
+        byM[key].totalRooms += r.totalRooms || 0;
+        byM[key].occ += r.occ || 0;
+        byM[key].inHouse += r.inHouse || 0;
+        byM[key].adrWsum += r.adrWsum || 0;
+        byM[key].adrW += r.adrW || 0;
+        byM[key].roomRevenue += r.roomRevenue || 0;
+        byM[key].totalRevenue += r.totalRevenue || 0;
+      }
 
-    const availRooms = avail > 0 ? days * avail : 0;
-    const occ01 = availRooms > 0 ? occRooms / availRooms : 0;
-    const adr = occRooms > 0 ? rev / occRooms : 0;
+      const list: (Hf & { occRate: number; adr: number; dblOcc: number; revpar: number })[] = [];
+      for (let m = 1; m <= 12; m++) {
+        const x = byM[m];
+        if (!x) continue;
+        const adr = safeDiv(x.adrWsum, x.adrW);
+        const occRate = safeDiv(x.occ, x.totalRooms);
+        const dblOcc = safeDiv(x.inHouse, x.occ);
+        const revpar = adr * dblOcc;
+        list.push({ ...x, adr, occRate, dblOcc, revpar });
+      }
+      return list;
+    };
 
-    return { days, occRooms, availRooms, occ01, rev, guests, adr };
-  }, [rowsY, avail]);
+    return {
+      cur: build(year),
+      base: build(baseYear),
+    };
+  }, [rows, allowed, year, baseYear]);
 
-  const annualBase = useMemo(() => {
-    const days = rowsBase.length;
-    const occRooms = rowsBase.reduce((s, r) => s + r.occupied, 0);
-    const rev = rowsBase.reduce((s, r) => s + r.revenue, 0);
-    const availRooms = avail > 0 ? days * avail : 0;
-    const occ01 = availRooms > 0 ? occRooms / availRooms : 0;
-    return { days, occRooms, availRooms, occ01, rev };
-  }, [rowsBase, avail]);
+  const kpi = useMemo(() => {
+    const sum = (list: any[]) => {
+      let totalRooms = 0,
+        occ = 0,
+        inHouse = 0,
+        adrWsum = 0,
+        adrW = 0,
+        roomRevenue = 0,
+        totalRevenue = 0;
 
-  // ✅ 12 meses fijos (Ene–Dic)
-  const monthly12 = useMemo(() => {
-    const buckets = new Map<number, { days: number; occRooms: number; rev: number; guests: number }>();
+      for (let i = 0; i < list.length; i++) {
+        const r = list[i];
+        totalRooms += r.totalRooms || 0;
+        occ += r.occ || 0;
+        inHouse += r.inHouse || 0;
+        adrWsum += (r.adr || 0) * (r.occ || 0);
+        adrW += r.occ || 0;
+        roomRevenue += r.roomRevenue || 0;
+        totalRevenue += r.totalRevenue || 0;
+      }
 
-    rowsY.forEach((r) => {
-      const prev = buckets.get(r.month) ?? { days: 0, occRooms: 0, rev: 0, guests: 0 };
-      prev.days += 1;
-      prev.occRooms += r.occupied;
-      prev.rev += r.revenue;
-      prev.guests += r.guests;
-      buckets.set(r.month, prev);
-    });
+      const adr = safeDiv(adrWsum, adrW);
+      const occRate = safeDiv(occ, totalRooms);
+      const dblOcc = safeDiv(inHouse, occ);
+      const revpar = adr * dblOcc;
 
-    const out = [];
-    for (let m = 1; m <= 12; m++) {
-      const b = buckets.get(m) ?? { days: 0, occRooms: 0, rev: 0, guests: 0 };
-      const availRooms = b.days * avail;
-      const occ01 = availRooms > 0 ? b.occRooms / availRooms : 0;
-      const adr = b.occRooms > 0 ? b.rev / b.occRooms : 0;
+      return { totalRooms, occ, inHouse, adr, occRate, dblOcc, revpar, roomRevenue, totalRevenue };
+    };
 
-      out.push({
-        month: m,
-        monthName: MONTHS[m - 1],
-        days: b.days,
-        occRooms: b.occRooms,
-        rev: b.rev,
-        guests: b.guests,
-        availRooms,
-        occ01,
-        adr,
-      });
-    }
-    return out;
-  }, [rowsY, avail]);
+    return { cur: sum(agg.cur), base: sum(agg.base) };
+  }, [agg]);
 
-  const monthlyRanking = useMemo(() => {
-    return [...monthly12].sort((a, b) => {
-      if (b.occ01 !== a.occ01) return b.occ01 - a.occ01;
-      return b.rev - a.rev;
-    });
-  }, [monthly12]);
+  if (loading) return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Cargando comparativa…</div>;
+  if (err) return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}><b>Error:</b> {err}</div>;
 
-  const occDeltaPP = (annual.occ01 - annualBase.occ01) * 100;
-  const revDeltaPct = annualBase.rev > 0 ? ((annual.rev / annualBase.rev) - 1) * 100 : 0;
-
-  if (loading) {
-    return (
-      <div className="card">
-        <div className="cardTop">
-          <div>
-            <div className="cardTitle">H&F – {empresa}</div>
-            <div className="cardNote">Cargando CSV…</div>
-          </div>
-        </div>
-      </div>
-    );
+  if (!agg.cur.length) {
+    return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Sin datos para {hotel} en {year}.</div>;
   }
 
-  if (!rowsY.length) {
-    return (
-      <div className="card">
-        <div className="cardTop">
-          <div>
-            <div className="cardTitle">H&F – {empresa}</div>
-            <div className="cardNote">
-              Sin datos para {year}. Años disponibles: {availableYears.length ? availableYears.join(", ") : "—"}
-            </div>
-          </div>
-        </div>
-        <div className="cardNote">
-          Filas {year}: 0 · Filas {baseYear}: {rowsBase.length}
-        </div>
-      </div>
-    );
-  }
+  const delta = (a: number, b: number) => (b ? ((a - b) / b) * 100 : 0);
 
   return (
-    <div className="card" style={{ gridColumn: "span 1" }}>
-      <div className="cardTop">
-        <div>
-          <div className="cardTitle">H&F – {empresa}</div>
-          <div className="cardNote">
-            Ocupación con disponibilidad fija: {avail}/día · Revenue “as-is” (puede incluir IVA)
-          </div>
-        </div>
-      </div>
-
-      <div className="kpiGrid" style={{ marginTop: ".6rem" }}>
-        <div className="kpi">
-          <div className="kpiLabel">Ocupación promedio {year}</div>
-          <div className="kpiValue">{fmtPct01(annual.occ01)}</div>
-          <div className={`delta ${occDeltaPP >= 0 ? "up" : "down"}`}>
-            {occDeltaPP >= 0 ? "▲" : "▼"} {occDeltaPP >= 0 ? "+" : ""}
-            {occDeltaPP.toFixed(1).replace(".", ",")} p.p. vs {baseYear}
-          </div>
-        </div>
-
-        <div className="kpi">
-          <div className="kpiLabel">Room Revenue {year}</div>
-          <div className="kpiValue">{fmtMoney(annual.rev)}</div>
-          <div className={`delta ${revDeltaPct >= 0 ? "up" : "down"}`}>
-            {revDeltaPct >= 0 ? "▲" : "▼"} {revDeltaPct >= 0 ? "+" : ""}
-            {revDeltaPct.toFixed(1).replace(".", ",")}% vs {baseYear}
-          </div>
-        </div>
-
-        <div className="kpi">
-          <div className="kpiLabel">Rooms ocupadas {year}</div>
-          <div className="kpiValue">{annual.occRooms.toLocaleString("es-AR")}</div>
-          <div className="kpiCap">{annual.days} días leídos (CSV)</div>
-        </div>
-
-        <div className="kpi">
-          <div className="kpiLabel">ADR estimado {year}</div>
-          <div className="kpiValue">{Math.round(annual.adr).toLocaleString("es-AR")}</div>
-          <div className="kpiCap">Revenue / Rooms ocupadas</div>
-        </div>
-      </div>
-
-      {/* ✅ Detalle mensual SOLO 12 meses + Ranking */}
-      <div style={{ marginTop: "1rem", display: "grid", gridTemplateColumns: "minmax(0,1fr)", gap: ".9rem" }}>
-        <div style={{ overflowX: "auto" }}>
-          <div className="sectionHeader" style={{ marginTop: ".25rem" }}>
-            <div>
-              <div className="sectionKicker">Detalle</div>
-              <div className="sectionTitle">Mensual (12 meses)</div>
+    <div style={{ display: "grid", gap: "1rem" }}>
+      {/* KPIs */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
+          gap: ".75rem",
+        }}
+      >
+        {[
+          { label: "Ocupación", v: kpi.cur.occRate * 100, b: kpi.base.occRate * 100, fmt: (x: number) => `${x.toFixed(1)}%` },
+          { label: "ADR", v: kpi.cur.adr, b: kpi.base.adr, fmt: (x: number) => x.toFixed(2) },
+          { label: "Doble ocup.", v: kpi.cur.dblOcc, b: kpi.base.dblOcc, fmt: (x: number) => x.toFixed(2) },
+          { label: "REVPar", v: kpi.cur.revpar, b: kpi.base.revpar, fmt: (x: number) => x.toFixed(2) },
+          { label: "Room Revenue", v: kpi.cur.roomRevenue, b: kpi.base.roomRevenue, fmt: (x: number) => x.toFixed(0) },
+          { label: "Ventas Totales", v: kpi.cur.totalRevenue, b: kpi.base.totalRevenue, fmt: (x: number) => x.toFixed(0) },
+        ].map((k) => {
+          const d = delta(k.v, k.b);
+          const ok = Number.isFinite(d);
+          return (
+            <div
+              key={k.label}
+              className="card"
+              style={{
+                padding: ".9rem",
+                borderRadius: 18,
+                background: "linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0.05))",
+                border: "1px solid rgba(255,255,255,0.10)",
+              }}
+            >
+              <div style={{ opacity: 0.85, fontWeight: 850 }}>{k.label}</div>
+              <div style={{ fontSize: "1.35rem", fontWeight: 950, marginTop: ".15rem" }}>{k.fmt(k.v)}</div>
+              <div style={{ marginTop: ".25rem", opacity: 0.9 }}>
+                vs {baseYear}:{" "}
+                <b style={{ color: ok && d >= 0 ? "#A7F3D0" : "#FECACA" }}>{ok ? `${d >= 0 ? "+" : ""}${d.toFixed(1)}%` : "—"}</b>
+              </div>
             </div>
-          </div>
+          );
+        })}
+      </div>
 
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: ".9rem" }}>
+      {/* Tabla comparativa mensual */}
+      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
+        <div style={{ fontWeight: 950 }}>
+          Comparativa mensual — {hotel} — {year} vs {baseYear}
+        </div>
+
+        <div style={{ marginTop: ".85rem", overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 980 }}>
             <thead>
-              <tr style={{ color: "var(--muted)", textAlign: "left" }}>
-                <th style={{ padding: ".5rem .25rem" }}>Mes</th>
-                <th style={{ padding: ".5rem .25rem" }}>Ocupación</th>
-                <th style={{ padding: ".5rem .25rem" }}>Rooms</th>
-                <th style={{ padding: ".5rem .25rem" }}>Revenue</th>
-                <th style={{ padding: ".5rem .25rem" }}>ADR</th>
+              <tr style={{ textAlign: "left", opacity: 0.9 }}>
+                <th style={{ padding: ".5rem .4rem" }}>Mes</th>
+                <th style={{ padding: ".5rem .4rem" }}>Occ {year}</th>
+                <th style={{ padding: ".5rem .4rem" }}>Occ {baseYear}</th>
+                <th style={{ padding: ".5rem .4rem" }}>ADR {year}</th>
+                <th style={{ padding: ".5rem .4rem" }}>ADR {baseYear}</th>
+                <th style={{ padding: ".5rem .4rem" }}>REVPar {year}</th>
+                <th style={{ padding: ".5rem .4rem" }}>REVPar {baseYear}</th>
+                <th style={{ padding: ".5rem .4rem" }}>Ventas {year}</th>
+                <th style={{ padding: ".5rem .4rem" }}>Ventas {baseYear}</th>
               </tr>
             </thead>
             <tbody>
-              {monthly12.map((m) => (
-                <tr key={m.month} style={{ borderTop: "1px solid var(--border)" }}>
-                  <td style={{ padding: ".55rem .25rem", fontWeight: 700 }}>{m.monthName}</td>
-                  <td style={{ padding: ".55rem .25rem" }}>{fmtPct01(m.occ01)}</td>
-                  <td style={{ padding: ".55rem .25rem" }}>{m.occRooms.toLocaleString("es-AR")}</td>
-                  <td style={{ padding: ".55rem .25rem" }}>{fmtMoney(m.rev)}</td>
-                  <td style={{ padding: ".55rem .25rem" }}>{Math.round(m.adr).toLocaleString("es-AR")}</td>
-                </tr>
-              ))}
+              {agg.cur.map((c) => {
+                const b = agg.base.find((x) => x.month === c.month);
+                const bOcc = b ? b.occRate : 0;
+                const bAdr = b ? b.adr : 0;
+                const bRev = b ? b.revpar : 0;
+                const bTot = b ? b.totalRevenue : 0;
+
+                return (
+                  <tr key={c.month} style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+                    <td style={{ padding: ".55rem .4rem", fontWeight: 900 }}>{MONTHS[c.month - 1]}</td>
+                    <td style={{ padding: ".55rem .4rem" }}>{(c.occRate * 100).toFixed(1)}%</td>
+                    <td style={{ padding: ".55rem .4rem" }}>{(bOcc * 100).toFixed(1)}%</td>
+                    <td style={{ padding: ".55rem .4rem" }}>{c.adr.toFixed(2)}</td>
+                    <td style={{ padding: ".55rem .4rem" }}>{bAdr ? bAdr.toFixed(2) : "—"}</td>
+                    <td style={{ padding: ".55rem .4rem" }}>{c.revpar.toFixed(2)}</td>
+                    <td style={{ padding: ".55rem .4rem" }}>{bRev ? bRev.toFixed(2) : "—"}</td>
+                    <td style={{ padding: ".55rem .4rem" }}>{c.totalRevenue.toFixed(0)}</td>
+                    <td style={{ padding: ".55rem .4rem" }}>{bTot ? bTot.toFixed(0) : "—"}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
-        </div>
-
-        <div style={{ overflowX: "auto" }}>
-          <div className="sectionHeader" style={{ marginTop: ".25rem" }}>
-            <div>
-              <div className="sectionKicker">Ranking</div>
-              <div className="sectionTitle">Mejor mes → peor mes</div>
-            </div>
-          </div>
-
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: ".9rem" }}>
-            <thead>
-              <tr style={{ color: "var(--muted)", textAlign: "left" }}>
-                <th style={{ padding: ".5rem .25rem" }}>#</th>
-                <th style={{ padding: ".5rem .25rem" }}>Mes</th>
-                <th style={{ padding: ".5rem .25rem" }}>Ocupación</th>
-                <th style={{ padding: ".5rem .25rem" }}>Rooms</th>
-                <th style={{ padding: ".5rem .25rem" }}>Revenue</th>
-                <th style={{ padding: ".5rem .25rem" }}>ADR</th>
-              </tr>
-            </thead>
-            <tbody>
-              {monthlyRanking.map((m, i) => (
-                <tr key={m.month} style={{ borderTop: "1px solid var(--border)" }}>
-                  <td style={{ padding: ".55rem .25rem", fontWeight: 800 }}>{i + 1}</td>
-                  <td style={{ padding: ".55rem .25rem", fontWeight: 700 }}>{m.monthName}</td>
-                  <td style={{ padding: ".55rem .25rem" }}>{fmtPct01(m.occ01)}</td>
-                  <td style={{ padding: ".55rem .25rem" }}>{m.occRooms.toLocaleString("es-AR")}</td>
-                  <td style={{ padding: ".55rem .25rem" }}>{fmtMoney(m.rev)}</td>
-                  <td style={{ padding: ".55rem .25rem" }}>{Math.round(m.adr).toLocaleString("es-AR")}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          <div className="cardNote" style={{ marginTop: ".6rem" }}>
-            Ocupación mensual = Rooms / (días del mes leídos * disponibilidad fija). ADR = Revenue / Rooms.
-          </div>
         </div>
       </div>
     </div>
