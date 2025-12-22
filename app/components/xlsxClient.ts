@@ -1,45 +1,30 @@
-// app/components/xlsxClient.ts
+"use client";
+
 import * as XLSX from "xlsx";
 
 export type XlsxRow = Record<string, any>;
 
+/**
+ * Lee XLSX desde /public (ej: /data/jcr_membership.xlsx)
+ * Devuelve SIEMPRE: { sheetName, rows } y deja `sheet` como alias.
+ */
 export async function readXlsxFromPublic(
   filePath: string,
-  sheetName?: string
-): Promise<{ sheet: string; sheetName: string; rows: XlsxRow[] }> {
+  preferredSheetName?: string
+): Promise<{ sheetName: string; sheet: string; rows: XlsxRow[] }> {
   const res = await fetch(filePath, { cache: "no-store" });
   if (!res.ok) throw new Error(`No se pudo leer XLSX: ${filePath} (${res.status})`);
 
-  const buf = await res.arrayBuffer();
-  const wb = XLSX.read(buf, { type: "array" });
+  const ab = await res.arrayBuffer();
+  const wb = XLSX.read(ab, { type: "array" });
 
-  const chosen = sheetName && wb.SheetNames.includes(sheetName) ? sheetName : wb.SheetNames[0];
-  const ws = wb.Sheets[chosen];
+  const sheetName =
+    (preferredSheetName && wb.SheetNames.includes(preferredSheetName) && preferredSheetName) ||
+    wb.SheetNames[0] ||
+    "Sheet1";
 
-  const json: XlsxRow[] = XLSX.utils.sheet_to_json(ws, {
-    defval: "",
-    raw: false,
-  });
+  const ws = wb.Sheets[sheetName];
+  const rows = XLSX.utils.sheet_to_json<XlsxRow>(ws, { defval: "" });
 
-  // Devolvemos ambas propiedades para compatibilidad:
-  return { sheet: chosen, sheetName: chosen, rows: json };
-}
-
-export function normKey(s: string): string {
-  return (s || "")
-    .trim()
-    .toUpperCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
-}
-
-export function pickKey(keys: string[], candidates: string[]): string | null {
-  const nmap = new Map<string, string>();
-  for (const k of keys) nmap.set(normKey(k), k);
-
-  for (const cand of candidates) {
-    const hit = nmap.get(normKey(cand));
-    if (hit) return hit;
-  }
-  return null;
+  return { sheetName, sheet: sheetName, rows };
 }
