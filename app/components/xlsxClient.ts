@@ -2,7 +2,7 @@
 
 import * as XLSX from "xlsx";
 
-export type ReadResult = {
+export type ReadXlsxResult = {
   rows: any[];
   sheetName: string;
   sheetNames: string[];
@@ -17,25 +17,29 @@ function scoreRows(rows: any[]) {
   const hasEmpresa = keySet.has("empresa");
   const hasBonboy = keySet.has("bonboy");
   const hasCantidad = keySet.has("cantidad");
-  const hasFecha = keySet.has("fecha") || keySet.has("date") || keySet.has("año");
+  const hasFecha = keySet.has("fecha") || keySet.has("date");
+  const hasAno = keySet.has("año") || keySet.has("ano") || keySet.has("year");
+  const hasPais = keySet.has("país") || keySet.has("pais") || keySet.has("country");
+  const hasCont = keySet.has("continente") || keySet.has("continent");
 
   let score = keys.length;
-  if (hasEmpresa) score += 50;
-  if (hasBonboy) score += 25;
-  if (hasCantidad) score += 25;
-  if (hasFecha) score += 15;
+  if (hasEmpresa) score += 60;
+  if (hasBonboy) score += 35;
+  if (hasCantidad) score += 35;
+  if (hasFecha) score += 20;
+  if (hasAno) score += 25;
+  if (hasPais) score += 20;
+  if (hasCont) score += 15;
 
-  score += Math.min(rows.length, 200) / 10;
+  score += Math.min(rows.length, 400) / 10;
   return score;
 }
 
-export async function readXlsxFromPublic(path?: string): Promise<ReadResult> {
-  if (!path) throw new Error("No se pudo cargar: filePath está vacío/undefined");
+export async function readXlsxFromPublic(path: string): Promise<ReadXlsxResult> {
+  if (!path) throw new Error("No se pudo cargar XLSX: filePath vacío");
 
-  const res = await fetch(path, { cache: "no-store" });
-  if (!res.ok) {
-    throw new Error(`No se pudo cargar ${path} (status ${res.status})`);
-  }
+  const res = await fetch(path);
+  if (!res.ok) throw new Error(`No se pudo cargar ${path} (status ${res.status})`);
 
   const buffer = await res.arrayBuffer();
   const wb = XLSX.read(buffer, { type: "array" });
@@ -47,7 +51,8 @@ export async function readXlsxFromPublic(path?: string): Promise<ReadResult> {
   let bestRows: any[] = [];
   let bestScore = -1;
 
-  for (const name of sheetNames) {
+  for (let i = 0; i < sheetNames.length; i++) {
+    const name = sheetNames[i];
     const ws = wb.Sheets[name];
     if (!ws) continue;
 
