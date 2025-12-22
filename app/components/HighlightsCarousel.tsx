@@ -1,179 +1,118 @@
+// app/components/HighlightsCarousel.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { readCsvFromPublic } from "./csvClient";
+import { normalizeHofRows, readCsvFromPublic, HofNormalized } from "./csvClient";
 
 type Props = {
+  filePath: string;           // ej: "/data/hf_diario.csv"
   year: number;
-  hotelFilter: string; // "JCR" | "MARRIOTT" | "SHERATON BCR" | "SHERATON MDQ" | "MAITEI"
-  filePath: string; // "/data/hf_diario.csv"
+  hotelList: string[];        // lista de empresas que se suman en el bloque (ej JCR)
+  title: string;
+  variant?: "default" | "jcr" | "maitei" | "marriott" | "sheratons";
 };
 
-type HfRow = {
-  Empresa?: string;
-  HoF?: string;
-  Fecha?: string;
-  Date?: string;
-
-  ["Occ.%"]?: any;
-  ["Average Rate"]?: any;
-  ["Room Revenue"]?: any;
-  ["Adl. & Chl."]?: any;
-
-  // algunos CSV traen headers con espacios
-  ["Occ.% "]?: any;
-  ["Room Revenue "]?: any;
-  ["Average Rate "]?: any;
-};
-
-function toNumber(x: any) {
-  if (x === null || x === undefined) return 0;
-  const s = String(x).trim();
-  if (!s) return 0;
-  // 59,40% => 59.40
-  const pct = s.includes("%");
-  const cleaned = s
-    .replace(/\./g, "") // miles
-    .replace(",", ".")
-    .replace("%", "")
-    .replace(/[^\d.-]/g, "");
-  const n = Number(cleaned);
-  if (!Number.isFinite(n)) return 0;
-  return pct ? n : n;
+function fmtNumber(n: number | null | undefined, digits = 0) {
+  if (!Number.isFinite(Number(n))) return "—";
+  return Number(n).toLocaleString("es-AR", { maximumFractionDigits: digits, minimumFractionDigits: digits });
 }
 
-function parseDateAny(v: any): Date | null {
-  if (!v) return null;
-  const s = String(v).trim();
-  if (!s) return null;
-
-  // intenta dd/mm/yyyy
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (m) {
-    const dd = Number(m[1]);
-    const mm = Number(m[2]) - 1;
-    const yy = Number(m[3]);
-    const d = new Date(yy, mm, dd);
-    return Number.isFinite(d.getTime()) ? d : null;
-  }
-
-  // intenta yyyy-mm-dd
-  const m2 = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-  if (m2) {
-    const yy = Number(m2[1]);
-    const mm = Number(m2[2]) - 1;
-    const dd = Number(m2[3]);
-    const d = new Date(yy, mm, dd);
-    return Number.isFinite(d.getTime()) ? d : null;
-  }
-
-  const d3 = new Date(s);
-  return Number.isFinite(d3.getTime()) ? d3 : null;
+function fmtMoney(n: number | null | undefined) {
+  if (!Number.isFinite(Number(n))) return "—";
+  return Number(n).toLocaleString("es-AR", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 }
 
-function getYear(r: HfRow): number | null {
-  const d = parseDateAny(r.Fecha || r.Date);
-  return d ? d.getFullYear() : null;
+function clampPct(p: number) {
+  if (!Number.isFinite(p)) return p;
+  // Ojo: si por datos raros viene 3800, lo capea visualmente, pero igual te deja debug.
+  return Math.max(0, Math.min(100, p));
 }
 
-function isHistoryOrForecast(v: any) {
-  const s = String(v ?? "").toLowerCase();
-  return s.includes("history") || s.includes("forecast");
-}
-
-function formatMoneyARS(n: number) {
-  try {
-    return n.toLocaleString("es-AR", { maximumFractionDigits: 0 });
-  } catch {
-    return String(Math.round(n));
+function cardBg(variant: Props["variant"]) {
+  // Sin depender de libs, meto gradientes suaves
+  switch (variant) {
+    case "jcr":
+      return "linear-gradient(135deg, rgba(25,95,255,.18), rgba(130,30,255,.10))";
+    case "maitei":
+      return "linear-gradient(135deg, rgba(0,180,120,.18), rgba(0,140,255,.10))";
+    case "marriott":
+      return "linear-gradient(135deg, rgba(255,120,0,.18), rgba(255,0,120,.10))";
+    case "sheratons":
+      return "linear-gradient(135deg, rgba(120,80,255,.18), rgba(20,20,40,.08))";
+    default:
+      return "linear-gradient(135deg, rgba(255,255,255,.08), rgba(255,255,255,.04))";
   }
 }
 
-export default function HighlightsCarousel({ year, hotelFilter, filePath }: Props) {
-  const [rows, setRows] = useState<HfRow[]>([]);
+function filterRows(rows: HofNormalized[], year: number, hotels: string[]) {
+  const hotelSet = new Set(hotels.map((h) => String(h).trim().toUpperCase()));
+  return rows.filter((r) => {
+    const emp = String(r.empresa ?? "").trim().toUpperCase();
+    return r.year === year && hotelSet.has(emp);
+  });
+}
+
+export default function HighlightsCarousel({ filePath, year, hotelList, title, variant = "default" }: Props) {
+  const [rows, setRows] = useState<HofNormalized[]>([]);
   const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<string>("");
 
   useEffect(() => {
-    let alive = true;
+    let mounted = true;
     setLoading(true);
-    setErr(null);
-
+    setErr("");
     readCsvFromPublic(filePath)
-      .then((res) => {
-        if (!alive) return;
-        setRows((res.rows ?? []) as HfRow[]);
+      .then((raw) => normalizeHofRows(raw))
+      .then((norm) => {
+        if (!mounted) return;
+        setRows(norm);
+        setLoading(false);
       })
       .catch((e: any) => {
-        if (!alive) return;
-        setErr(e?.message ?? "Error leyendo CSV");
-      })
-      .finally(() => {
-        if (!alive) return;
+        if (!mounted) return;
+        setErr(String(e?.message ?? e));
         setLoading(false);
       });
-
     return () => {
-      alive = false;
+      mounted = false;
     };
   }, [filePath]);
 
-  const allowedHotels = useMemo(() => {
-    if (hotelFilter === "JCR") return ["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"];
-    return [hotelFilter];
-  }, [hotelFilter]);
-
-  const filtered = useMemo(() => {
-    return (rows ?? [])
-      .filter((r) => allowedHotels.includes(String(r.Empresa ?? "").trim()))
-      .filter((r) => isHistoryOrForecast(r.HoF))
-      .filter((r) => getYear(r) === year);
-  }, [rows, allowedHotels, year]);
+  const yearRows = useMemo(() => filterRows(rows, year, hotelList), [rows, year, hotelList]);
 
   const kpis = useMemo(() => {
-    // KPI diarios agregados (promedios / sumas)
-    let occSum = 0;
-    let occCount = 0;
-
-    let adrSum = 0;
-    let adrCount = 0;
-
-    let roomRevenue = 0;
-    let pax = 0;
-
-    for (const r of filtered) {
-      const occ = toNumber((r as any)["Occ.%"] ?? (r as any)["Occ.% "]);
-      if (occ > 0) {
-        occSum += occ;
-        occCount += 1;
-      }
-
-      const adr = toNumber((r as any)["Average Rate"] ?? (r as any)["Average Rate "]);
-      if (adr > 0) {
-        adrSum += adr;
-        adrCount += 1;
-      }
-
-      roomRevenue += toNumber((r as any)["Room Revenue"] ?? (r as any)["Room Revenue "]);
-      pax += toNumber((r as any)["Adl. & Chl."]);
+    if (yearRows.length === 0) {
+      return {
+        occAvg: null,
+        adrAvg: null,
+        revpar: null,
+        roomRevSum: null,
+        roomsOccSum: null,
+      };
     }
 
-    const occAvg = occCount ? occSum / occCount : 0;
-    const adrAvg = adrCount ? adrSum / adrCount : 0;
+    // Promedios "sanos"
+    const occValues = yearRows.map((r) => r.occPct).filter((v): v is number => Number.isFinite(v as number));
+    const adrValues = yearRows.map((r) => r.adr).filter((v): v is number => Number.isFinite(v as number));
+    const roomRevValues = yearRows.map((r) => r.roomRevenue).filter((v): v is number => Number.isFinite(v as number));
+    const roomsOccValues = yearRows.map((r) => r.roomsOcc).filter((v): v is number => Number.isFinite(v as number));
 
-    return {
-      rows: filtered.length,
-      occAvg,
-      adrAvg,
-      roomRevenue,
-      pax,
-    };
-  }, [filtered]);
+    const occAvg = occValues.length ? occValues.reduce((a, b) => a + b, 0) / occValues.length : null;
+    const adrAvg = adrValues.length ? adrValues.reduce((a, b) => a + b, 0) / adrValues.length : null;
+
+    const roomRevSum = roomRevValues.length ? roomRevValues.reduce((a, b) => a + b, 0) : null;
+    const roomsOccSum = roomsOccValues.length ? roomsOccValues.reduce((a, b) => a + b, 0) : null;
+
+    // RevPAR aproximado: ADR promedio * Ocupación promedio
+    const revpar = (adrAvg !== null && occAvg !== null) ? (adrAvg * occAvg) / 100 : null;
+
+    return { occAvg, adrAvg, revpar, roomRevSum, roomsOccSum };
+  }, [yearRows]);
 
   if (loading) {
     return (
       <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        Cargando highlights…
+        Cargando {title}…
       </div>
     );
   }
@@ -181,63 +120,66 @@ export default function HighlightsCarousel({ year, hotelFilter, filePath }: Prop
   if (err) {
     return (
       <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        Error: {err}
+        Error cargando {title}: {err}
       </div>
     );
   }
 
-  if (!filtered.length) {
+  if (!yearRows.length) {
     return (
       <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        Sin filas H&amp;F para el filtro actual.
+        Sin filas para {title} en {year}. (Archivo: {filePath})
       </div>
     );
   }
 
-  // Mini-cards estilo “carousel” horizontal, responsive con overflow
+  const cards = [
+    { label: "Ocupación (prom.)", value: kpis.occAvg !== null ? `${fmtNumber(clampPct(kpis.occAvg), 1)}%` : "—" },
+    { label: "ADR (prom.)", value: kpis.adrAvg !== null ? fmtMoney(kpis.adrAvg) : "—" },
+    { label: "RevPAR (aprox.)", value: kpis.revpar !== null ? fmtMoney(kpis.revpar) : "—" },
+    { label: "Room Revenue (sum)", value: kpis.roomRevSum !== null ? fmtMoney(kpis.roomRevSum) : "—" },
+    { label: "Rooms Occ (sum)", value: kpis.roomsOccSum !== null ? fmtNumber(kpis.roomsOccSum, 0) : "—" },
+  ];
+
   return (
-    <div
-      style={{
-        display: "grid",
-        gap: ".75rem",
-      }}
-    >
+    <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: ".75rem", flexWrap: "wrap" }}>
+        <div style={{ fontWeight: 950, fontSize: "1.05rem" }}>{title}</div>
+        <div style={{ opacity: 0.75, fontSize: ".9rem" }}>{yearRows.length} filas</div>
+      </div>
+
       <div
         style={{
+          marginTop: ".9rem",
           display: "flex",
           gap: ".75rem",
           overflowX: "auto",
           paddingBottom: ".25rem",
-          WebkitOverflowScrolling: "touch",
+          scrollSnapType: "x mandatory",
         }}
       >
-        <MiniKpi title="Filas" value={String(kpis.rows)} />
-        <MiniKpi title="Ocupación prom." value={`${kpis.occAvg.toFixed(1)}%`} />
-        <MiniKpi title="ADR prom." value={formatMoneyARS(kpis.adrAvg)} />
-        <MiniKpi title="Room Revenue" value={formatMoneyARS(kpis.roomRevenue)} />
-        <MiniKpi title="Pax (Adl+Chl)" value={formatMoneyARS(kpis.pax)} />
+        {cards.map((c) => (
+          <div
+            key={c.label}
+            style={{
+              minWidth: 220,
+              flex: "0 0 auto",
+              scrollSnapAlign: "start",
+              borderRadius: 18,
+              padding: ".9rem",
+              background: cardBg(variant),
+              border: "1px solid rgba(255,255,255,.10)",
+            }}
+          >
+            <div style={{ fontSize: ".85rem", opacity: 0.75 }}>{c.label}</div>
+            <div style={{ fontSize: "1.35rem", fontWeight: 950, marginTop: ".35rem" }}>{c.value}</div>
+          </div>
+        ))}
       </div>
 
-      <div style={{ fontSize: ".85rem", opacity: 0.8 }}>
-        Filtro: <b>{hotelFilter}</b> · Año: <b>{year}</b>
+      <div style={{ marginTop: ".6rem", fontSize: ".85rem", opacity: 0.7 }}>
+        *Ocupación/ADR como promedios; Room Revenue y Rooms Occ como sumas.
       </div>
-    </div>
-  );
-}
-
-function MiniKpi({ title, value }: { title: string; value: string }) {
-  return (
-    <div
-      className="card"
-      style={{
-        minWidth: 160,
-        padding: ".85rem",
-        borderRadius: 18,
-        flex: "0 0 auto",
-      }}
-    >
-      <div style={{ fontSize: ".78rem", opacity: 0.8 }}>{title}</div>
-      <div style={{ fontSize: "1.1rem", fontWeight: 900, marginTop: ".15rem" }}>{value}</div>
     </div>
   );
 }
