@@ -1,30 +1,28 @@
-"use client";
-
-import * as XLSX from "xlsx";
-
+// app/components/xlsxClient.ts
 export type XlsxRow = Record<string, any>;
 
-/**
- * Lee XLSX desde /public (ej: /data/jcr_membership.xlsx)
- * Devuelve SIEMPRE: { sheetName, rows } y deja `sheet` como alias.
- */
 export async function readXlsxFromPublic(
   filePath: string,
-  preferredSheetName?: string
-): Promise<{ sheetName: string; sheet: string; rows: XlsxRow[] }> {
+  options?: { sheetName?: string }
+): Promise<{ sheet: string; sheetName: string; rows: XlsxRow[] }> {
   const res = await fetch(filePath, { cache: "no-store" });
-  if (!res.ok) throw new Error(`No se pudo leer XLSX: ${filePath} (${res.status})`);
+  if (!res.ok) throw new Error(`No pude leer XLSX: ${filePath} (${res.status})`);
 
-  const ab = await res.arrayBuffer();
-  const wb = XLSX.read(ab, { type: "array" });
+  const buf = await res.arrayBuffer();
 
-  const sheetName =
-    (preferredSheetName && wb.SheetNames.includes(preferredSheetName) && preferredSheetName) ||
-    wb.SheetNames[0] ||
-    "Sheet1";
+  // xlsx corre en client; lo importamos dinámico para que Next no lo intente “server”
+  const XLSX = await import("xlsx");
+
+  const wb = XLSX.read(buf, { type: "array" });
+
+  const wanted = options?.sheetName?.trim();
+  const sheetName = wanted && wb.SheetNames.includes(wanted) ? wanted : wb.SheetNames[0];
 
   const ws = wb.Sheets[sheetName];
-  const rows = XLSX.utils.sheet_to_json<XlsxRow>(ws, { defval: "" });
+  const rows = XLSX.utils.sheet_to_json(ws, {
+    defval: "",
+    raw: false, // deja strings; luego vos parseás si querés
+  }) as XlsxRow[];
 
-  return { sheetName, sheet: sheetName, rows };
+  return { sheet: sheetName, sheetName, rows };
 }
