@@ -1,63 +1,76 @@
+// app/components/HofSummary.tsx
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import { readCsvFromPublic, CsvRow, toNumberSmart, toPercent01, safeDiv, formatMoney, formatPct } from "./csvClient";
-
-type GlobalHotel = "JCR" | "MARRIOTT" | "SHERATON BCR" | "SHERATON MDQ" | "MAITEI";
+import { readCsvFromPublic, CsvRow } from "./csvClient";
 
 type Props = {
-  filePath: string;
   year: number;
-  hotel: GlobalHotel;
+  filePath: string;
+  hotelFilter?: string; // "MARRIOTT" | "SHERATON BCR" | "SHERATON MDQ" | "MAITEI"
 };
 
-function norm(s: string) {
-  return (s || "")
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, " ")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
+type HofRow = CsvRow & {
+  Empresa?: string;
+  Fecha?: string;
+  HoF?: string; // History/Forecast
+};
+
+function asString(v: any) {
+  return (v ?? "").toString().trim();
 }
 
-function resolveCol(columns: string[], mustInclude: string[]): string | null {
-  const cols = columns.map((c) => ({ raw: c, n: norm(c) }));
-  const want = mustInclude.map(norm);
-  for (const c of cols) {
-    let ok = true;
-    for (const w of want) if (!c.n.includes(w)) ok = false;
-    if (ok) return c.raw;
+function parseDateSmart(v: any): Date | null {
+  const s = asString(v);
+  if (!s) return null;
+
+  // formatos que vimos: "1/6/2022" o "01-06-22 Wed"
+  // Intento Date() directo
+  const d1 = new Date(s);
+  if (!isNaN(d1.getTime())) return d1;
+
+  // dd-mm-yy ...
+  const m = s.match(/^(\d{2})-(\d{2})-(\d{2,4})/);
+  if (m) {
+    const dd = Number(m[1]);
+    const mm = Number(m[2]);
+    let yy = Number(m[3]);
+    if (yy < 100) yy += 2000;
+    const d2 = new Date(yy, mm - 1, dd);
+    if (!isNaN(d2.getTime())) return d2;
   }
+
   return null;
 }
 
-function hotelsForFilter(h: GlobalHotel): string[] {
-  if (h === "JCR") return ["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"];
-  return [h];
+function num(v: any): number {
+  const n = typeof v === "number" ? v : Number((v ?? "").toString().replace(",", "."));
+  return Number.isFinite(n) ? n : 0;
 }
 
-export default function HofSummary({ filePath, year, hotel }: Props) {
-  const [rows, setRows] = useState<CsvRow[]>([]);
-  const [cols, setCols] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
+function pct01(v: any): number {
+  // puede venir 0.594 o 59.40% ya normalizado por csvClient
+  const n = num(v);
+  if (n > 1.5) return n / 100;
+  return n;
+}
+
+export default function HofSummary({ year, filePath, hotelFilter }: Props) {
+  const [rows, setRows] = useState<HofRow[]>([]);
   const [err, setErr] = useState("");
 
   useEffect(() => {
     let alive = true;
-    setLoading(true);
     setErr("");
 
     readCsvFromPublic(filePath)
-      .then(({ rows, columns }) => {
+      .then(({ rows }) => {
         if (!alive) return;
-        setRows(rows);
-        setCols(columns);
-        setLoading(false);
+        setRows(rows as HofRow[]);
       })
       .catch((e) => {
         if (!alive) return;
-        setErr(String(e?.message || e));
-        setLoading(false);
+        setErr(e?.message ?? "Error leyendo CSV");
       });
 
     return () => {
@@ -65,84 +78,134 @@ export default function HofSummary({ filePath, year, hotel }: Props) {
     };
   }, [filePath]);
 
-  const summary = useMemo(() => {
-    if (!rows.length || !cols.length) return null;
+  const filtered = useMemo(() => {
+    const y = year;
 
-    const colEmpresa = resolveCol(cols, ["EMPRESA"]) || "Empresa";
-    const colFecha = resolveCol(cols, ["FECHA"]) || "Fecha";
-    const colOccPct = resolveCol(cols, ["OCC.%"]) || "Occ.%";
-    const colTotalOcc = resolveCol(cols, ["TOTAL", "OCC"]) || "Total\nOcc.";
-    const colRev = resolveCol(cols, ["ROOM REVENUE"]) || "Room Revenue";
-    const colArr = resolveCol(cols, ["ARR.", "ROOMS"]) || 'Arr.\nRooms';
-    const colComp = resolveCol(cols, ["COMP.", "ROOMS"]) || 'Comp.\nRooms';
+    return rows.filter((r) => {
+      const empresa = asString(r["Empresa"] ?? r["Hotel"] ?? r["empresa"]);
+      const hof = asString(r["HoF"] ?? r["Hof"] ?? r["History/Forecast"]);
+      const fecha = parseDateSmart(r["Fecha"] ?? r["DATE"] ?? r["Date"]);
 
-    const allowed = new Set(hotelsForFilter(hotel));
+      const okYear = fecha ? fecha.getFullYear() === y : false;
 
-    const yRows = rows.filter((r) => {
-      const emp = (r[colEmpresa] || "").trim().toUpperCase();
-      if (!allowed.has(emp)) return false;
+      const okHotel = hotelFilter ? empresa === hotelFilter : true;
+      const okHof = hof ? true : true;
 
-      const f = (r[colFecha] || "").trim();
-      const m = f.match(/\/(\d{4})$/) || f.match(/^(\d{4})-/);
-      const y = m ? Number(m[1]) : NaN;
-      return y === year;
+      return okYear && okHotel && okHof;
     });
+  }, [rows, year, hotelFilter]);
 
-    if (!yRows.length) return null;
+  const kpis = useMemo(() => {
+    // tomamos SUMAS coherentes (ocupación <= 100%)
+    // columnas reales (por tu screenshot): Total Occ., Arr. Rooms, Comp. Rooms, House Use, Room Revenue, Average Rate, Occ.%
+    let totalOcc = 0;
+    let totalArr = 0;
+    let totalComp = 0;
+    let totalHU = 0;
+    let rev = 0;
+    let adrWeightedSum = 0;
+    let adrWeight = 0;
 
-    let sumOcc = 0;
-    let sumRev = 0;
-    let sumOccPct = 0;
-    let days = 0;
+    for (const r of filtered) {
+      totalOcc += num(r['Total\nOcc.'] ?? r["Total Occ."] ?? r["Total Occ"] ?? r["Occ"]);
+      totalArr += num(r['Arr.\nRooms'] ?? r["Arr. Rooms"] ?? r["Arr Rooms"]);
+      totalComp += num(r['Comp.\nRooms'] ?? r["Comp. Rooms"] ?? r["Comp Rooms"]);
+      totalHU += num(r['House\nUse'] ?? r["House Use"]);
+      const rr = num(r["Room Revenue"] ?? r["Room\nRevenue"] ?? r["RoomRevenue"]);
+      rev += rr;
 
-    let sumArr = 0;
-    let sumComp = 0;
-
-    for (const r of yRows) {
-      const occ = toNumberSmart(r[colTotalOcc]);
-      const rev = toNumberSmart(r[colRev]);
-      const occPct = toPercent01(r[colOccPct]);
-      const arr = toNumberSmart(r[colArr]);
-      const comp = toNumberSmart(r[colComp]);
-
-      if (isFinite(occ)) sumOcc += occ;
-      if (isFinite(rev)) sumRev += rev;
-      if (isFinite(occPct)) {
-        sumOccPct += occPct;
-        days += 1;
-      }
-      if (isFinite(arr)) sumArr += arr;
-      if (isFinite(comp)) sumComp += comp;
+      const adr = num(r["Average Rate"] ?? r["Average\nRate"] ?? r["ADR"]);
+      // ADR ponderado por occupied (sin HU) si está
+      const occNet = Math.max(0, num(r["Deduct\nIndiv."] ?? r["Deduct Indiv."] ?? 0) + num(r["Deduct\nGroup"] ?? r["Deduct Group"] ?? 0));
+      // si no, pondero por Total Occ.
+      const w = Math.max(1, num(r['Total\nOcc.'] ?? r["Total Occ."] ?? r["Total Occ"] ?? 0));
+      adrWeightedSum += adr * w;
+      adrWeight += w;
     }
 
-    const adr = safeDiv(sumRev, sumOcc);
-    const occAvg = safeDiv(sumOccPct, days);
-    const revpar = (isFinite(adr) && isFinite(occAvg)) ? adr * occAvg : NaN;
+    const occPct = (() => {
+      // si hay columna Occ.% la promediamos ponderado por días
+      let s = 0;
+      let c = 0;
+      for (const r of filtered) {
+        const v = r["Occ.%"] ?? r["Occ.% "] ?? r["Occ%"] ?? r["Occ %"];
+        const p = pct01(v);
+        if (p > 0) {
+          s += p;
+          c += 1;
+        }
+      }
+      if (c > 0) return s / c;
+      return 0;
+    })();
 
-    return { sumOcc, sumRev, adr, occAvg, revpar, sumArr, sumComp, countDays: days };
-  }, [rows, cols, year, hotel]);
+    const adr = adrWeight > 0 ? adrWeightedSum / adrWeight : 0;
 
-  if (loading) return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Cargando H&F…</div>;
-  if (err) return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Error: {err}</div>;
-  if (!summary) return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Sin datos H&F para {hotel} en {year}.</div>;
+    return {
+      totalOcc,
+      totalArr,
+      totalComp,
+      totalHU,
+      rev,
+      adr,
+      occPct,
+    };
+  }, [filtered]);
 
-  const Metric = ({ label, value }: { label: string; value: string }) => (
-    <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-      <div style={{ fontSize: ".9rem", opacity: 0.8, fontWeight: 900 }}>{label}</div>
-      <div style={{ fontSize: "1.3rem", fontWeight: 950, marginTop: ".35rem" }}>{value}</div>
-    </div>
-  );
+  if (err) {
+    return (
+      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
+        Error H&F: {err}
+      </div>
+    );
+  }
+
+  if (filtered.length === 0) {
+    return (
+      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
+        Sin filas H&F para el filtro actual.
+      </div>
+    );
+  }
+
+  const fmtInt = (n: number) => new Intl.NumberFormat("es-AR").format(Math.round(n));
+  const fmtMoney = (n: number) =>
+    new Intl.NumberFormat("es-AR", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(n);
+  const fmtPct = (n: number) => `${(n * 100).toFixed(1)}%`;
 
   return (
-    <div style={{ display: "grid", gap: ".8rem", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
-      <Metric label="Room Revenue (Total)" value={formatMoney(summary.sumRev)} />
-      <Metric label="ADR" value={formatMoney(summary.adr)} />
-      <Metric label="Ocupación (promedio)" value={formatPct(summary.occAvg)} />
-      <Metric label="RevPAR" value={formatMoney(summary.revpar)} />
-      <Metric label="Total Occ (suma)" value={Math.round(summary.sumOcc).toLocaleString("es-AR")} />
-      <Metric label="Arr. Rooms (suma)" value={Math.round(summary.sumArr).toLocaleString("es-AR")} />
-      <Metric label="Comp. Rooms (suma)" value={Math.round(summary.sumComp).toLocaleString("es-AR")} />
-      <Metric label="Días con datos" value={String(summary.countDays)} />
+    <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
+      <div style={{ fontWeight: 900, marginBottom: ".75rem" }}>KPIs H&F ({hotelFilter ?? "Todos"})</div>
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+          gap: ".75rem",
+        }}
+      >
+        <div className="miniCard" style={{ padding: ".75rem", borderRadius: 16 }}>
+          <div style={{ opacity: 0.75, fontSize: ".9rem" }}>Ocupación %</div>
+          <div style={{ fontSize: "1.25rem", fontWeight: 950 }}>{fmtPct(kpis.occPct)}</div>
+        </div>
+
+        <div className="miniCard" style={{ padding: ".75rem", borderRadius: 16 }}>
+          <div style={{ opacity: 0.75, fontSize: ".9rem" }}>Room Revenue</div>
+          <div style={{ fontSize: "1.25rem", fontWeight: 950 }}>{fmtMoney(kpis.rev)}</div>
+        </div>
+
+        <div className="miniCard" style={{ padding: ".75rem", borderRadius: 16 }}>
+          <div style={{ opacity: 0.75, fontSize: ".9rem" }}>ADR (prom.)</div>
+          <div style={{ fontSize: "1.25rem", fontWeight: 950 }}>
+            {new Intl.NumberFormat("es-AR", { maximumFractionDigits: 2 }).format(kpis.adr)}
+          </div>
+        </div>
+
+        <div className="miniCard" style={{ padding: ".75rem", borderRadius: 16 }}>
+          <div style={{ opacity: 0.75, fontSize: ".9rem" }}>Total Occ (sum)</div>
+          <div style={{ fontSize: "1.25rem", fontWeight: 950 }}>{fmtInt(kpis.totalOcc)}</div>
+        </div>
+      </div>
     </div>
   );
 }
