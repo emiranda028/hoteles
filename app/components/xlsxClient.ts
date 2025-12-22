@@ -1,70 +1,42 @@
-"use client";
-
+// app/components/xlsxClient.ts
 import * as XLSX from "xlsx";
 
-export type ReadXlsxResult = {
-  rows: any[];
-  sheetName: string;
-  sheetNames: string[];
-};
+export type XlsxRow = Record<string, any>;
 
-function scoreRows(rows: any[]) {
-  if (!rows || rows.length === 0) return 0;
+export async function readXlsxFromPublic(filePath: string, sheetName?: string): Promise<{ sheet: string; rows: XlsxRow[] }> {
+  const res = await fetch(filePath, { cache: "no-store" });
+  if (!res.ok) throw new Error(`No se pudo leer XLSX: ${filePath} (${res.status})`);
 
-  const keys = Object.keys(rows[0] ?? {});
-  const keySet = new Set(keys.map((k) => String(k).trim().toLowerCase()));
+  const buf = await res.arrayBuffer();
+  const wb = XLSX.read(buf, { type: "array" });
 
-  const hasEmpresa = keySet.has("empresa");
-  const hasBonboy = keySet.has("bonboy");
-  const hasCantidad = keySet.has("cantidad");
-  const hasFecha = keySet.has("fecha") || keySet.has("date");
-  const hasAno = keySet.has("año") || keySet.has("ano") || keySet.has("year");
-  const hasPais = keySet.has("país") || keySet.has("pais") || keySet.has("country");
-  const hasCont = keySet.has("continente") || keySet.has("continent");
+  const sheet = sheetName && wb.SheetNames.includes(sheetName) ? sheetName : wb.SheetNames[0];
+  const ws = wb.Sheets[sheet];
 
-  let score = keys.length;
-  if (hasEmpresa) score += 60;
-  if (hasBonboy) score += 35;
-  if (hasCantidad) score += 35;
-  if (hasFecha) score += 20;
-  if (hasAno) score += 25;
-  if (hasPais) score += 20;
-  if (hasCont) score += 15;
+  const json: XlsxRow[] = XLSX.utils.sheet_to_json(ws, {
+    defval: "",
+    raw: false,
+  });
 
-  score += Math.min(rows.length, 400) / 10;
-  return score;
+  return { sheet, rows: json };
 }
 
-export async function readXlsxFromPublic(path: string): Promise<ReadXlsxResult> {
-  if (!path) throw new Error("No se pudo cargar XLSX: filePath vacío");
+export function normKey(s: string): string {
+  return (s || "")
+    .trim()
+    .toUpperCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
 
-  const res = await fetch(path);
-  if (!res.ok) throw new Error(`No se pudo cargar ${path} (status ${res.status})`);
+export function pickKey(obj: Record<string, any>, candidates: string[]): string | null {
+  const keys = Object.keys(obj || {});
+  const nmap = new Map<string, string>();
+  for (const k of keys) nmap.set(normKey(k), k);
 
-  const buffer = await res.arrayBuffer();
-  const wb = XLSX.read(buffer, { type: "array" });
-
-  const sheetNames = wb.SheetNames ?? [];
-  if (sheetNames.length === 0) return { rows: [], sheetName: "", sheetNames: [] };
-
-  let bestSheet = sheetNames[0];
-  let bestRows: any[] = [];
-  let bestScore = -1;
-
-  for (let i = 0; i < sheetNames.length; i++) {
-    const name = sheetNames[i];
-    const ws = wb.Sheets[name];
-    if (!ws) continue;
-
-    const rows = XLSX.utils.sheet_to_json(ws, { defval: "" }) as any[];
-    const s = scoreRows(rows);
-
-    if (s > bestScore) {
-      bestScore = s;
-      bestSheet = name;
-      bestRows = rows;
-    }
+  for (const cand of candidates) {
+    const hit = nmap.get(normKey(cand));
+    if (hit) return hit;
   }
-
-  return { rows: bestRows, sheetName: bestSheet, sheetNames };
+  return null;
 }
