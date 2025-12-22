@@ -1,42 +1,8 @@
-"use client";
-
+// app/components/csvClient.ts
 export type CsvRow = Record<string, any>;
 
-/**
- * Lee CSV desde /public (ej: /data/hf_diario.csv)
- * y devuelve SIEMPRE: { rows }
- */
-export async function readCsvFromPublic(filePath: string): Promise<{ rows: CsvRow[] }> {
-  const res = await fetch(filePath, { cache: "no-store" });
-  if (!res.ok) throw new Error(`No se pudo leer CSV: ${filePath} (${res.status})`);
-
-  const text = await res.text();
-  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  if (!lines.length) return { rows: [] };
-
-  // separador: coma o punto y coma
-  const headerLine = lines[0];
-  const sep = headerLine.includes(";") && !headerLine.includes(",") ? ";" : ",";
-
-  const headers = splitCsvLine(headerLine, sep).map((h) => h.trim());
-
-  const rows: CsvRow[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitCsvLine(lines[i], sep);
-    if (!cols.length) continue;
-
-    const r: CsvRow = {};
-    for (let j = 0; j < headers.length; j++) {
-      r[headers[j]] = cols[j] ?? "";
-    }
-    rows.push(r);
-  }
-
-  return { rows };
-}
-
-/** Split CSV respetando comillas */
-function splitCsvLine(line: string, sep: string): string[] {
+function splitCsvLine(line: string): string[] {
+  // CSV simple con comillas dobles y comas
   const out: string[] = [];
   let cur = "";
   let inQuotes = false;
@@ -55,7 +21,7 @@ function splitCsvLine(line: string, sep: string): string[] {
       continue;
     }
 
-    if (!inQuotes && ch === sep) {
+    if (ch === "," && !inQuotes) {
       out.push(cur);
       cur = "";
       continue;
@@ -65,5 +31,70 @@ function splitCsvLine(line: string, sep: string): string[] {
   }
 
   out.push(cur);
-  return out;
+  return out.map((s) => s.trim());
+}
+
+function parseNumberSmart(v: string): number | string {
+  const s = (v ?? "").toString().trim();
+  if (!s) return "";
+
+  // porcentajes tipo 59,40% o 59.40%
+  const isPct = s.endsWith("%");
+  const raw = isPct ? s.slice(0, -1) : s;
+
+  // si tiene separadores miles/decimales en formato LATAM
+  // ejemplo: 22.441,71 => 22441.71
+  let norm = raw;
+
+  // si tiene coma decimal
+  const hasComma = norm.includes(",");
+  const hasDot = norm.includes(".");
+
+  if (hasComma && hasDot) {
+    // asumo dot miles + comma decimal
+    norm = norm.replace(/\./g, "").replace(",", ".");
+  } else if (hasComma && !hasDot) {
+    // coma decimal
+    norm = norm.replace(",", ".");
+  }
+
+  // si es número válido
+  if (/^-?\d+(\.\d+)?$/.test(norm)) {
+    const n = Number(norm);
+    if (Number.isFinite(n)) return isPct ? n / 100 : n;
+  }
+
+  return s;
+}
+
+export async function readCsvFromPublic(filePath: string): Promise<{
+  rows: CsvRow[];
+  columns: string[];
+}> {
+  const res = await fetch(filePath, { cache: "no-store" });
+  if (!res.ok) throw new Error(`No pude leer CSV: ${filePath} (${res.status})`);
+
+  const text = await res.text();
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trimEnd())
+    .filter((l) => l.length > 0);
+
+  if (lines.length === 0) return { rows: [], columns: [] };
+
+  const header = splitCsvLine(lines[0]);
+  const rows: CsvRow[] = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    const parts = splitCsvLine(lines[i]);
+    const obj: CsvRow = {};
+    for (let c = 0; c < header.length; c++) {
+      const k = header[c] ?? `col_${c}`;
+      const v = parts[c] ?? "";
+      obj[k] = parseNumberSmart(v);
+    }
+    rows.push(obj);
+  }
+
+  return { rows, columns: header };
 }
