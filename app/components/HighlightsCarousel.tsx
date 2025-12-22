@@ -1,98 +1,63 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import { readCsvFromPublic, CsvRow } from "./csvClient";
-import type { HofHotel } from "./HofExplorer";
+import { readCsvFromPublic, CsvRow, toNumberSmart, toPercent01, safeDiv, formatMoney, formatPct } from "./csvClient";
+
+type GlobalHotel = "JCR" | "MARRIOTT" | "SHERATON BCR" | "SHERATON MDQ" | "MAITEI";
 
 type Props = {
   filePath: string;
   year: number;
-  hotel: HofHotel;
+  hotel: GlobalHotel;
 };
 
-function norm(s: any) {
-  return String(s ?? "").trim().replace(/\s+/g, " ");
-}
+function resolveCol(columns: string[], mustInclude: string[]): string | null {
+  const norm = (s: string) =>
+    s
+      .trim()
+      .toUpperCase()
+      .replace(/\s+/g, " ")
+      .replace(/\u00A0/g, " ")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
 
-function parseNumber(v: any): number {
-  const s = norm(v);
-  if (!s) return 0;
-  const cleaned = s.replace(/\./g, "").replace(/,/g, ".").replace(/[^\d.-]/g, "");
-  const n = parseFloat(cleaned);
-  return Number.isFinite(n) ? n : 0;
-}
+  const cols = columns.map((c) => ({ raw: c, n: norm(c) }));
+  const want = mustInclude.map(norm);
 
-function parseDateFlexible(v: any): Date | null {
-  const s = norm(v);
-  if (!s) return null;
-  const d1 = new Date(s);
-  if (!isNaN(d1.getTime())) return d1;
-
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
-  if (m) {
-    const dd = parseInt(m[1], 10);
-    const mm = parseInt(m[2], 10);
-    const yy = parseInt(m[3].length === 2 ? "20" + m[3] : m[3], 10);
-    const d = new Date(yy, mm - 1, dd);
-    if (!isNaN(d.getTime())) return d;
-  }
-
-  const n = parseInt(s, 10);
-  if (Number.isFinite(n) && n > 20000 && n < 90000) {
-    const base = new Date(Date.UTC(1899, 11, 30));
-    base.setUTCDate(base.getUTCDate() + n);
-    return new Date(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate());
+  for (const c of cols) {
+    let ok = true;
+    for (const w of want) if (!c.n.includes(w)) ok = false;
+    if (ok) return c.raw;
   }
   return null;
 }
 
-function getField(row: CsvRow, wanted: string[]): string {
-  for (let i = 0; i < wanted.length; i++) {
-    const k = wanted[i];
-    if (k in row) return row[k] || "";
-  }
-  return "";
-}
-
-function normalizeEmpresa(e: string): string {
-  const up = norm(e).toUpperCase();
-  if (!up) return "";
-  if (up.includes("MARRIOTT")) return "MARRIOTT";
-  if (up.includes("SHERATON") && (up.includes("BCR") || up.includes("BUENOS"))) return "SHERATON BCR";
-  if (up.includes("SHERATON") && (up.includes("MDQ") || up.includes("MAR DEL") || up.includes("MDP"))) return "SHERATON MDQ";
-  if (up.includes("MAITEI") || up.includes("GOTEL") || up.includes("POSADAS")) return "MAITEI";
-  if (up === "SHERATON BCR" || up === "SHERATON MDQ" || up === "MARRIOTT" || up === "MAITEI") return up;
-  return up;
-}
-
-function expandHotel(h: HofHotel): string[] {
+function hotelsForFilter(h: GlobalHotel): string[] {
   if (h === "JCR") return ["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"];
   return [h];
 }
 
-function safeDiv(a: number, b: number) {
-  if (!b) return 0;
-  const x = a / b;
-  return Number.isFinite(x) ? x : 0;
-}
-
 export default function HighlightsCarousel({ filePath, year, hotel }: Props) {
-  const [raw, setRaw] = useState<CsvRow[]>([]);
+  const [rows, setRows] = useState<CsvRow[]>([]);
+  const [cols, setCols] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
 
   useEffect(() => {
     let alive = true;
     setLoading(true);
+    setErr("");
 
     readCsvFromPublic(filePath)
-      .then((res) => {
+      .then(({ rows, columns }) => {
         if (!alive) return;
-        setRaw(res.rows || []);
+        setRows(rows);
+        setCols(columns);
         setLoading(false);
       })
-      .catch(() => {
+      .catch((e) => {
         if (!alive) return;
-        setRaw([]);
+        setErr(String(e?.message || e));
         setLoading(false);
       });
 
@@ -102,81 +67,85 @@ export default function HighlightsCarousel({ filePath, year, hotel }: Props) {
   }, [filePath]);
 
   const kpi = useMemo(() => {
-    const allowed = expandHotel(hotel);
+    if (!rows.length || !cols.length) return null;
 
-    let totalRooms = 0;
-    let occ = 0;
-    let inHouse = 0;
-    let adrWsum = 0;
-    let adrW = 0;
-    let roomRevenue = 0;
-    let totalRevenue = 0;
+    const colEmpresa = resolveCol(cols, ["EMPRESA"]) || "Empresa";
+    const colFecha = resolveCol(cols, ["FECHA"]) || "Fecha";
+    const colOccPct = resolveCol(cols, ["OCC.%"]) || "Occ.%";
+    const colTotalOcc = resolveCol(cols, ["TOTAL", "OCC"]) || "Total\nOcc.";
+    const colRev = resolveCol(cols, ["ROOM REVENUE"]) || "Room Revenue";
 
-    for (let i = 0; i < raw.length; i++) {
-      const r = raw[i];
-      const empresa = normalizeEmpresa(getField(r, ["Empresa", "empresa"]));
-      if (allowed.indexOf(empresa) === -1) continue;
+    const allowed = new Set(hotelsForFilter(hotel));
 
-      const fecha = parseDateFlexible(getField(r, ["Fecha", "fecha", "Date", "date", "Día", "Dia"]));
-      if (!fecha || fecha.getFullYear() !== year) continue;
+    const yRows = rows.filter((r) => {
+      const emp = (r[colEmpresa] || "").trim().toUpperCase();
+      if (!allowed.has(emp)) return false;
 
-      const tr = parseNumber(getField(r, ["Total Rooms in Hotel", "Total Rooms", "TotalRooms"]));
-      const oc = parseNumber(getField(r, ["Rooms Occupied minus House Use", "Rooms Occ minus HU", "Occupied Rooms"]));
-      const ih = parseNumber(getField(r, ["Total In-House Persons", "In-House", "InHousePersons"]));
-      const adr = parseNumber(getField(r, ["ADR", "Average Rate"]));
-      const rr = parseNumber(getField(r, ["Room Revenue", "RoomRevenue"]));
-      const tot = parseNumber(getField(r, ["Ventas Totales", "Total Revenue", "TotalRevenue"]));
+      // fecha puede venir "1/6/2022"
+      const f = (r[colFecha] || "").trim();
+      const m = f.match(/\/(\d{4})$/) || f.match(/^(\d{4})-/);
+      const y = m ? Number(m[1]) : NaN;
+      return y === year;
+    });
 
-      totalRooms += tr;
-      occ += oc;
-      inHouse += ih;
-      adrWsum += adr * oc;
-      adrW += oc;
-      roomRevenue += rr;
-      totalRevenue += tot;
+    if (!yRows.length) return null;
+
+    let sumOcc = 0;
+    let sumRev = 0;
+    let sumOccPct = 0;
+    let days = 0;
+
+    for (const r of yRows) {
+      const occ = toNumberSmart(r[colTotalOcc]);
+      const rev = toNumberSmart(r[colRev]);
+      const occPct = toPercent01(r[colOccPct]);
+      if (isFinite(occ)) sumOcc += occ;
+      if (isFinite(rev)) sumRev += rev;
+      if (isFinite(occPct)) {
+        sumOccPct += occPct;
+        days += 1;
+      }
     }
 
-    const adr = safeDiv(adrWsum, adrW);
-    const occRate = safeDiv(occ, totalRooms);
-    const dblOcc = safeDiv(inHouse, occ);
-    const revpar = adr * dblOcc;
+    const adr = safeDiv(sumRev, sumOcc);
+    const occAvg = safeDiv(sumOccPct, days);
+    const revpar = (isFinite(adr) && isFinite(occAvg)) ? adr * occAvg : NaN;
 
-    return { totalRooms, occRate, adr, dblOcc, revpar, roomRevenue, totalRevenue };
-  }, [raw, year, hotel]);
+    return { sumRev, adr, occAvg, revpar };
+  }, [rows, cols, year, hotel]);
 
-  const cards = [
-    { title: "Ocupación", value: `${(kpi.occRate * 100).toFixed(1)}%`, subtitle: "Rooms Occ / Total Rooms" },
-    { title: "ADR", value: kpi.adr.toFixed(2), subtitle: "Promedio ponderado" },
-    { title: "REVPar", value: kpi.revpar.toFixed(2), subtitle: "ADR × Doble Ocup." },
-    { title: "Ventas", value: kpi.totalRevenue.toFixed(0), subtitle: "Ventas Totales" },
-  ];
+  if (loading) {
+    return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Cargando KPIs…</div>;
+  }
+  if (err) {
+    return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Error: {err}</div>;
+  }
+  if (!kpi) {
+    return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Sin datos (KPIs) para {hotel} en {year}.</div>;
+  }
 
-  if (loading) return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Cargando KPIs…</div>;
-
-  return (
+  const Card = ({ title, value, sub }: { title: string; value: string; sub?: string }) => (
     <div
+      className="card"
       style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-        gap: ".75rem",
+        padding: "1rem",
+        borderRadius: 18,
+        minWidth: 220,
+        flex: "1 1 220px",
       }}
     >
-      {cards.map((c) => (
-        <div
-          key={c.title}
-          className="card"
-          style={{
-            padding: "1rem",
-            borderRadius: 18,
-            background: "linear-gradient(135deg, rgba(120,170,255,0.20), rgba(160,90,255,0.10))",
-            border: "1px solid rgba(255,255,255,0.10)",
-          }}
-        >
-          <div style={{ opacity: 0.85, fontWeight: 850 }}>{c.title}</div>
-          <div style={{ marginTop: ".15rem", fontWeight: 950, fontSize: "1.45rem" }}>{c.value}</div>
-          <div style={{ marginTop: ".25rem", opacity: 0.8, fontSize: ".95rem" }}>{c.subtitle}</div>
-        </div>
-      ))}
+      <div style={{ fontSize: ".9rem", opacity: 0.8, fontWeight: 800 }}>{title}</div>
+      <div style={{ fontSize: "1.35rem", fontWeight: 950, marginTop: ".35rem" }}>{value}</div>
+      {sub ? <div style={{ marginTop: ".15rem", opacity: 0.7 }}>{sub}</div> : null}
+    </div>
+  );
+
+  return (
+    <div style={{ display: "flex", gap: ".8rem", flexWrap: "wrap" }}>
+      <Card title="Room Revenue" value={formatMoney(kpi.sumRev)} />
+      <Card title="ADR" value={formatMoney(kpi.adr)} />
+      <Card title="Ocupación" value={formatPct(kpi.occAvg)} />
+      <Card title="RevPAR" value={formatMoney(kpi.revpar)} sub="ADR × Ocupación (promedio)" />
     </div>
   );
 }
