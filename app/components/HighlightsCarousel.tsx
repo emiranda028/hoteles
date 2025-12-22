@@ -1,185 +1,182 @@
-// app/components/HighlightsCarousel.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { normalizeHofRows, readCsvFromPublic, HofNormalized } from "./csvClient";
+import React, { useEffect, useMemo, useState } from "react";
+import { readCsvFromPublic, CsvRow } from "./csvClient";
+import type { HofHotel } from "./HofExplorer";
 
 type Props = {
-  filePath: string;           // ej: "/data/hf_diario.csv"
+  filePath: string;
   year: number;
-  hotelList: string[];        // lista de empresas que se suman en el bloque (ej JCR)
-  title: string;
-  variant?: "default" | "jcr" | "maitei" | "marriott" | "sheratons";
+  hotel: HofHotel;
 };
 
-function fmtNumber(n: number | null | undefined, digits = 0) {
-  if (!Number.isFinite(Number(n))) return "—";
-  return Number(n).toLocaleString("es-AR", { maximumFractionDigits: digits, minimumFractionDigits: digits });
+function norm(s: any) {
+  return String(s ?? "").trim().replace(/\s+/g, " ");
 }
 
-function fmtMoney(n: number | null | undefined) {
-  if (!Number.isFinite(Number(n))) return "—";
-  return Number(n).toLocaleString("es-AR", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+function parseNumber(v: any): number {
+  const s = norm(v);
+  if (!s) return 0;
+  const cleaned = s.replace(/\./g, "").replace(/,/g, ".").replace(/[^\d.-]/g, "");
+  const n = parseFloat(cleaned);
+  return Number.isFinite(n) ? n : 0;
 }
 
-function clampPct(p: number) {
-  if (!Number.isFinite(p)) return p;
-  // Ojo: si por datos raros viene 3800, lo capea visualmente, pero igual te deja debug.
-  return Math.max(0, Math.min(100, p));
-}
+function parseDateFlexible(v: any): Date | null {
+  const s = norm(v);
+  if (!s) return null;
+  const d1 = new Date(s);
+  if (!isNaN(d1.getTime())) return d1;
 
-function cardBg(variant: Props["variant"]) {
-  // Sin depender de libs, meto gradientes suaves
-  switch (variant) {
-    case "jcr":
-      return "linear-gradient(135deg, rgba(25,95,255,.18), rgba(130,30,255,.10))";
-    case "maitei":
-      return "linear-gradient(135deg, rgba(0,180,120,.18), rgba(0,140,255,.10))";
-    case "marriott":
-      return "linear-gradient(135deg, rgba(255,120,0,.18), rgba(255,0,120,.10))";
-    case "sheratons":
-      return "linear-gradient(135deg, rgba(120,80,255,.18), rgba(20,20,40,.08))";
-    default:
-      return "linear-gradient(135deg, rgba(255,255,255,.08), rgba(255,255,255,.04))";
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) {
+    const dd = parseInt(m[1], 10);
+    const mm = parseInt(m[2], 10);
+    const yy = parseInt(m[3].length === 2 ? "20" + m[3] : m[3], 10);
+    const d = new Date(yy, mm - 1, dd);
+    if (!isNaN(d.getTime())) return d;
   }
+
+  const n = parseInt(s, 10);
+  if (Number.isFinite(n) && n > 20000 && n < 90000) {
+    const base = new Date(Date.UTC(1899, 11, 30));
+    base.setUTCDate(base.getUTCDate() + n);
+    return new Date(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate());
+  }
+  return null;
 }
 
-function filterRows(rows: HofNormalized[], year: number, hotels: string[]) {
-  const hotelSet = new Set(hotels.map((h) => String(h).trim().toUpperCase()));
-  return rows.filter((r) => {
-    const emp = String(r.empresa ?? "").trim().toUpperCase();
-    return r.year === year && hotelSet.has(emp);
-  });
+function getField(row: CsvRow, wanted: string[]): string {
+  for (let i = 0; i < wanted.length; i++) {
+    const k = wanted[i];
+    if (k in row) return row[k] || "";
+  }
+  return "";
 }
 
-export default function HighlightsCarousel({ filePath, year, hotelList, title, variant = "default" }: Props) {
-  const [rows, setRows] = useState<HofNormalized[]>([]);
+function normalizeEmpresa(e: string): string {
+  const up = norm(e).toUpperCase();
+  if (!up) return "";
+  if (up.includes("MARRIOTT")) return "MARRIOTT";
+  if (up.includes("SHERATON") && (up.includes("BCR") || up.includes("BUENOS"))) return "SHERATON BCR";
+  if (up.includes("SHERATON") && (up.includes("MDQ") || up.includes("MAR DEL") || up.includes("MDP"))) return "SHERATON MDQ";
+  if (up.includes("MAITEI") || up.includes("GOTEL") || up.includes("POSADAS")) return "MAITEI";
+  if (up === "SHERATON BCR" || up === "SHERATON MDQ" || up === "MARRIOTT" || up === "MAITEI") return up;
+  return up;
+}
+
+function expandHotel(h: HofHotel): string[] {
+  if (h === "JCR") return ["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"];
+  return [h];
+}
+
+function safeDiv(a: number, b: number) {
+  if (!b) return 0;
+  const x = a / b;
+  return Number.isFinite(x) ? x : 0;
+}
+
+export default function HighlightsCarousel({ filePath, year, hotel }: Props) {
+  const [raw, setRaw] = useState<CsvRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string>("");
 
   useEffect(() => {
-    let mounted = true;
+    let alive = true;
     setLoading(true);
-    setErr("");
+
     readCsvFromPublic(filePath)
-      .then((raw) => normalizeHofRows(raw))
-      .then((norm) => {
-        if (!mounted) return;
-        setRows(norm);
+      .then((res) => {
+        if (!alive) return;
+        setRaw(res.rows || []);
         setLoading(false);
       })
-      .catch((e: any) => {
-        if (!mounted) return;
-        setErr(String(e?.message ?? e));
+      .catch(() => {
+        if (!alive) return;
+        setRaw([]);
         setLoading(false);
       });
+
     return () => {
-      mounted = false;
+      alive = false;
     };
   }, [filePath]);
 
-  const yearRows = useMemo(() => filterRows(rows, year, hotelList), [rows, year, hotelList]);
+  const kpi = useMemo(() => {
+    const allowed = expandHotel(hotel);
 
-  const kpis = useMemo(() => {
-    if (yearRows.length === 0) {
-      return {
-        occAvg: null,
-        adrAvg: null,
-        revpar: null,
-        roomRevSum: null,
-        roomsOccSum: null,
-      };
+    let totalRooms = 0;
+    let occ = 0;
+    let inHouse = 0;
+    let adrWsum = 0;
+    let adrW = 0;
+    let roomRevenue = 0;
+    let totalRevenue = 0;
+
+    for (let i = 0; i < raw.length; i++) {
+      const r = raw[i];
+      const empresa = normalizeEmpresa(getField(r, ["Empresa", "empresa"]));
+      if (allowed.indexOf(empresa) === -1) continue;
+
+      const fecha = parseDateFlexible(getField(r, ["Fecha", "fecha", "Date", "date", "Día", "Dia"]));
+      if (!fecha || fecha.getFullYear() !== year) continue;
+
+      const tr = parseNumber(getField(r, ["Total Rooms in Hotel", "Total Rooms", "TotalRooms"]));
+      const oc = parseNumber(getField(r, ["Rooms Occupied minus House Use", "Rooms Occ minus HU", "Occupied Rooms"]));
+      const ih = parseNumber(getField(r, ["Total In-House Persons", "In-House", "InHousePersons"]));
+      const adr = parseNumber(getField(r, ["ADR", "Average Rate"]));
+      const rr = parseNumber(getField(r, ["Room Revenue", "RoomRevenue"]));
+      const tot = parseNumber(getField(r, ["Ventas Totales", "Total Revenue", "TotalRevenue"]));
+
+      totalRooms += tr;
+      occ += oc;
+      inHouse += ih;
+      adrWsum += adr * oc;
+      adrW += oc;
+      roomRevenue += rr;
+      totalRevenue += tot;
     }
 
-    // Promedios "sanos"
-    const occValues = yearRows.map((r) => r.occPct).filter((v): v is number => Number.isFinite(v as number));
-    const adrValues = yearRows.map((r) => r.adr).filter((v): v is number => Number.isFinite(v as number));
-    const roomRevValues = yearRows.map((r) => r.roomRevenue).filter((v): v is number => Number.isFinite(v as number));
-    const roomsOccValues = yearRows.map((r) => r.roomsOcc).filter((v): v is number => Number.isFinite(v as number));
+    const adr = safeDiv(adrWsum, adrW);
+    const occRate = safeDiv(occ, totalRooms);
+    const dblOcc = safeDiv(inHouse, occ);
+    const revpar = adr * dblOcc;
 
-    const occAvg = occValues.length ? occValues.reduce((a, b) => a + b, 0) / occValues.length : null;
-    const adrAvg = adrValues.length ? adrValues.reduce((a, b) => a + b, 0) / adrValues.length : null;
-
-    const roomRevSum = roomRevValues.length ? roomRevValues.reduce((a, b) => a + b, 0) : null;
-    const roomsOccSum = roomsOccValues.length ? roomsOccValues.reduce((a, b) => a + b, 0) : null;
-
-    // RevPAR aproximado: ADR promedio * Ocupación promedio
-    const revpar = (adrAvg !== null && occAvg !== null) ? (adrAvg * occAvg) / 100 : null;
-
-    return { occAvg, adrAvg, revpar, roomRevSum, roomsOccSum };
-  }, [yearRows]);
-
-  if (loading) {
-    return (
-      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        Cargando {title}…
-      </div>
-    );
-  }
-
-  if (err) {
-    return (
-      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        Error cargando {title}: {err}
-      </div>
-    );
-  }
-
-  if (!yearRows.length) {
-    return (
-      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        Sin filas para {title} en {year}. (Archivo: {filePath})
-      </div>
-    );
-  }
+    return { totalRooms, occRate, adr, dblOcc, revpar, roomRevenue, totalRevenue };
+  }, [raw, year, hotel]);
 
   const cards = [
-    { label: "Ocupación (prom.)", value: kpis.occAvg !== null ? `${fmtNumber(clampPct(kpis.occAvg), 1)}%` : "—" },
-    { label: "ADR (prom.)", value: kpis.adrAvg !== null ? fmtMoney(kpis.adrAvg) : "—" },
-    { label: "RevPAR (aprox.)", value: kpis.revpar !== null ? fmtMoney(kpis.revpar) : "—" },
-    { label: "Room Revenue (sum)", value: kpis.roomRevSum !== null ? fmtMoney(kpis.roomRevSum) : "—" },
-    { label: "Rooms Occ (sum)", value: kpis.roomsOccSum !== null ? fmtNumber(kpis.roomsOccSum, 0) : "—" },
+    { title: "Ocupación", value: `${(kpi.occRate * 100).toFixed(1)}%`, subtitle: "Rooms Occ / Total Rooms" },
+    { title: "ADR", value: kpi.adr.toFixed(2), subtitle: "Promedio ponderado" },
+    { title: "REVPar", value: kpi.revpar.toFixed(2), subtitle: "ADR × Doble Ocup." },
+    { title: "Ventas", value: kpi.totalRevenue.toFixed(0), subtitle: "Ventas Totales" },
   ];
 
+  if (loading) return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Cargando KPIs…</div>;
+
   return (
-    <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: ".75rem", flexWrap: "wrap" }}>
-        <div style={{ fontWeight: 950, fontSize: "1.05rem" }}>{title}</div>
-        <div style={{ opacity: 0.75, fontSize: ".9rem" }}>{yearRows.length} filas</div>
-      </div>
-
-      <div
-        style={{
-          marginTop: ".9rem",
-          display: "flex",
-          gap: ".75rem",
-          overflowX: "auto",
-          paddingBottom: ".25rem",
-          scrollSnapType: "x mandatory",
-        }}
-      >
-        {cards.map((c) => (
-          <div
-            key={c.label}
-            style={{
-              minWidth: 220,
-              flex: "0 0 auto",
-              scrollSnapAlign: "start",
-              borderRadius: 18,
-              padding: ".9rem",
-              background: cardBg(variant),
-              border: "1px solid rgba(255,255,255,.10)",
-            }}
-          >
-            <div style={{ fontSize: ".85rem", opacity: 0.75 }}>{c.label}</div>
-            <div style={{ fontSize: "1.35rem", fontWeight: 950, marginTop: ".35rem" }}>{c.value}</div>
-          </div>
-        ))}
-      </div>
-
-      <div style={{ marginTop: ".6rem", fontSize: ".85rem", opacity: 0.7 }}>
-        *Ocupación/ADR como promedios; Room Revenue y Rooms Occ como sumas.
-      </div>
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+        gap: ".75rem",
+      }}
+    >
+      {cards.map((c) => (
+        <div
+          key={c.title}
+          className="card"
+          style={{
+            padding: "1rem",
+            borderRadius: 18,
+            background: "linear-gradient(135deg, rgba(120,170,255,0.20), rgba(160,90,255,0.10))",
+            border: "1px solid rgba(255,255,255,0.10)",
+          }}
+        >
+          <div style={{ opacity: 0.85, fontWeight: 850 }}>{c.title}</div>
+          <div style={{ marginTop: ".15rem", fontWeight: 950, fontSize: "1.45rem" }}>{c.value}</div>
+          <div style={{ marginTop: ".25rem", opacity: 0.8, fontSize: ".95rem" }}>{c.subtitle}</div>
+        </div>
+      ))}
     </div>
   );
 }
