@@ -195,19 +195,21 @@ export default function YearComparator() {
                 Año + hotel global (MARRIOTT / SHERATON BCR / SHERATON MDQ).
               </div>
 
-              <div style={{ marginTop: ".85rem" }}>
-                <MembershipSummary
-                  title={`Membership (JCR) — Acumulado ${year} · vs ${baseYear}`}
-                  year={year}
-                  baseYear={baseYear}
-                  filePath={MEMBERSHIP_PATH}
-                  // IMPORTANTÍSIMO: pasar allowedHotels SI tu MembershipSummary lo requiere
-                  allowedHotels={["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"]}
-                  hotelFilter={globalHotel}
-                  compactCharts={true}
-                />
-              </div>
-            </div>
+<div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
+  {`Membership (JCR) — Acumulado ${year} · vs ${baseYear}`}
+</div>
+
+<div style={{ marginTop: ".85rem" }}>
+  <MembershipSummary
+    year={year}
+    baseYear={baseYear}
+    filePath={MEMBERSHIP_PATH}
+    allowedHotels={["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"]}
+    hotelFilter={globalHotel}
+    compactCharts={true}
+  />
+</div>
+
 
             {/* ====== 5) Nacionalidades (solo Marriott) ====== */}
             <div style={{ marginTop: "1.25rem" }}>
@@ -305,3 +307,4 @@ export default function YearComparator() {
     </div>
   );
 }
+
