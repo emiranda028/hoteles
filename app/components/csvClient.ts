@@ -1,135 +1,76 @@
 // app/components/csvClient.ts
 export type CsvRow = Record<string, any>;
 
-type ReadCsvResult = {
-  rows: CsvRow[];
-  delimiter: string;
-  headers: string[];
-};
-
-function normalizeHeader(h: string) {
-  return String(h ?? "")
-    .replace(/\r/g, " ")
-    .replace(/\n/g, " ")
-    .replace(/\s+/g, " ")
-    .replace(/^"+|"+$/g, "")
-    .trim();
-}
-
-/**
- * Parser CSV robusto:
- * - Soporta separador ; o ,
- * - Soporta comillas dobles,
- * - Soporta saltos de línea dentro de campos entrecomillados (tu caso en hf_diario.csv),
- * - No requiere dependencias.
- */
-function parseCsv(text: string, delimiterGuess?: string): { headers: string[]; rows: CsvRow[]; delimiter: string } {
-  const src = text ?? "";
-
-  // auto-guess delimiter (pero ojo: tu primer “línea” puede estar cortada por headers con \n)
-  const guessDelimiter = () => {
-    if (delimiterGuess) return delimiterGuess;
-
-    // tomamos una muestra de los primeros N chars y contamos ; y ,
-    const sample = src.slice(0, 5000);
-    const semi = (sample.match(/;/g) || []).length;
-    const comma = (sample.match(/,/g) || []).length;
-    return semi >= comma ? ";" : ",";
-  };
-
-  const delimiter = guessDelimiter();
-
-  const rowsArr: string[][] = [];
-  let row: string[] = [];
-  let field = "";
+function splitCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = "";
   let inQuotes = false;
 
-  const pushField = () => {
-    row.push(field);
-    field = "";
-  };
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
 
-  const pushRow = () => {
-    // evita filas totalmente vacías
-    const isEmpty = row.every((c) => String(c ?? "").trim() === "");
-    if (!isEmpty) rowsArr.push(row);
-    row = [];
-  };
-
-  for (let i = 0; i < src.length; i++) {
-    const ch = src[i];
-
-    if (inQuotes) {
-      if (ch === '"') {
-        // "" => escape quote
-        if (src[i + 1] === '"') {
-          field += '"';
-          i++;
-        } else {
-          inQuotes = false;
-        }
+    if (ch === '"') {
+      // doble comilla escapada dentro de quoted
+      if (inQuotes && line[i + 1] === '"') {
+        cur += '"';
+        i++;
       } else {
-        field += ch;
+        inQuotes = !inQuotes;
       }
       continue;
     }
 
-    // not in quotes
-    if (ch === '"') {
-      inQuotes = true;
+    if (ch === "," && !inQuotes) {
+      out.push(cur);
+      cur = "";
       continue;
     }
 
-    if (ch === delimiter) {
-      pushField();
-      continue;
-    }
-
-    if (ch === "\n") {
-      pushField();
-      pushRow();
-      continue;
-    }
-
-    if (ch === "\r") {
-      // ignoramos CR, porque el \n ya corta fila
-      continue;
-    }
-
-    field += ch;
+    cur += ch;
   }
 
-  // flush final
-  pushField();
-  pushRow();
-
-  if (rowsArr.length === 0) return { headers: [], rows: [], delimiter };
-
-  // headers
-  const rawHeaders = rowsArr[0].map(normalizeHeader);
-  const body = rowsArr.slice(1);
-
-  const data: CsvRow[] = body
-    .map((r) => {
-      const obj: CsvRow = {};
-      for (let c = 0; c < rawHeaders.length; c++) {
-        const key = rawHeaders[c] || `col_${c + 1}`;
-        obj[key] = r[c] ?? "";
-      }
-      return obj;
-    })
-    .filter((o) => Object.keys(o).length > 0);
-
-  return { headers: rawHeaders, rows: data, delimiter };
+  out.push(cur);
+  return out.map((s) => s.trim());
 }
 
-export async function readCsvFromPublic(path: string): Promise<ReadCsvResult> {
+function parseCsv(text: string): CsvRow[] {
+  const lines = text
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  if (lines.length < 2) return [];
+
+  const header = splitCsvLine(lines[0]).map((h) =>
+    h.replace(/^"|"$/g, "").trim()
+  );
+
+  const rows: CsvRow[] = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    const cols = splitCsvLine(lines[i]).map((c) =>
+      c.replace(/^"|"$/g, "").trim()
+    );
+
+    // si viene una línea mal cortada, la ignoramos
+    if (cols.length < Math.min(2, header.length)) continue;
+
+    const r: CsvRow = {};
+    for (let j = 0; j < header.length; j++) {
+      r[header[j]] = cols[j] ?? "";
+    }
+    rows.push(r);
+  }
+
+  return rows;
+}
+
+export async function readCsvFromPublic(path: string): Promise<CsvRow[]> {
   const res = await fetch(path, { cache: "no-store" });
   if (!res.ok) throw new Error(`No se pudo leer CSV: ${path} (${res.status})`);
   const text = await res.text();
-
-  const parsed = parseCsv(text);
-  return { rows: parsed.rows, delimiter: parsed.delimiter, headers: parsed.headers };
+  return parseCsv(text);
 }
 
 /* ======================
@@ -138,60 +79,136 @@ export async function readCsvFromPublic(path: string): Promise<ReadCsvResult> {
 
 export function toNumberSmart(v: any): number {
   if (v === null || v === undefined) return 0;
-  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
 
-  const s = String(v ?? "").trim();
+  const s = String(v).trim();
   if (!s) return 0;
 
-  // si viene con % lo tratamos como porcentaje “humano” (59,40% => 59.40)
-  const isPct = s.includes("%");
+  // % y espacios
+  const noPct = s.replace(/%/g, "").trim();
 
-  // quita separadores de miles y normaliza decimal
-  const cleaned = s
-    .replace(/\s+/g, "")
-    .replace(/\./g, "")
-    .replace(",", ".")
-    .replace("%", "");
+  // formato es-AR: 22.441,71  /  126,79
+  // formato en-US: 22,441.71
+  // estrategia:
+  // - si tiene "," y ".", asumimos miles + decimales según última ocurrencia
+  const hasComma = noPct.includes(",");
+  const hasDot = noPct.includes(".");
 
-  const n = Number(cleaned);
-  if (!Number.isFinite(n)) return 0;
-  return isPct ? n : n;
+  let normalized = noPct;
+
+  if (hasComma && hasDot) {
+    // decide decimal por el último separador
+    const lastComma = noPct.lastIndexOf(",");
+    const lastDot = noPct.lastIndexOf(".");
+    if (lastComma > lastDot) {
+      // coma decimal, puntos miles
+      normalized = noPct.replace(/\./g, "").replace(",", ".");
+    } else {
+      // punto decimal, comas miles
+      normalized = noPct.replace(/,/g, "");
+    }
+  } else if (hasComma && !hasDot) {
+    // coma decimal
+    normalized = noPct.replace(",", ".");
+  } else {
+    // punto decimal o entero
+    normalized = noPct;
+  }
+
+  const n = Number(normalized);
+  return Number.isFinite(n) ? n : 0;
 }
 
 export function safeDiv(a: number, b: number): number {
   return b === 0 ? 0 : a / b;
 }
 
-/** Convierte 59.4 (o "59,4%") a 0.594; si ya viene 0.59 lo deja */
+// convierte 59.4 (porcentaje) a 0.594 si detecta escala > 1
 export function toPercent01(v: number): number {
   if (!Number.isFinite(v)) return 0;
-  if (v > 1) return v / 100;
-  if (v < 0) return 0;
+  if (v > 1.5) return v / 100;
   return v;
 }
 
-export function clamp01(v: number): number {
-  if (!Number.isFinite(v)) return 0;
-  if (v < 0) return 0;
-  if (v > 1) return 1;
-  return v;
-}
-
-export function formatMoneyUSD(n: number, digits: number = 0): string {
+export function formatMoney(n: number): string {
   const v = Number.isFinite(n) ? n : 0;
   return v.toLocaleString("es-AR", {
     style: "currency",
     currency: "USD",
-    maximumFractionDigits: digits,
+    maximumFractionDigits: 0,
   });
 }
 
 export function formatInt(n: number): string {
   const v = Number.isFinite(n) ? n : 0;
-  return v.toLocaleString("es-AR", { maximumFractionDigits: 0 });
+  return Math.round(v).toLocaleString("es-AR");
 }
 
-export function formatPct(n01: number, digits: number = 1): string {
-  const v = clamp01(n01);
-  return (v * 100).toFixed(digits) + "%";
+export function formatPct(n01: number): string {
+  const v = Number.isFinite(n01) ? n01 : 0;
+  return (v * 100).toFixed(1) + "%";
+}
+
+// alias explícito (a veces lo llamaste así en componentes)
+export const formatPct01 = formatPct;
+
+/* ======================
+   Fechas
+====================== */
+
+// intenta parsear:
+// - "1/6/2022"
+// - "01-06-22 Wed"
+// - Date serial de Excel (46004)
+// - "2022-06-01"
+export function parseFechaSmart(v: any): Date | null {
+  if (v === null || v === undefined) return null;
+
+  if (v instanceof Date) return isNaN(v.getTime()) ? null : v;
+
+  // excel serial
+  const asNum = typeof v === "number" ? v : toNumberSmart(v);
+  if (asNum > 30000 && asNum < 80000) {
+    // Excel epoch: 1899-12-30 (aprox para Windows)
+    const epoch = new Date(Date.UTC(1899, 11, 30));
+    const d = new Date(epoch.getTime() + asNum * 86400000);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  const s = String(v).trim();
+  if (!s) return null;
+
+  // dd/mm/yyyy
+  const m1 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m1) {
+    const dd = Number(m1[1]);
+    const mm = Number(m1[2]) - 1;
+    const yy = Number(m1[3]);
+    const d = new Date(yy, mm, dd);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  // dd-mm-yy ...
+  const m2 = s.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})/);
+  if (m2) {
+    const dd = Number(m2[1]);
+    const mm = Number(m2[2]) - 1;
+    let yy = Number(m2[3]);
+    if (yy < 100) yy = 2000 + yy;
+    const d = new Date(yy, mm, dd);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  // yyyy-mm-dd
+  const m3 = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m3) {
+    const yy = Number(m3[1]);
+    const mm = Number(m3[2]) - 1;
+    const dd = Number(m3[3]);
+    const d = new Date(yy, mm, dd);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
 }
