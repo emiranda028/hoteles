@@ -1,45 +1,62 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import { readCsvFromPublic, CsvRow, toNumberSmart, toPercent01, safeDiv, formatMoney, formatPct } from "./csvClient";
+import { readCsvFromPublic, toNumberSmart, safeDiv, toPercent01, formatMoney, formatPct } from "./csvClient";
 
-type GlobalHotel = "JCR" | "MARRIOTT" | "SHERATON BCR" | "SHERATON MDQ" | "MAITEI";
+type HfRow = Record<string, any>;
 
-type Props = {
-  filePath: string;
-  year: number;
-  hotel: GlobalHotel;
+function normHotel(x: any) {
+  return String(x ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, " ");
+}
+
+function parseAnyDate(v: any): Date | null {
+  if (v instanceof Date && !isNaN(+v)) return v;
+  if (typeof v === "number") {
+    const base = new Date(Date.UTC(1899, 11, 30));
+    return new Date(base.getTime() + v * 86400000);
+  }
+  const s = String(v ?? "").trim();
+  if (!s) return null;
+
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) {
+    const d = new Date(+m[3], +m[2] - 1, +m[1]);
+    return isNaN(+d) ? null : d;
+  }
+
+  const d2 = new Date(s);
+  return isNaN(+d2) ? null : d2;
+}
+
+const AVAIL_PER_DAY_BY_HOTEL: Record<string, number> = {
+  MARRIOTT: 300,
+  "SHERATON MDQ": 194,
+  "SHERATON BCR": 161,
+  MAITEI: 98,
 };
 
-function resolveCol(columns: string[], mustInclude: string[]): string | null {
-  const norm = (s: string) =>
-    s
-      .trim()
-      .toUpperCase()
-      .replace(/\s+/g, " ")
-      .replace(/\u00A0/g, " ")
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "");
-
-  const cols = columns.map((c) => ({ raw: c, n: norm(c) }));
-  const want = mustInclude.map(norm);
-
-  for (const c of cols) {
-    let ok = true;
-    for (const w of want) if (!c.n.includes(w)) ok = false;
-    if (ok) return c.raw;
-  }
-  return null;
+function kpiCard(label: string, value: string) {
+  return (
+    <div className="card" style={{ padding: ".9rem", borderRadius: 18, minWidth: 190 }}>
+      <div style={{ opacity: 0.8, fontSize: ".85rem" }}>{label}</div>
+      <div style={{ fontWeight: 950, fontSize: "1.3rem", marginTop: ".15rem" }}>{value}</div>
+    </div>
+  );
 }
 
-function hotelsForFilter(h: GlobalHotel): string[] {
-  if (h === "JCR") return ["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"];
-  return [h];
-}
-
-export default function HighlightsCarousel({ filePath, year, hotel }: Props) {
-  const [rows, setRows] = useState<CsvRow[]>([]);
-  const [cols, setCols] = useState<string[]>([]);
+export default function HighlightsCarousel({
+  filePath,
+  year,
+  hotel,
+}: {
+  filePath: string;
+  year: number;
+  hotel: string;
+}) {
+  const [rows, setRows] = useState<HfRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
@@ -49,103 +66,87 @@ export default function HighlightsCarousel({ filePath, year, hotel }: Props) {
     setErr("");
 
     readCsvFromPublic(filePath)
-      .then(({ rows, columns }) => {
+      .then((csvRows) => {
         if (!alive) return;
-        setRows(rows);
-        setCols(columns);
-        setLoading(false);
+        setRows(csvRows ?? []);
       })
       .catch((e) => {
-        if (!alive) return;
-        setErr(String(e?.message || e));
-        setLoading(false);
-      });
+        console.error(e);
+        setErr("Error cargando CSV");
+        setRows([]);
+      })
+      .finally(() => setLoading(false));
 
     return () => {
       alive = false;
     };
   }, [filePath]);
 
-  const kpi = useMemo(() => {
-    if (!rows.length || !cols.length) return null;
+  const kpis = useMemo(() => {
+    const h = normHotel(hotel);
 
-    const colEmpresa = resolveCol(cols, ["EMPRESA"]) || "Empresa";
-    const colFecha = resolveCol(cols, ["FECHA"]) || "Fecha";
-    const colOccPct = resolveCol(cols, ["OCC.%"]) || "Occ.%";
-    const colTotalOcc = resolveCol(cols, ["TOTAL", "OCC"]) || "Total\nOcc.";
-    const colRev = resolveCol(cols, ["ROOM REVENUE"]) || "Room Revenue";
+    const filtered = (rows ?? [])
+      .map((r) => {
+        const d = parseAnyDate(r.Fecha ?? r.Date);
+        if (!d) return null;
+        return { ...r, __date: d };
+      })
+      .filter(Boolean) as any[];
 
-    const allowed = new Set(hotelsForFilter(hotel));
+    const byHotelYear = filtered.filter(
+      (r) => normHotel(r.Empresa ?? r.Hotel) === h && r.__date.getFullYear() === year
+    );
 
-    const yRows = rows.filter((r) => {
-      const emp = (r[colEmpresa] || "").trim().toUpperCase();
-      if (!allowed.has(emp)) return false;
+    if (!byHotelYear.length) return null;
 
-      // fecha puede venir "1/6/2022"
-      const f = (r[colFecha] || "").trim();
-      const m = f.match(/\/(\d{4})$/) || f.match(/^(\d{4})-/);
-      const y = m ? Number(m[1]) : NaN;
-      return y === year;
-    });
+    // Rooms y Revenue
+    const rooms = byHotelYear.reduce((a, r) => a + toNumberSmart(r["Total Occ."] ?? r["Total Occ"] ?? 0), 0);
+    const roomRevenue = byHotelYear.reduce((a, r) => a + toNumberSmart(r["Room Revenue"] ?? 0), 0);
 
-    if (!yRows.length) return null;
+    // Ocupación real: rooms / (available per day * days)
+    const days = byHotelYear.length;
+    const availPerDay = AVAIL_PER_DAY_BY_HOTEL[h] ?? 0;
+    const available = availPerDay * days;
 
-    let sumOcc = 0;
-    let sumRev = 0;
-    let sumOccPct = 0;
-    let days = 0;
+    const occ01 = toPercent01(safeDiv(rooms, available)); // ya viene en 0..1
+    const adr = safeDiv(roomRevenue, rooms);
 
-    for (const r of yRows) {
-      const occ = toNumberSmart(r[colTotalOcc]);
-      const rev = toNumberSmart(r[colRev]);
-      const occPct = toPercent01(r[colOccPct]);
-      if (isFinite(occ)) sumOcc += occ;
-      if (isFinite(rev)) sumRev += rev;
-      if (isFinite(occPct)) {
-        sumOccPct += occPct;
-        days += 1;
-      }
-    }
-
-    const adr = safeDiv(sumRev, sumOcc);
-    const occAvg = safeDiv(sumOccPct, days);
-    const revpar = (isFinite(adr) && isFinite(occAvg)) ? adr * occAvg : NaN;
-
-    return { sumRev, adr, occAvg, revpar };
-  }, [rows, cols, year, hotel]);
-
-  if (loading) {
-    return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Cargando KPIs…</div>;
-  }
-  if (err) {
-    return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Error: {err}</div>;
-  }
-  if (!kpi) {
-    return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Sin datos (KPIs) para {hotel} en {year}.</div>;
-  }
-
-  const Card = ({ title, value, sub }: { title: string; value: string; sub?: string }) => (
-    <div
-      className="card"
-      style={{
-        padding: "1rem",
-        borderRadius: 18,
-        minWidth: 220,
-        flex: "1 1 220px",
-      }}
-    >
-      <div style={{ fontSize: ".9rem", opacity: 0.8, fontWeight: 800 }}>{title}</div>
-      <div style={{ fontSize: "1.35rem", fontWeight: 950, marginTop: ".35rem" }}>{value}</div>
-      {sub ? <div style={{ marginTop: ".15rem", opacity: 0.7 }}>{sub}</div> : null}
-    </div>
-  );
+    return {
+      rooms,
+      roomRevenue,
+      occ01,
+      adr,
+    };
+  }, [rows, year, hotel]);
 
   return (
-    <div style={{ display: "flex", gap: ".8rem", flexWrap: "wrap" }}>
-      <Card title="Room Revenue" value={formatMoney(kpi.sumRev)} />
-      <Card title="ADR" value={formatMoney(kpi.adr)} />
-      <Card title="Ocupación" value={formatPct(kpi.occAvg)} />
-      <Card title="RevPAR" value={formatMoney(kpi.revpar)} sub="ADR × Ocupación (promedio)" />
+    <div className="card" style={{ padding: "1rem", borderRadius: 22 }}>
+      <div style={{ fontWeight: 950, fontSize: "1.05rem" }}>KPIs principales</div>
+
+      {loading && <div style={{ marginTop: ".5rem" }}>Cargando…</div>}
+      {!loading && err && <div style={{ marginTop: ".5rem" }}>{err}</div>}
+      {!loading && !err && !kpis && (
+        <div style={{ marginTop: ".5rem", opacity: 0.9 }}>
+          Sin datos para el filtro actual.
+        </div>
+      )}
+
+      {kpis && (
+        <div
+          style={{
+            marginTop: ".85rem",
+            display: "flex",
+            gap: ".75rem",
+            overflowX: "auto",
+            paddingBottom: ".25rem",
+          }}
+        >
+          {kpiCard("Ocupación", formatPct(kpis.occ01))}
+          {kpiCard("Rooms", Math.round(kpis.rooms).toLocaleString("es-AR"))}
+          {kpiCard("Room Revenue", formatMoney(kpis.roomRevenue))}
+          {kpiCard("ADR", kpis.adr.toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}
+        </div>
+      )}
     </div>
   );
 }
