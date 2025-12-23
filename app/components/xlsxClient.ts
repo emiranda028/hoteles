@@ -1,28 +1,23 @@
-// app/components/xlsxClient.ts
+"use client";
+
 export type XlsxRow = Record<string, any>;
 
-export async function readXlsxFromPublic(
-  filePath: string,
-  options?: { sheetName?: string }
-): Promise<{ sheet: string; sheetName: string; rows: XlsxRow[] }> {
-  const res = await fetch(filePath, { cache: "no-store" });
-  if (!res.ok) throw new Error(`No pude leer XLSX: ${filePath} (${res.status})`);
+export async function readXlsxFromPublic(path: string): Promise<{ sheet: string; rows: XlsxRow[] }> {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error(`No se pudo descargar XLSX: ${path} (${res.status})`);
 
   const buf = await res.arrayBuffer();
 
-  // xlsx corre en client; lo importamos dinámico para que Next no lo intente “server”
+  // Import dinámico para no romper SSR/build
+  // @ts-ignore
   const XLSX = await import("xlsx");
 
   const wb = XLSX.read(buf, { type: "array" });
+  const sheet = wb.SheetNames?.[0];
+  if (!sheet) return { sheet: "N/A", rows: [] };
 
-  const wanted = options?.sheetName?.trim();
-  const sheetName = wanted && wb.SheetNames.includes(wanted) ? wanted : wb.SheetNames[0];
+  const ws = wb.Sheets[sheet];
+  const rows: XlsxRow[] = XLSX.utils.sheet_to_json(ws, { defval: "" });
 
-  const ws = wb.Sheets[sheetName];
-  const rows = XLSX.utils.sheet_to_json(ws, {
-    defval: "",
-    raw: false, // deja strings; luego vos parseás si querés
-  }) as XlsxRow[];
-
-  return { sheet: sheetName, sheetName, rows };
+  return { sheet, rows };
 }
