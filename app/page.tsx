@@ -1,116 +1,139 @@
-"use client";
+// app/components/csvClient.ts
+export type CsvRow = Record<string, any>;
 
-import { useMemo, useState } from "react";
-import YearComparator from "./components/YearComparator";
-import MembershipSummary from "./components/MembershipSummary";
-import CountryRanking from "./components/CountryRanking";
-import { JcrStickyFilters, MaiteiStickyFilters } from "./components/StickyFilterBars";
+/**
+ * CSV parser liviano (sin dependencias).
+ * - autodetecta delimitador (; o ,)
+ * - respeta comillas dobles
+ * - header: true
+ */
+function parseCsv(text: string): CsvRow[] {
+  const lines = text
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((l) => l.trimEnd())
+    .filter((l) => l.trim().length > 0);
 
-const HF_PATH = "/data/hf_diario.csv";
-const MEMBERSHIP_PATH = "/data/jcr_membership.xlsx";
-const NACIONALIDADES_PATH = "/data/jcr_nacionalidades.xlsx";
+  if (lines.length < 2) return [];
 
-const JCR_HOTELS = [
-  { value: "ALL", label: "Todos" },
-  { value: "MARRIOTT", label: "Marriott" },
-  { value: "SHERATON BCR", label: "Sheraton BCR" },
-  { value: "SHERATON MDQ", label: "Sheraton MDQ" },
-];
+  // Detect delimiter usando la primera línea (header)
+  const headerLine = lines[0];
+  const semi = (headerLine.match(/;/g) || []).length;
+  const comma = (headerLine.match(/,/g) || []).length;
+  const delim = semi > comma ? ";" : ",";
 
-export default function Page() {
-  // ===== JCR filtros globales =====
-  const [jcrYear, setJcrYear] = useState<number>(2025);
-  const [jcrBaseYear, setJcrBaseYear] = useState<number>(2024);
-  const [jcrHotel, setJcrHotel] = useState<string>("ALL");
+  const splitLine = (line: string): string[] => {
+    const out: string[] = [];
+    let cur = "";
+    let inQuotes = false;
 
-  // ===== Maitei filtros propios =====
-  const [maiYear, setMaiYear] = useState<number>(2025);
-  const [maiBaseYear, setMaiBaseYear] = useState<number>(2024);
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
 
-  // Años: si vos ya los calculás desde el CSV, reemplazá esto.
-  const years = useMemo(() => [2025, 2024, 2023, 2022, 2021, 2020], []);
+      if (ch === '"') {
+        // manejar "" como escape
+        const next = line[i + 1];
+        if (inQuotes && next === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+        continue;
+      }
 
-  const jcrHotelFilter = jcrHotel === "ALL" ? "" : jcrHotel;
+      if (!inQuotes && ch === delim) {
+        out.push(cur);
+        cur = "";
+        continue;
+      }
 
-  return (
-    <main style={{ padding: "1.25rem", display: "grid", gap: "1.25rem" }}>
-      {/* =========================
-          BLOQUE JCR (hasta Nacionalidades)
-      ========================== */}
-      <section style={{ display: "grid", gap: "1rem" }}>
-        <JcrStickyFilters
-          year={jcrYear}
-          baseYear={jcrBaseYear}
-          onYear={setJcrYear}
-          onBaseYear={setJcrBaseYear}
-          hotel={jcrHotel}
-          onHotel={setJcrHotel}
-          years={years}
-          hotels={JCR_HOTELS}
-        />
+      cur += ch;
+    }
+    out.push(cur);
+    return out.map((s) => s.trim());
+  };
 
-        {/* ===== KPIs / Comparativa / H&F (JCR) ===== */}
-        <YearComparator
-          filePath={HF_PATH}
-          year={jcrYear}
-          baseYear={jcrBaseYear}
-          hotelFilter={jcrHotelFilter} // "" => todos
-          // IMPORTANTE: NO mezclar Sheratons, debe filtrar exacto por Empresa
-        />
+  const headers = splitLine(lines[0]).map((h) => h.replace(/^\uFEFF/, "").trim());
 
-        {/* ===== Membership (JCR) ===== */}
-        <MembershipSummary
-          year={jcrYear}
-          baseYear={jcrBaseYear}
-          filePath={MEMBERSHIP_PATH}
-          hotelFilter={jcrHotelFilter} // "" => todos (pero sólo JCR)
-          allowedHotels={["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"]}
-          compactCharts={false}
-        />
+  const rows: CsvRow[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = splitLine(lines[i]);
+    const obj: CsvRow = {};
+    for (let c = 0; c < headers.length; c++) {
+      obj[headers[c]] = cols[c] ?? "";
+    }
+    rows.push(obj);
+  }
+  return rows;
+}
 
-        {/* ===== Nacionalidades (solo Marriott, usa filtro global de año) ===== */}
-        <div style={{ marginTop: ".25rem" }}>
-          <div className="sectionTitle" style={{ fontSize: "1.2rem", fontWeight: 950 }}>
-            Nacionalidades
-          </div>
-          <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-            Ranking por país + distribución por continente. (Archivo Marriott). Usa filtro global de año.
-          </div>
+export async function readCsvFromPublic(path: string): Promise<CsvRow[]> {
+  const res = await fetch(path, { cache: "no-store" });
+  if (!res.ok) throw new Error(`No se pudo leer CSV: ${path} (${res.status})`);
+  const text = await res.text();
+  return parseCsv(text);
+}
 
-          <div style={{ marginTop: ".85rem" }}>
-            <CountryRanking year={jcrYear} filePath={NACIONALIDADES_PATH} />
-          </div>
-        </div>
-      </section>
+/* ======================
+   Helpers numéricos
+====================== */
 
-      {/* =========================
-          BLOQUE MAITEI (Gotel) — filtros propios
-      ========================== */}
-      <section style={{ display: "grid", gap: "1rem", marginTop: "1rem" }}>
-        <MaiteiStickyFilters
-          year={maiYear}
-          baseYear={maiBaseYear}
-          onYear={setMaiYear}
-          onBaseYear={setMaiBaseYear}
-          years={years}
-        />
+export function toNumberSmart(v: any): number {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
 
-        {/* YearComparator para MAITEI: mismo componente pero hotelFilter fijo */}
-        <YearComparator
-          filePath={HF_PATH}
-          year={maiYear}
-          baseYear={maiBaseYear}
-          hotelFilter={"MAITEI"}
-        />
+  const s = String(v).trim();
+  if (!s) return 0;
 
-        {/* Acá va TODO lo de Maitei en el futuro (tablas, KPIs, etc.) */}
-        <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-          <div style={{ fontWeight: 950 }}>Maitei (Management Gotel)</div>
-          <div style={{ opacity: 0.8, marginTop: ".35rem" }}>
-            Bloque separado con sus métricas y visuales propios.
-          </div>
-        </div>
-      </section>
-    </main>
-  );
+  // % explícito
+  const isPct = s.includes("%");
+
+  // Normalizar: 22.441,71 -> 22441.71
+  //            22,441.71 -> 22441.71 (caso raro)
+  let cleaned = s.replace(/\s/g, "").replace(/%/g, "");
+
+  // Si tiene ambos separadores, asumimos miles "." y decimales ","
+  if (cleaned.includes(".") && cleaned.includes(",")) {
+    cleaned = cleaned.replace(/\./g, "").replace(",", ".");
+  } else if (cleaned.includes(",") && !cleaned.includes(".")) {
+    // 123,45 => 123.45
+    cleaned = cleaned.replace(",", ".");
+  }
+
+  const n = Number(cleaned);
+  if (!Number.isFinite(n)) return 0;
+
+  return n;
+}
+
+export function safeDiv(a: number, b: number): number {
+  return b === 0 ? 0 : a / b;
+}
+
+/** Convierte 59.4 o 59,4% a 0.594; si ya viene 0.594 lo deja */
+export function toPercent01(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  if (v > 1) return v / 100;
+  if (v < 0) return 0;
+  return v;
+}
+
+export function formatMoney(n: number): string {
+  const val = Number.isFinite(n) ? n : 0;
+  return val.toLocaleString("es-AR", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  });
+}
+
+export function formatInt(n: number): string {
+  const val = Number.isFinite(n) ? n : 0;
+  return val.toLocaleString("es-AR", { maximumFractionDigits: 0 });
+}
+
+export function formatPct01(n01: number): string {
+  const val = Number.isFinite(n01) ? n01 : 0;
+  return (val * 100).toFixed(1) + "%";
 }
