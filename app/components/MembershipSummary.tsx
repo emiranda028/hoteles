@@ -1,76 +1,40 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { readXlsxFromPublic } from "./xlsxClient";
+import React, { useEffect, useMemo, useState } from "react";
+import { readXlsxFromPublic, XlsxRow } from "./xlsxClient";
+
+type GlobalHotel = "MARRIOTT" | "SHERATON MDQ" | "SHERATON BCR" | "MAITEI";
 
 type Props = {
   year: number;
   baseYear: number;
-  allowedHotels: string[];      // ["MARRIOTT","SHERATON BCR","SHERATON MDQ"]
-  filePath: string;            // "/data/jcr_membership.xlsx"
-  title?: string;
+  filePath: string;
+  globalHotel: GlobalHotel;
+  compactCharts?: boolean;
 };
 
-type RowAny = Record<string, any>;
-
-type DetectInfo = {
-  hotelKey?: string;
-  membershipKey?: string;
-  qtyKey?: string;
-  dateKey?: string;
-  keys: string[];
-};
-
-type TierAgg = {
-  tier: string;
-  code: string;
-  qty: number;
-  share: number; // 0-1
-};
-
-const fmtInt = (n: number) => Math.round(n).toLocaleString("es-AR");
-const fmtPct = (p01: number) => (p01 * 100).toFixed(1).replace(".", ",") + "%";
-const fmtPP = (pp: number) => pp.toFixed(1).replace(".", ",") + " p.p.";
-
-function normKey(s: any) {
-  return String(s ?? "").trim().toLowerCase();
+function norm(s: any) {
+  return String(s ?? "").trim().toUpperCase().replace(/\s+/g, " ");
 }
 
-function normHotel(raw: any) {
-  const s = String(raw ?? "").trim().toUpperCase().replace(/\s+/g, " ");
-  if (s.includes("MARRIOTT")) return "MARRIOTT";
-  if (s.includes("BARILOCHE") || s.includes("BCR")) return "SHERATON BCR";
-  if (s.includes("MAR DEL PLATA") || s.includes("MDQ")) return "SHERATON MDQ";
-  return s;
-}
-
-function normTier(raw: any) {
-  return String(raw ?? "").trim().replace(/\s+/g, " ");
-}
-
-function tierCode(tier: string) {
-  const m = tier.match(/\(([^)]+)\)/);
-  return (m?.[1] ?? "").trim().toUpperCase();
-}
-
-function parseNumber(v: any): number {
-  if (typeof v === "number") return v;
-  const s = String(v ?? "").trim();
-  if (!s) return 0;
-  const cleaned = s
-    .replace(/\s/g, "")
-    .replace(/\./g, "")
-    .replace(/,/g, ".")
-    .replace(/[^\d.-]/g, "");
-  const n = Number(cleaned);
-  return Number.isFinite(n) ? n : 0;
+function pickKey(keys: string[], candidates: string[]): string | null {
+  const lower = new Map(keys.map((k) => [k.toLowerCase(), k]));
+  for (const c of candidates) {
+    const hit = lower.get(c.toLowerCase());
+    if (hit) return hit;
+  }
+  for (const c of candidates) {
+    const cLow = c.toLowerCase();
+    const found = keys.find((k) => k.toLowerCase().includes(cLow));
+    if (found) return found;
+  }
+  return null;
 }
 
 function parseAnyDate(v: any): Date | null {
-  if (!v && v !== 0) return null;
+  if (v === null || v === undefined) return null;
   if (v instanceof Date && !isNaN(v.getTime())) return v;
 
-  // Excel serial
   if (typeof v === "number" && Number.isFinite(v)) {
     const excelEpoch = new Date(Date.UTC(1899, 11, 30));
     const d = new Date(excelEpoch.getTime() + v * 86400000);
@@ -79,9 +43,6 @@ function parseAnyDate(v: any): Date | null {
 
   const s = String(v).trim();
   if (!s) return null;
-
-  const iso = new Date(s);
-  if (!isNaN(iso.getTime())) return iso;
 
   const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
   if (m) {
@@ -93,248 +54,205 @@ function parseAnyDate(v: any): Date | null {
     return isNaN(d.getTime()) ? null : d;
   }
 
-  return null;
+  const d2 = new Date(s);
+  return isNaN(d2.getTime()) ? null : d2;
 }
 
-function detectColumns(rows: RowAny[]): DetectInfo {
-  const keys = Object.keys(rows?.[0] ?? {});
-  const pick = (cands: string[]) => {
-    for (const c of cands) {
-      const real = keys.find((k) => normKey(k) === c.toLowerCase());
-      if (real) return real;
-    }
-    return undefined;
-  };
-
-  const hotelKey = pick(["empresa", "hotel", "property", "propiedad"]);
-  const membershipKey = pick(["bonboy", "membership", "tier", "membresia", "membresía"]);
-  const qtyKey = pick(["cantidad", "qty", "quantity", "count", "total"]);
-  const dateKey = pick(["fecha", "date", "day"]);
-
-  return { hotelKey, membershipKey, qtyKey, dateKey, keys };
+function toNum(v: any): number {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+  const s = String(v).trim();
+  if (!s) return 0;
+  const cleaned = s.replace(/\./g, "").replace(",", ".").replace("%", "");
+  const n = Number(cleaned);
+  return isNaN(n) ? 0 : n;
 }
 
-function monthLabelEs(m: number) {
-  const names = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
-  return names[m - 1] ?? String(m);
-}
+const MONTHS = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
 
-type Scope = "JCR" | "MARRIOTT" | "SHERATON BCR" | "SHERATON MDQ";
-
-export default function MembershipSummary({
-  year,
-  baseYear,
-  allowedHotels,
-  filePath,
-  title = "Membership (JCR)",
-}: Props) {
-  const [raw, setRaw] = useState<RowAny[]>([]);
+export default function MembershipSummary({ year, baseYear, filePath, globalHotel, compactCharts = false }: Props) {
+  const [rows, setRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [err, setErr] = useState("");
 
-  const [scope, setScope] = useState<Scope>("JCR");
-  const [mode, setMode] = useState<"YEAR" | "MONTH">("YEAR");
-  const [month, setMonth] = useState<number>(1);
+  const [meta, setMeta] = useState<{ sheet: string; keys: string[] } | null>(null);
+  const [detected, setDetected] = useState<{ kHotel: string | null; kMem: string | null; kQty: string | null; kDate: string | null } | null>(null);
 
   useEffect(() => {
     let alive = true;
-    (async () => {
-      try {
-        setLoading(true);
-        setError("");
+    setLoading(true);
+    setErr("");
 
-        const r = await readXlsxFromPublic(filePath);
-        // r.sheetName existe (lo garantiza xlsxClient)
-        const rows = (r.rows ?? []) as RowAny[];
-
+    readXlsxFromPublic(filePath)
+      .then((r) => {
         if (!alive) return;
-        setRaw(rows);
-      } catch (e: any) {
+
+        const keys = r.rows?.[0] ? Object.keys(r.rows[0]) : [];
+        setMeta({ sheet: r.sheet, keys });
+
+        const kHotel = pickKey(keys, ["Empresa", "Hotel"]);
+        const kMem = pickKey(keys, ["Bonboy", "Membership", "Membresia", "Membresía"]);
+        const kQty = pickKey(keys, ["Cantidad", "Qty", "QTY", "Cant"]);
+        const kDate = pickKey(keys, ["Fecha", "Date"]);
+
+        setDetected({ kHotel, kMem, kQty, kDate });
+
+        setRows(r.rows ?? []);
+      })
+      .catch((e) => {
         console.error(e);
-        if (!alive) return;
-        setRaw([]);
-        setError(e?.message ?? String(e));
-      } finally {
-        if (alive) setLoading(false);
-      }
-    })();
+        setErr(String(e?.message ?? e));
+        setRows([]);
+      })
+      .finally(() => setLoading(false));
 
     return () => {
       alive = false;
     };
   }, [filePath]);
 
-  const det = useMemo(() => detectColumns(raw), [raw]);
+  // mapeo por si el XLSX trae nombres distintos a tu filtro
+  const hotelsToUse = useMemo(() => {
+    const h = norm(globalHotel);
+    // si tu XLSX usa otras etiquetas, agregalas acá
+    // ej: "SHERATON BARILOCHE" etc.
+    return [h];
+  }, [globalHotel]);
 
-  const filtered = useMemo(() => {
-    if (!raw.length) return [];
+  const normalized = useMemo(() => {
+    if (!rows.length || !detected) return [];
+    const { kHotel, kMem, kQty, kDate } = detected;
 
-    const { hotelKey, membershipKey, qtyKey, dateKey } = det;
-    if (!hotelKey || !membershipKey || !qtyKey || !dateKey) return [];
+    return rows
+      .map((r: XlsxRow) => {
+        const hotel = norm(kHotel ? r[kHotel] : r["Empresa"] ?? r["Hotel"]);
+        const mem = String(kMem ? r[kMem] : r["Bonboy"] ?? r["Membership"] ?? "").trim();
+        const qty = toNum(kQty ? r[kQty] : r["Cantidad"] ?? r["Qty"]);
+        const d = parseAnyDate(kDate ? r[kDate] : r["Fecha"] ?? r["Date"]);
+        if (!d) return null;
 
-    const scopeHotel = scope === "JCR" ? null : scope;
-
-    return raw
-      .map((r) => {
-        const h = normHotel(r[hotelKey]);
-        const tier = normTier(r[membershipKey]);
-        const qty = parseNumber(r[qtyKey]);
-        const d = parseAnyDate(r[dateKey]);
-        if (!h || !tier || !d) return null;
-
-        const yy = d.getFullYear();
-        const mm = d.getMonth() + 1;
-
-        return { hotel: h, tier, qty, year: yy, month: mm };
+        return {
+          hotel,
+          mem,
+          qty,
+          year: d.getFullYear(),
+          month: d.getMonth() + 1,
+        };
       })
-      .filter(Boolean)
-      .filter((x: any) => allowedHotels.includes(x.hotel))
-      .filter((x: any) => (scopeHotel ? x.hotel === scopeHotel : true))
-      .filter((x: any) => x.year === year || x.year === baseYear) // necesitamos ambos para comparar
-      .filter((x: any) => (mode === "MONTH" ? x.month === month : true)) as any[];
-  }, [raw, det, allowedHotels, scope, year, baseYear, mode, month]);
+      .filter(Boolean) as { hotel: string; mem: string; qty: number; year: number; month: number }[];
+  }, [rows, detected]);
 
-  const tiersAgg = useMemo(() => {
-    const mapCur = new Map<string, number>();
-    const mapBase = new Map<string, number>();
+  const yearRows = useMemo(() => {
+    return normalized.filter((r) => r.year === year && hotelsToUse.includes(r.hotel));
+  }, [normalized, year, hotelsToUse]);
 
-    for (const r of filtered as any[]) {
-      const key = r.tier;
-      if (r.year === year) mapCur.set(key, (mapCur.get(key) ?? 0) + r.qty);
-      if (r.year === baseYear) mapBase.set(key, (mapBase.get(key) ?? 0) + r.qty);
-    }
+  const baseRows = useMemo(() => {
+    return normalized.filter((r) => r.year === baseYear && hotelsToUse.includes(r.hotel));
+  }, [normalized, baseYear, hotelsToUse]);
 
-    const totalCur = Array.from(mapCur.values()).reduce((a, b) => a + b, 0);
-    const totalBase = Array.from(mapBase.values()).reduce((a, b) => a + b, 0);
+  const sumYear = useMemo(() => yearRows.reduce((a, r) => a + r.qty, 0), [yearRows]);
+  const sumBase = useMemo(() => baseRows.reduce((a, r) => a + r.qty, 0), [baseRows]);
 
-    const tiers = Array.from(new Set([...mapCur.keys(), ...mapBase.keys()])).sort();
+  const byMonth = useMemo(() => {
+    const m = new Map<number, number>();
+    for (const r of yearRows) m.set(r.month, (m.get(r.month) ?? 0) + r.qty);
+    return Array.from({ length: 12 }).map((_, i) => m.get(i + 1) ?? 0);
+  }, [yearRows]);
 
-    const cur: TierAgg[] = tiers.map((t) => ({
-      tier: t,
-      code: tierCode(t),
-      qty: mapCur.get(t) ?? 0,
-      share: totalCur ? (mapCur.get(t) ?? 0) / totalCur : 0,
-    }));
+  const composition = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of yearRows) m.set(r.mem || "Sin definir", (m.get(r.mem || "Sin definir") ?? 0) + r.qty);
 
-    const base: TierAgg[] = tiers.map((t) => ({
-      tier: t,
-      code: tierCode(t),
-      qty: mapBase.get(t) ?? 0,
-      share: totalBase ? (mapBase.get(t) ?? 0) / totalBase : 0,
-    }));
+    return Array.from(m.entries())
+      .map(([k, v]) => ({ k, v }))
+      .sort((a, b) => b.v - a.v);
+  }, [yearRows]);
 
-    return { cur, base, totalCur, totalBase };
-  }, [filtered, year, baseYear]);
+  if (loading) {
+    return (
+      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
+        Cargando membership…
+      </div>
+    );
+  }
 
-  const monthsAvailable = useMemo(() => {
-    const set = new Set<number>();
-    for (const r of filtered as any[]) {
-      if (r.year === year) set.add(r.month);
-    }
-    return Array.from(set).sort((a, b) => a - b);
-  }, [filtered, year]);
+  if (err) {
+    return (
+      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
+        <div style={{ color: "crimson" }}>Error: {err}</div>
+      </div>
+    );
+  }
 
   return (
-    <section className="section" style={{ marginTop: "1rem" }}>
-      <div className="sectionTitle" style={{ fontSize: "1.25rem", fontWeight: 900 }}>{title}</div>
+    <div style={{ display: "grid", gap: "1rem" }}>
+      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
+        <div style={{ fontWeight: 950, fontSize: "1.05rem" }}>
+          Membership (JCR) — Acumulado {year} · vs {baseYear}
+        </div>
 
-      <div className="card" style={{ padding: "1rem", borderRadius: 18, marginTop: ".75rem" }}>
-        <div style={{ display: "grid", gap: ".75rem", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))" }}>
-          <div>
-            <div style={{ fontSize: ".85rem", opacity: 0.75 }}>Scope</div>
-            <select value={scope} onChange={(e) => setScope(e.target.value as Scope)} style={{ width: "100%", padding: ".55rem", borderRadius: 12 }}>
-              <option value="JCR">JCR (Consolidado)</option>
-              <option value="MARRIOTT">MARRIOTT</option>
-              <option value="SHERATON BCR">SHERATON BCR</option>
-              <option value="SHERATON MDQ">SHERATON MDQ</option>
-            </select>
-          </div>
-
-          <div>
-            <div style={{ fontSize: ".85rem", opacity: 0.75 }}>Modo</div>
-            <select value={mode} onChange={(e) => setMode(e.target.value as any)} style={{ width: "100%", padding: ".55rem", borderRadius: 12 }}>
-              <option value="YEAR">Año</option>
-              <option value="MONTH">Mes</option>
-            </select>
-          </div>
-
-          {mode === "MONTH" && (
-            <div>
-              <div style={{ fontSize: ".85rem", opacity: 0.75 }}>Mes</div>
-              <select value={month} onChange={(e) => setMonth(Number(e.target.value))} style={{ width: "100%", padding: ".55rem", borderRadius: 12 }}>
-                {(monthsAvailable.length ? monthsAvailable : [1,2,3,4,5,6,7,8,9,10,11,12]).map((m) => (
-                  <option key={m} value={m}>{monthLabelEs(m)}</option>
-                ))}
-              </select>
-            </div>
+        <div style={{ marginTop: ".5rem", opacity: 0.85 }}>
+          {sumYear ? (
+            <>
+              <b>{sumYear.toLocaleString("es-AR")}</b> (Δ vs {baseYear}:{" "}
+              <b>{(sumYear - sumBase).toLocaleString("es-AR")}</b>)
+            </>
+          ) : (
+            <>Sin datos para {globalHotel} en {year}.</>
           )}
         </div>
 
-        {loading && <div style={{ marginTop: ".9rem", opacity: 0.8 }}>Cargando membership…</div>}
-        {!loading && error && <div style={{ marginTop: ".9rem", color: "#b91c1c" }}>{error}</div>}
-
-        {!loading && !error && !(tiersAgg.cur.length || tiersAgg.base.length) && (
-          <div style={{ marginTop: ".9rem", opacity: 0.8 }}>
-            Sin datos para el filtro actual. Keys detectadas: {det.keys.join(", ")}
+        {meta && detected ? (
+          <div style={{ marginTop: ".6rem", fontSize: ".9rem", opacity: 0.75 }}>
+            Sheet: {meta.sheet} · Detectado: hotel={detected.kHotel ?? "?"} · membership={detected.kMem ?? "?"} · qty={detected.kQty ?? "?"} · fecha={detected.kDate ?? "?"}
           </div>
-        )}
-
-        {!loading && !error && (tiersAgg.cur.length || tiersAgg.base.length) && (
-          <>
-            <div style={{ display: "grid", gap: ".75rem", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", marginTop: "1rem" }}>
-              <div className="kpi">
-                <div className="kpiLabel">Total {year}</div>
-                <div className="kpiValue">{fmtInt(tiersAgg.totalCur)}</div>
-              </div>
-              <div className="kpi">
-                <div className="kpiLabel">Total {baseYear}</div>
-                <div className="kpiValue">{fmtInt(tiersAgg.totalBase)}</div>
-              </div>
-              <div className="kpi">
-                <div className="kpiLabel">Dif.</div>
-                <div className="kpiValue">{fmtInt(tiersAgg.totalCur - tiersAgg.totalBase)}</div>
-              </div>
-              <div className="kpi">
-                <div className="kpiLabel">Δ share top tier</div>
-                <div className="kpiValue">
-                  {(() => {
-                    const top = tiersAgg.cur.slice().sort((a, b) => b.share - a.share)[0];
-                    if (!top) return "—";
-                    const base = tiersAgg.base.find((x) => x.tier === top.tier);
-                    const pp = ((top.share ?? 0) - (base?.share ?? 0)) * 100;
-                    return fmtPP(pp);
-                  })()}
-                </div>
-              </div>
-            </div>
-
-            <div style={{ marginTop: "1rem" }}>
-              <div style={{ fontWeight: 900, marginBottom: ".5rem" }}>Mix por tier</div>
-
-              <div style={{ display: "grid", gap: ".5rem" }}>
-                {tiersAgg.cur
-                  .slice()
-                  .sort((a, b) => b.qty - a.qty)
-                  .map((t) => {
-                    const b = tiersAgg.base.find((x) => x.tier === t.tier);
-                    const pp = ((t.share ?? 0) - (b?.share ?? 0)) * 100;
-
-                    return (
-                      <div key={t.tier} style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", gap: ".5rem", alignItems: "center", padding: ".55rem .65rem", borderRadius: 14, background: "rgba(0,0,0,.03)" }}>
-                        <div style={{ fontWeight: 800 }}>{t.tier}</div>
-                        <div style={{ opacity: 0.85 }}>{fmtInt(t.qty)}</div>
-                        <div style={{ opacity: 0.85 }}>{fmtPct(t.share)}</div>
-                        <div style={{ fontWeight: 900, color: pp >= 0 ? "#15803d" : "#b91c1c" }}>
-                          {pp >= 0 ? "+" : ""}{fmtPP(pp)}
-                        </div>
-                      </div>
-                    );
-                  })}
-              </div>
-            </div>
-          </>
-        )}
+        ) : null}
       </div>
-    </section>
+
+      <div
+        className="card"
+        style={{
+          padding: "1rem",
+          borderRadius: 18,
+          overflowX: "auto",
+        }}
+      >
+        <div style={{ fontWeight: 900 }}>Ranking por mes</div>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 520, marginTop: ".5rem" }}>
+          <thead>
+            <tr style={{ textAlign: "left", opacity: 0.85 }}>
+              {MONTHS.map((m) => (
+                <th key={m} style={{ padding: ".4rem .35rem" }}>
+                  {m}
+                </th>
+              ))}
+              <th style={{ padding: ".4rem .35rem" }}>Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style={{ borderTop: "1px solid rgba(255,255,255,.08)" }}>
+              {byMonth.map((v, i) => (
+                <td key={i} style={{ padding: ".5rem .35rem" }}>
+                  {v.toLocaleString("es-AR")}
+                </td>
+              ))}
+              <td style={{ padding: ".5rem .35rem", fontWeight: 900 }}>{sumYear.toLocaleString("es-AR")}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
+        <div style={{ fontWeight: 900 }}>Composición</div>
+        <div style={{ marginTop: ".6rem", display: "grid", gap: ".35rem" }}>
+          {composition.slice(0, compactCharts ? 8 : 14).map((x) => (
+            <div key={x.k} style={{ display: "flex", justifyContent: "space-between", gap: "1rem" }}>
+              <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{x.k}</div>
+              <div style={{ fontWeight: 900 }}>{x.v.toLocaleString("es-AR")}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
