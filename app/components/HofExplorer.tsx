@@ -1,124 +1,33 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import { readCsvFromPublic } from "./csvClient";
+import { formatMoneyUSD, formatPct01, parseFechaSmart, readCsvFromPublic, toNumberSmart, formatInt } from "./csvClient";
 
-/* =====================
-   Configuración fija
-===================== */
+type GlobalHotel = "MARRIOTT" | "SHERATON BCR" | "SHERATON MDQ" | "MAITEI";
 
-const AVAIL_PER_DAY_BY_HOTEL: Record<string, number> = {
-  MARRIOTT: 300,
-  "SHERATON MDQ": 194,
-  "SHERATON BCR": 161,
-  MAITEI: 98,
-};
-
-const MONTHS_ES = [
-  "Enero","Febrero","Marzo","Abril","Mayo","Junio",
-  "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"
-];
-
-function normHotel(x: any) {
-  return String(x ?? "")
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, " ");
-}
-
-function parseMoneyES(v: any): number {
-  if (!v) return 0;
-  const s = String(v).replace(/\s/g, "");
-  if (s.includes(",") && s.includes(".")) {
-    return Number(s.replace(/\./g, "").replace(",", ".")) || 0;
-  }
-  if (s.includes(",")) {
-    return Number(s.replace(",", ".")) || 0;
-  }
-  return Number(s) || 0;
-}
-
-function parseAnyDate(v: any): Date | null {
-  if (v instanceof Date && !isNaN(+v)) return v;
-
-  if (typeof v === "number") {
-    const base = new Date(Date.UTC(1899, 11, 30));
-    return new Date(base.getTime() + v * 86400000);
-  }
-
-  const s = String(v).trim();
-  if (!s) return null;
-
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
-  if (m) {
-    const d = new Date(+m[3], +m[2] - 1, +m[1]);
-    return isNaN(+d) ? null : d;
-  }
-
-  const d2 = new Date(s);
-  return isNaN(+d2) ? null : d2;
-}
-
-const fmtInt = (n: number) => Math.round(n).toLocaleString("es-AR");
-const fmtMoney0 = (n: number) => Math.round(n).toLocaleString("es-AR");
-const fmtMoney2 = (n: number) =>
-  n.toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const fmtPct1 = (v: number) => (v * 100).toFixed(1).replace(".", ",") + "%";
-
-/* =====================
-   Tipos
-===================== */
-
-type HofRow = {
-  date: Date;
+type Props = {
   year: number;
-  month: number;
-  quarter: number;
-  rooms: number;
-  revenue: number;
-  guests: number;
-  hotel: string;
+  hotel: GlobalHotel;
+  filePath: string;
 };
 
-type Agg = {
-  rooms: number;
-  revenue: number;
-  guests: number;
-  days: number;
-  availableRooms: number;
-  occ01: number;
-  adr: number;
-};
+type HfRow = Record<string, any>;
 
-/* =====================
-   Componente
-===================== */
+function pick(row: HfRow, keys: string[]): any {
+  for (const k of keys) if (row[k] !== undefined) return row[k];
+  return undefined;
+}
 
-export default function HofExplorer({
-  filePath = "/data/hf_diario.csv",
-  allowedHotels,
-  title,
-  year,
-  onYearChange,
-  hotel,
-  onHotelChange,
-}: {
-  filePath?: string;
-  allowedHotels: string[];
-  title: string;
-  year: number;
-  onYearChange: (y: number) => void;
-  hotel: string;
-  onHotelChange: (h: string) => void;
-}) {
-  const [rows, setRows] = useState<HofRow[]>([]);
+function monthLabel(m: number) {
+  return ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"][m - 1] || String(m);
+}
+
+export default function HofExplorer({ year, hotel, filePath }: Props) {
+  const [rows, setRows] = useState<HfRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [mode, setMode] = useState<"YEAR" | "QUARTER" | "MONTH">("YEAR");
-  const [month, setMonth] = useState(1);
-  const [quarter, setQuarter] = useState(1);
   const [err, setErr] = useState("");
-
-  /* ========= LOAD ========= */
+  const [month, setMonth] = useState<number>(new Date().getMonth() + 1);
+  const [hof, setHof] = useState<string>("ALL"); // History / Forecast / hoy / ALL
 
   useEffect(() => {
     let alive = true;
@@ -126,106 +35,139 @@ export default function HofExplorer({
     setErr("");
 
     readCsvFromPublic(filePath)
-      .then((rows) => {
+      .then((r) => {
         if (!alive) return;
-
-        const parsed: HofRow[] = rows
-          .map((r: any) => {
-            const h = normHotel(r.Empresa ?? r.Hotel);
-            const d = parseAnyDate(r.Fecha ?? r.Date);
-            if (!d) return null;
-
-            return {
-              date: d,
-              year: d.getFullYear(),
-              month: d.getMonth() + 1,
-              quarter: Math.floor(d.getMonth() / 3) + 1,
-              rooms: Number(r["Total Occ."] ?? 0),
-              revenue: parseMoneyES(r["Room Revenue"]),
-              guests: Number(r["Adl. & Chl."] ?? 0),
-              hotel: h,
-            };
-          })
-          .filter(Boolean) as HofRow[];
-
-        setRows(parsed);
+        setRows(r as HfRow[]);
+        setLoading(false);
       })
       .catch((e) => {
-        console.error(e);
-        setErr("Error cargando H&F");
-        setRows([]);
-      })
-      .finally(() => setLoading(false));
+        if (!alive) return;
+        setErr(e?.message || "Error leyendo CSV");
+        setLoading(false);
+      });
 
     return () => {
       alive = false;
     };
   }, [filePath]);
 
-  /* ========= FILTROS ========= */
+  const yearRows = useMemo(() => {
+    return rows
+      .map((r) => ({ r, dt: parseFechaSmart(r) }))
+      .filter(({ r, dt }) => {
+        const emp = String(r["Empresa"] ?? "").trim();
+        if (emp !== hotel) return false;
+        if (!dt) return false;
+        if (dt.getFullYear() !== year) return false;
+        const hofVal = String(r["HoF"] ?? "").trim();
+        if (hof !== "ALL" && hofVal !== hof) return false;
+        if (dt.getMonth() + 1 !== month) return false;
+        return true;
+      })
+      .sort((a, b) => (a.dt!.getTime() - b.dt!.getTime()))
+      .map(({ r }) => r);
+  }, [rows, hotel, year, month, hof]);
 
-  const rowsHotelYear = useMemo(() => {
-    return rows.filter(
-      (r) => r.hotel === normHotel(hotel) && r.year === year
-    );
-  }, [rows, hotel, year]);
+  const monthTotals = useMemo(() => {
+    let revenue = 0;
+    let adrSum = 0;
+    let adrCount = 0;
+    let occSum = 0;
+    let occCount = 0;
 
-  function aggregate(list: HofRow[]): Agg | null {
-    if (!list.length) return null;
-
-    const avail = AVAIL_PER_DAY_BY_HOTEL[normHotel(hotel)] ?? 0;
-    const days = list.length;
-    const availableRooms = avail * days;
-
-    const rooms = list.reduce((a, r) => a + r.rooms, 0);
-    const revenue = list.reduce((a, r) => a + r.revenue, 0);
-    const guests = list.reduce((a, r) => a + r.guests, 0);
+    for (const r of yearRows) {
+      revenue += toNumberSmart(pick(r, ["Room Revenue", "Room\nRevenue"]));
+      const adr = toNumberSmart(pick(r, ["Average Rate", "Average\nRate"]));
+      const occ = toNumberSmart(pick(r, ["Occ.%", "Occ.% ", "Occ.%\n"]));
+      if (adr > 0) { adrSum += adr; adrCount += 1; }
+      if (occ > 0) { occSum += occ; occCount += 1; }
+    }
 
     return {
-      rooms,
       revenue,
-      guests,
-      days,
-      availableRooms,
-      occ01: availableRooms ? rooms / availableRooms : 0,
-      adr: rooms ? revenue / rooms : 0,
+      adrAvg: adrCount ? adrSum / adrCount : 0,
+      occAvg: occCount ? occSum / occCount : 0,
+      days: yearRows.length,
     };
-  }
+  }, [yearRows]);
 
-  const aggYear = useMemo(() => aggregate(rowsHotelYear), [rowsHotelYear]);
-
-  /* ========= UI ========= */
+  if (loading) return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Cargando detalle…</div>;
+  if (err) return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Error: {err}</div>;
 
   return (
-    <section className="section">
-      <div className="sectionTitle">{title}</div>
+    <div style={{ marginTop: ".85rem" }}>
+      <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", alignItems: "center" }}>
+        <div className="card" style={{ padding: ".5rem .75rem", borderRadius: 14 }}>
+          <b>Mes</b>{" "}
+          <select value={month} onChange={(e) => setMonth(Number(e.target.value))} style={{ marginLeft: ".35rem" }}>
+            {Array.from({ length: 12 }).map((_, i) => (
+              <option key={i + 1} value={i + 1}>{monthLabel(i + 1)}</option>
+            ))}
+          </select>
+        </div>
 
-      <div className="card">
-        {loading && <div>Cargando H&F…</div>}
-        {!loading && err && <div>{err}</div>}
-        {!loading && !aggYear && <div>Sin filas H&F para el filtro actual.</div>}
+        <div className="card" style={{ padding: ".5rem .75rem", borderRadius: 14 }}>
+          <b>HoF</b>{" "}
+          <select value={hof} onChange={(e) => setHof(e.target.value)} style={{ marginLeft: ".35rem" }}>
+            <option value="ALL">ALL</option>
+            <option value="History">History</option>
+            <option value="hoy">hoy</option>
+            <option value="Forecast">Forecast</option>
+          </select>
+        </div>
 
-        {aggYear && (
-          <div className="kpiGrid">
-            <div className="kpi">
-              <div className="kpiLabel">Ocupación</div>
-              <div className="kpiValue">{fmtPct1(aggYear.occ01)}</div>
-            </div>
-            <div className="kpi">
-              <div className="kpiLabel">Rooms</div>
-              <div className="kpiValue">{fmtInt(aggYear.rooms)}</div>
-            </div>
-            <div className="kpi">
-              <div className="kpiLabel">Revenue</div>
-              <div className="kpiValue">{fmtMoney0(aggYear.revenue)}</div>
-            </div>
-            <div className="kpi">
-              <div className="kpiLabel">ADR</div>
-              <div className="kpiValue">{fmtMoney2(aggYear.adr)}</div>
-            </div>
-          </div>
-        )}
+        <div className="card" style={{ padding: ".5rem .75rem", borderRadius: 14, opacity: 0.9 }}>
+          <b>Totales mes</b>: {formatMoneyUSD(monthTotals.revenue)} · ADR {formatMoneyUSD(monthTotals.adrAvg)} · Occ {formatPct01(monthTotals.occAvg)} · {formatInt(monthTotals.days)} días
+        </div>
       </div>
-    </section>
+
+      {!yearRows.length ? (
+        <div className="card" style={{ padding: "1rem", borderRadius: 18, marginTop: ".75rem" }}>
+          Sin filas para {hotel} · {year} · {monthLabel(month)} (HoF: {hof}).
+        </div>
+      ) : (
+        <div className="card" style={{ padding: "1rem", borderRadius: 18, marginTop: ".75rem", overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 860 }}>
+            <thead>
+              <tr style={{ textAlign: "left", opacity: 0.8 }}>
+                <th style={{ padding: ".5rem" }}>Fecha</th>
+                <th style={{ padding: ".5rem" }}>HoF</th>
+                <th style={{ padding: ".5rem" }}>Occ.%</th>
+                <th style={{ padding: ".5rem" }}>ADR</th>
+                <th style={{ padding: ".5rem" }}>Room Revenue</th>
+                <th style={{ padding: ".5rem" }}>Total Occ.</th>
+                <th style={{ padding: ".5rem" }}>House Use</th>
+                <th style={{ padding: ".5rem" }}>Adl.&Chl.</th>
+              </tr>
+            </thead>
+            <tbody>
+              {yearRows.map((r, idx) => {
+                const dt = parseFechaSmart(r);
+                const occ = toNumberSmart(pick(r, ["Occ.%", "Occ.% ", "Occ.%\n"]));
+                const adr = toNumberSmart(pick(r, ["Average Rate", "Average\nRate"]));
+                const rev = toNumberSmart(pick(r, ["Room Revenue", "Room\nRevenue"]));
+                const totalOcc = toNumberSmart(pick(r, ['Total Occ.', 'Total\nOcc.']));
+                const house = toNumberSmart(pick(r, ['House Use', 'House\nUse']));
+                const pax = toNumberSmart(pick(r, ['Adl. & Chl.', 'Adl. &\nChl.']));
+                const hofVal = String(r["HoF"] ?? "").trim();
+
+                return (
+                  <tr key={idx} style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+                    <td style={{ padding: ".5rem" }}>{dt ? dt.toLocaleDateString("es-AR") : "-"}</td>
+                    <td style={{ padding: ".5rem" }}>{hofVal}</td>
+                    <td style={{ padding: ".5rem" }}>{formatPct01(occ)}</td>
+                    <td style={{ padding: ".5rem" }}>{formatMoneyUSD(adr)}</td>
+                    <td style={{ padding: ".5rem" }}>{formatMoneyUSD(rev)}</td>
+                    <td style={{ padding: ".5rem" }}>{formatInt(totalOcc)}</td>
+                    <td style={{ padding: ".5rem" }}>{formatInt(house)}</td>
+                    <td style={{ padding: ".5rem" }}>{formatInt(pax)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }
