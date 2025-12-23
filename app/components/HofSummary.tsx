@@ -1,77 +1,141 @@
-// app/components/HofSummary.tsx
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import { readCsvFromPublic, CsvRow } from "./csvClient";
+import { readCsvFromPublic } from "./csvClient";
 
-type Props = {
+type HofRow = {
+  date: Date;
   year: number;
-  filePath: string;
-  hotelFilter?: string; // "MARRIOTT" | "SHERATON BCR" | "SHERATON MDQ" | "MAITEI"
+  month: number;
+  rooms: number;
+  revenue: number;
+  guests: number;
+  hotel: string;
 };
 
-type HofRow = CsvRow & {
-  Empresa?: string;
-  Fecha?: string;
-  HoF?: string; // History/Forecast
+const AVAIL_PER_DAY_BY_HOTEL: Record<string, number> = {
+  MARRIOTT: 300,
+  "SHERATON MDQ": 194,
+  "SHERATON BCR": 161,
+  MAITEI: 98,
 };
 
-function asString(v: any) {
-  return (v ?? "").toString().trim();
+function normHotel(x: any) {
+  return String(x ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, " ");
 }
 
-function parseDateSmart(v: any): Date | null {
-  const s = asString(v);
-  if (!s) return null;
+function parseMoneyES(v: any): number {
+  if (v === null || v === undefined) return 0;
+  const s = String(v).replace(/\s/g, "");
+  if (!s) return 0;
+  if (s.includes(",") && s.includes(".")) {
+    return Number(s.replace(/\./g, "").replace(",", ".")) || 0;
+  }
+  if (s.includes(",")) {
+    return Number(s.replace(",", ".")) || 0;
+  }
+  return Number(s) || 0;
+}
 
-  // formatos que vimos: "1/6/2022" o "01-06-22 Wed"
-  // Intento Date() directo
-  const d1 = new Date(s);
-  if (!isNaN(d1.getTime())) return d1;
+function parseAnyDate(v: any): Date | null {
+  if (v instanceof Date && !isNaN(+v)) return v;
 
-  // dd-mm-yy ...
-  const m = s.match(/^(\d{2})-(\d{2})-(\d{2,4})/);
-  if (m) {
-    const dd = Number(m[1]);
-    const mm = Number(m[2]);
-    let yy = Number(m[3]);
-    if (yy < 100) yy += 2000;
-    const d2 = new Date(yy, mm - 1, dd);
-    if (!isNaN(d2.getTime())) return d2;
+  if (typeof v === "number") {
+    const base = new Date(Date.UTC(1899, 11, 30));
+    return new Date(base.getTime() + v * 86400000);
   }
 
-  return null;
+  const s = String(v ?? "").trim();
+  if (!s) return null;
+
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) {
+    const d = new Date(+m[3], +m[2] - 1, +m[1]);
+    return isNaN(+d) ? null : d;
+  }
+
+  const d2 = new Date(s);
+  return isNaN(+d2) ? null : d2;
 }
 
-function num(v: any): number {
-  const n = typeof v === "number" ? v : Number((v ?? "").toString().replace(",", "."));
-  return Number.isFinite(n) ? n : 0;
+const fmtInt = (n: number) => Math.round(n).toLocaleString("es-AR");
+const fmtMoney0 = (n: number) => Math.round(n).toLocaleString("es-AR");
+const fmtMoney2 = (n: number) =>
+  n.toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtPct1 = (v: number) => (v * 100).toFixed(1).replace(".", ",") + "%";
+
+function agg(rows: HofRow[], hotel: string) {
+  if (!rows.length) return null;
+
+  const availDay = AVAIL_PER_DAY_BY_HOTEL[normHotel(hotel)] ?? 0;
+  const days = rows.length;
+  const availableRooms = availDay * days;
+
+  const rooms = rows.reduce((a, r) => a + r.rooms, 0);
+  const revenue = rows.reduce((a, r) => a + r.revenue, 0);
+  const guests = rows.reduce((a, r) => a + r.guests, 0);
+
+  const occ01 = availableRooms ? rooms / availableRooms : 0;
+  const adr = rooms ? revenue / rooms : 0;
+
+  return { rooms, revenue, guests, days, availableRooms, occ01, adr };
 }
 
-function pct01(v: any): number {
-  // puede venir 0.594 o 59.40% ya normalizado por csvClient
-  const n = num(v);
-  if (n > 1.5) return n / 100;
-  return n;
-}
-
-export default function HofSummary({ year, filePath, hotelFilter }: Props) {
+export default function HofSummary({
+  filePath,
+  year,
+  hotel,
+}: {
+  filePath: string;
+  year: number;
+  hotel: string;
+}) {
   const [rows, setRows] = useState<HofRow[]>([]);
+  const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
   useEffect(() => {
     let alive = true;
+    setLoading(true);
     setErr("");
 
     readCsvFromPublic(filePath)
-      .then(({ rows }) => {
+      .then((csvRows) => {
         if (!alive) return;
-        setRows(rows as HofRow[]);
+
+        const parsed: HofRow[] = (csvRows ?? [])
+          .map((r: any) => {
+            const h = normHotel(r.Empresa ?? r.Hotel);
+            const d = parseAnyDate(r.Fecha ?? r.Date);
+            if (!d) return null;
+
+            const rooms = Number(r["Total Occ."] ?? r["Total Occ"] ?? 0);
+            const revenue = parseMoneyES(r["Room Revenue"] ?? r["RoomRevenue"]);
+            const guests = Number(r["Adl. & Chl."] ?? r["Adl.&Chl."] ?? 0);
+
+            return {
+              date: d,
+              year: d.getFullYear(),
+              month: d.getMonth() + 1,
+              rooms,
+              revenue,
+              guests,
+              hotel: h,
+            };
+          })
+          .filter(Boolean) as HofRow[];
+
+        setRows(parsed);
       })
       .catch((e) => {
-        if (!alive) return;
-        setErr(e?.message ?? "Error leyendo CSV");
-      });
+        console.error(e);
+        setErr("Error cargando H&F");
+        setRows([]);
+      })
+      .finally(() => setLoading(false));
 
     return () => {
       alive = false;
@@ -79,133 +143,52 @@ export default function HofSummary({ year, filePath, hotelFilter }: Props) {
   }, [filePath]);
 
   const filtered = useMemo(() => {
-    const y = year;
+    const h = normHotel(hotel);
+    return rows.filter((r) => r.hotel === h && r.year === year);
+  }, [rows, hotel, year]);
 
-    return rows.filter((r) => {
-      const empresa = asString(r["Empresa"] ?? r["Hotel"] ?? r["empresa"]);
-      const hof = asString(r["HoF"] ?? r["Hof"] ?? r["History/Forecast"]);
-      const fecha = parseDateSmart(r["Fecha"] ?? r["DATE"] ?? r["Date"]);
-
-      const okYear = fecha ? fecha.getFullYear() === y : false;
-
-      const okHotel = hotelFilter ? empresa === hotelFilter : true;
-      const okHof = hof ? true : true;
-
-      return okYear && okHotel && okHof;
-    });
-  }, [rows, year, hotelFilter]);
-
-  const kpis = useMemo(() => {
-    // tomamos SUMAS coherentes (ocupación <= 100%)
-    // columnas reales (por tu screenshot): Total Occ., Arr. Rooms, Comp. Rooms, House Use, Room Revenue, Average Rate, Occ.%
-    let totalOcc = 0;
-    let totalArr = 0;
-    let totalComp = 0;
-    let totalHU = 0;
-    let rev = 0;
-    let adrWeightedSum = 0;
-    let adrWeight = 0;
-
-    for (const r of filtered) {
-      totalOcc += num(r['Total\nOcc.'] ?? r["Total Occ."] ?? r["Total Occ"] ?? r["Occ"]);
-      totalArr += num(r['Arr.\nRooms'] ?? r["Arr. Rooms"] ?? r["Arr Rooms"]);
-      totalComp += num(r['Comp.\nRooms'] ?? r["Comp. Rooms"] ?? r["Comp Rooms"]);
-      totalHU += num(r['House\nUse'] ?? r["House Use"]);
-      const rr = num(r["Room Revenue"] ?? r["Room\nRevenue"] ?? r["RoomRevenue"]);
-      rev += rr;
-
-      const adr = num(r["Average Rate"] ?? r["Average\nRate"] ?? r["ADR"]);
-      // ADR ponderado por occupied (sin HU) si está
-      const occNet = Math.max(0, num(r["Deduct\nIndiv."] ?? r["Deduct Indiv."] ?? 0) + num(r["Deduct\nGroup"] ?? r["Deduct Group"] ?? 0));
-      // si no, pondero por Total Occ.
-      const w = Math.max(1, num(r['Total\nOcc.'] ?? r["Total Occ."] ?? r["Total Occ"] ?? 0));
-      adrWeightedSum += adr * w;
-      adrWeight += w;
-    }
-
-    const occPct = (() => {
-      // si hay columna Occ.% la promediamos ponderado por días
-      let s = 0;
-      let c = 0;
-      for (const r of filtered) {
-        const v = r["Occ.%"] ?? r["Occ.% "] ?? r["Occ%"] ?? r["Occ %"];
-        const p = pct01(v);
-        if (p > 0) {
-          s += p;
-          c += 1;
-        }
-      }
-      if (c > 0) return s / c;
-      return 0;
-    })();
-
-    const adr = adrWeight > 0 ? adrWeightedSum / adrWeight : 0;
-
-    return {
-      totalOcc,
-      totalArr,
-      totalComp,
-      totalHU,
-      rev,
-      adr,
-      occPct,
-    };
-  }, [filtered]);
-
-  if (err) {
-    return (
-      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        Error H&F: {err}
-      </div>
-    );
-  }
-
-  if (filtered.length === 0) {
-    return (
-      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        Sin filas H&F para el filtro actual.
-      </div>
-    );
-  }
-
-  const fmtInt = (n: number) => new Intl.NumberFormat("es-AR").format(Math.round(n));
-  const fmtMoney = (n: number) =>
-    new Intl.NumberFormat("es-AR", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(n);
-  const fmtPct = (n: number) => `${(n * 100).toFixed(1)}%`;
+  const res = useMemo(() => agg(filtered, hotel), [filtered, hotel]);
 
   return (
     <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-      <div style={{ fontWeight: 900, marginBottom: ".75rem" }}>KPIs H&F ({hotelFilter ?? "Todos"})</div>
+      <div style={{ fontWeight: 900, fontSize: "1.05rem" }}>H&F — Resumen</div>
 
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-          gap: ".75rem",
-        }}
-      >
-        <div className="miniCard" style={{ padding: ".75rem", borderRadius: 16 }}>
-          <div style={{ opacity: 0.75, fontSize: ".9rem" }}>Ocupación %</div>
-          <div style={{ fontSize: "1.25rem", fontWeight: 950 }}>{fmtPct(kpis.occPct)}</div>
-        </div>
+      {loading && <div style={{ marginTop: ".5rem" }}>Cargando…</div>}
+      {!loading && err && <div style={{ marginTop: ".5rem" }}>{err}</div>}
+      {!loading && !err && !res && (
+        <div style={{ marginTop: ".5rem" }}>Sin filas H&F para el filtro actual.</div>
+      )}
 
-        <div className="miniCard" style={{ padding: ".75rem", borderRadius: 16 }}>
-          <div style={{ opacity: 0.75, fontSize: ".9rem" }}>Room Revenue</div>
-          <div style={{ fontSize: "1.25rem", fontWeight: 950 }}>{fmtMoney(kpis.rev)}</div>
-        </div>
+      {res && (
+        <div
+          style={{
+            marginTop: ".75rem",
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+            gap: ".6rem",
+          }}
+        >
+          <div className="card" style={{ padding: ".75rem", borderRadius: 16 }}>
+            <div style={{ opacity: 0.8, fontSize: ".85rem" }}>Ocupación</div>
+            <div style={{ fontWeight: 950, fontSize: "1.25rem" }}>{fmtPct1(res.occ01)}</div>
+          </div>
 
-        <div className="miniCard" style={{ padding: ".75rem", borderRadius: 16 }}>
-          <div style={{ opacity: 0.75, fontSize: ".9rem" }}>ADR (prom.)</div>
-          <div style={{ fontSize: "1.25rem", fontWeight: 950 }}>
-            {new Intl.NumberFormat("es-AR", { maximumFractionDigits: 2 }).format(kpis.adr)}
+          <div className="card" style={{ padding: ".75rem", borderRadius: 16 }}>
+            <div style={{ opacity: 0.8, fontSize: ".85rem" }}>Rooms</div>
+            <div style={{ fontWeight: 950, fontSize: "1.25rem" }}>{fmtInt(res.rooms)}</div>
+          </div>
+
+          <div className="card" style={{ padding: ".75rem", borderRadius: 16 }}>
+            <div style={{ opacity: 0.8, fontSize: ".85rem" }}>Room Revenue</div>
+            <div style={{ fontWeight: 950, fontSize: "1.25rem" }}>{fmtMoney0(res.revenue)}</div>
+          </div>
+
+          <div className="card" style={{ padding: ".75rem", borderRadius: 16 }}>
+            <div style={{ opacity: 0.8, fontSize: ".85rem" }}>ADR</div>
+            <div style={{ fontWeight: 950, fontSize: "1.25rem" }}>{fmtMoney2(res.adr)}</div>
           </div>
         </div>
-
-        <div className="miniCard" style={{ padding: ".75rem", borderRadius: 16 }}>
-          <div style={{ opacity: 0.75, fontSize: ".9rem" }}>Total Occ (sum)</div>
-          <div style={{ fontSize: "1.25rem", fontWeight: 950 }}>{fmtInt(kpis.totalOcc)}</div>
-        </div>
-      </div>
+      )}
     </div>
   );
 }
