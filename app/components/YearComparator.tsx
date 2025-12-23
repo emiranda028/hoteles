@@ -1,17 +1,30 @@
 "use client";
 
 import React, { useMemo, useState } from "react";
+
 import HighlightsCarousel from "./HighlightsCarousel";
 import HofSummary from "./HofSummary";
 import HofExplorer from "./HofExplorer";
 import MembershipSummary from "./MembershipSummary";
 import CountryRanking from "./CountryRanking";
 
-type GlobalHotel = "MARRIOTT" | "SHERATON BCR" | "SHERATON MDQ" | "MAITEI";
+/* =========================
+   Tipos y constantes
+========================= */
+
+type GlobalHotel =
+  | "MARRIOTT"
+  | "SHERATON BCR"
+  | "SHERATON MDQ"
+  | "MAITEI";
 
 const HF_PATH = "/data/hf_diario.csv";
 const MEMBERSHIP_PATH = "/data/jcr_membership.xlsx";
 const NACIONALIDADES_PATH = "/data/jcr_nacionalidades.xlsx";
+
+/* =========================
+   UI helpers
+========================= */
 
 function Pill({
   children,
@@ -27,8 +40,8 @@ function Pill({
       style={{
         background: bg,
         color: fg,
-        borderRadius: 14,
-        padding: ".45rem .75rem",
+        borderRadius: 16,
+        padding: ".5rem .75rem",
         display: "flex",
         gap: ".5rem",
         alignItems: "center",
@@ -41,241 +54,196 @@ function Pill({
   );
 }
 
+/* =========================
+   Componente principal
+========================= */
+
 export default function YearComparator() {
-  // ====== BLOQUE JCR ======
+  /* ===== JCR ===== */
   const [year, setYear] = useState<number>(2025);
   const [baseYear, setBaseYear] = useState<number>(2024);
-  const [globalHotel, setGlobalHotel] = useState<GlobalHotel>("MARRIOTT");
+  const [globalHotel, setGlobalHotel] =
+    useState<GlobalHotel>("MARRIOTT");
 
-  // ====== BLOQUE MAITEI (separado) ======
+  /* ===== MAITEI ===== */
   const [maiteiYear, setMaiteiYear] = useState<number>(2025);
-  const [maiteiBaseYear, setMaiteiBaseYear] = useState<number>(2024);
+  const [maiteiBaseYear, setMaiteiBaseYear] =
+    useState<number>(2024);
 
-  const jcrHotels: GlobalHotel[] = useMemo(() => ["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"], []);
-  const showJcr = useMemo(() => globalHotel !== "MAITEI", [globalHotel]);
+  const jcrHotels: GlobalHotel[] = useMemo(
+    () => ["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"],
+    []
+  );
+
+  const showJcr = globalHotel !== "MAITEI";
 
   return (
-    <div style={{ display: "grid", gap: "1.25rem" }}>
-      {/* =======================
-          BLOQUE JCR (grupo)
-      ======================= */}
-      <section className="section" id="grupo-jcr" style={{ display: "grid", gap: "1rem" }}>
-        <div className="sectionTitle" style={{ fontSize: "1.45rem", fontWeight: 950 }}>
-          Grupo JCR — KPIs {year} (vs {baseYear})
+    <div style={{ display: "grid", gap: "1.5rem" }}>
+      {/* =====================================================
+          BLOQUE JCR
+      ====================================================== */}
+      <section className="section" id="jcr">
+        <div
+          className="sectionTitle"
+          style={{ fontSize: "1.45rem", fontWeight: 900 }}
+        >
+          Grupo JCR — KPIs {year} vs {baseYear}
         </div>
 
-        {/* Sticky filtros JCR */}
+        {/* ===== Filtros JCR ===== */}
         <div
           style={{
             position: "sticky",
-            top: 10,
+            top: 12,
             zIndex: 20,
-            display: "flex",
-            justifyContent: "flex-start",
+            marginTop: ".75rem",
+            marginBottom: ".75rem",
           }}
         >
           <Pill bg="#b2002d" fg="#fff">
-            <span style={{ fontWeight: 950 }}>Hotel</span>
+            <strong>Hotel</strong>
             <select
               value={globalHotel}
-              onChange={(e) => setGlobalHotel(e.target.value as GlobalHotel)}
-              style={{
-                borderRadius: 12,
-                padding: ".35rem .5rem",
-                border: "1px solid rgba(255,255,255,0.35)",
-                background: "rgba(255,255,255,0.10)",
-                color: "#fff",
-                outline: "none",
-              }}
+              onChange={(e) =>
+                setGlobalHotel(e.target.value as GlobalHotel)
+              }
             >
               {jcrHotels.map((h) => (
-                <option key={h} value={h} style={{ color: "#000" }}>
+                <option key={h} value={h}>
                   {h}
                 </option>
               ))}
-              <option value="MAITEI" style={{ color: "#000" }}>
-                MAITEI (ver bloque abajo)
+              <option value="MAITEI">
+                MAITEI (ver bloque inferior)
               </option>
             </select>
 
-            <span style={{ fontWeight: 950, marginLeft: ".25rem" }}>Año</span>
+            <strong>Año</strong>
             <select
               value={year}
               onChange={(e) => setYear(Number(e.target.value))}
-              style={{
-                borderRadius: 12,
-                padding: ".35rem .5rem",
-                border: "1px solid rgba(255,255,255,0.35)",
-                background: "rgba(255,255,255,0.10)",
-                color: "#fff",
-                outline: "none",
-              }}
             >
-              {[2025, 2024, 2023, 2022, 2021, 2020, 2019, 2018].map((y) => (
-                <option key={y} value={y} style={{ color: "#000" }}>
+              {[2025, 2024, 2023, 2022, 2021, 2020].map((y) => (
+                <option key={y} value={y}>
                   {y}
                 </option>
               ))}
             </select>
 
-            <span style={{ fontWeight: 950, marginLeft: ".25rem" }}>Base</span>
+            <strong>Base</strong>
             <select
               value={baseYear}
-              onChange={(e) => setBaseYear(Number(e.target.value))}
-              style={{
-                borderRadius: 12,
-                padding: ".35rem .5rem",
-                border: "1px solid rgba(255,255,255,0.35)",
-                background: "rgba(255,255,255,0.10)",
-                color: "#fff",
-                outline: "none",
-              }}
+              onChange={(e) =>
+                setBaseYear(Number(e.target.value))
+              }
             >
-              {[2024, 2023, 2022, 2021, 2020, 2019, 2018].map((y) => (
-                <option key={y} value={y} style={{ color: "#000" }}>
+              {[2024, 2023, 2022, 2021, 2020].map((y) => (
+                <option key={y} value={y}>
                   {y}
                 </option>
               ))}
             </select>
-
-            <span style={{ opacity: 0.85, marginLeft: ".25rem" }}>
-              (aplica a todo el bloque JCR)
-            </span>
           </Pill>
         </div>
 
-        {/* Si el usuario selecciona MAITEI arriba, le avisamos */}
         {!showJcr ? (
-          <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-            Estás viendo MAITEI. Bajá al bloque <b>Management Gotel (MAITEI)</b> para sus filtros y KPIs.
+          <div className="card" style={{ padding: "1rem" }}>
+            Estás viendo <b>MAITEI</b>. Bajá al bloque inferior
+            para ver sus KPIs.
           </div>
         ) : (
           <>
-            {/* ====== 1) Carruseles KPI ====== */}
-            <div style={{ marginTop: ".35rem" }}>
-              <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
-                Highlights (carruseles)
-              </div>
-              <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-                KPIs calculados desde H&amp;F — hotel/año global.
-              </div>
-              <div style={{ marginTop: ".75rem" }}>
-                <HighlightsCarousel year={year} hotel={globalHotel} filePath={HF_PATH} />
-              </div>
-            </div>
+            {/* ===== Carruseles ===== */}
+            <HighlightsCarousel
+              year={year}
+              hotel={globalHotel}
+              filePath={HF_PATH}
+            />
 
-            {/* ====== 2) KPIs principales ====== */}
-            <div style={{ marginTop: "1.15rem" }}>
-              <HofSummary
+            {/* ===== KPIs ===== */}
+            <HofSummary
+              year={year}
+              baseYear={baseYear}
+              hotel={globalHotel}
+              filePath={HF_PATH}
+            />
+
+            {/* ===== Detalle H&F ===== */}
+            <HofExplorer
+              year={year}
+              hotel={globalHotel}
+              filePath={HF_PATH}
+            />
+
+            {/* ===== Membership ===== */}
+            <MembershipSummary
+              year={year}
+              baseYear={baseYear}
+              filePath={MEMBERSHIP_PATH}
+              allowedHotels={jcrHotels}
+              hotelFilter={globalHotel}
+              compactCharts={true}
+            />
+
+            {/* ===== Nacionalidades (Marriott) ===== */}
+            {globalHotel === "MARRIOTT" && (
+              <CountryRanking
                 year={year}
-                baseYear={baseYear}
-                hotel={globalHotel}
-                filePath={HF_PATH}
-                title={`H&F — KPIs ${year} (vs ${baseYear}) · ${globalHotel}`}
+                filePath={NACIONALIDADES_PATH}
               />
-            </div>
-
-            {/* ====== 3) Detalle H&F ====== */}
-            <div style={{ marginTop: "1.15rem" }}>
-              <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
-                History &amp; Forecast — Detalle
-              </div>
-              <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-                Tabla diaria del H&amp;F con filtros por mes y HoF (History / hoy / Forecast).
-              </div>
-              <HofExplorer year={year} hotel={globalHotel} filePath={HF_PATH} />
-            </div>
-
-            {/* ====== 4) Membership (JCR) ====== */}
-            <div style={{ marginTop: "1.25rem" }}>
-              <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
-                Membership (JCR)
-              </div>
-              <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-                Año + hotel global (MARRIOTT / SHERATON BCR / SHERATON MDQ).
-              </div>
-
-<div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
-  {`Membership (JCR) — Acumulado ${year} · vs ${baseYear}`}
-</div>
-
-<div style={{ marginTop: ".85rem" }}>
-  <MembershipSummary
-    year={year}
-    baseYear={baseYear}
-    filePath={MEMBERSHIP_PATH}
-    allowedHotels={["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"]}
-    hotelFilter={globalHotel}
-    compactCharts={true}
-  />
-</div>
-
-
-            {/* ====== 5) Nacionalidades (solo Marriott) ====== */}
-            <div style={{ marginTop: "1.25rem" }}>
-              <div className="sectionTitle" style={{ fontSize: "1.2rem", fontWeight: 950 }}>
-                Nacionalidades
-              </div>
-              <div className="sectionDesc" style={{ marginTop: ".35rem" }}>
-                Ranking por país + distribución por continente. (Archivo Marriott). Usa filtro global de año.
-              </div>
-
-              <div style={{ marginTop: ".85rem" }}>
-                <CountryRanking year={year} filePath={NACIONALIDADES_PATH} />
-              </div>
-            </div>
+            )}
           </>
         )}
       </section>
 
-      {/* =======================
-          BLOQUE MAITEI (separado)
-      ======================= */}
-      <section className="section" id="maitei" style={{ display: "grid", gap: "1rem", marginTop: "1rem" }}>
-        <div className="sectionTitle" style={{ fontSize: "1.45rem", fontWeight: 950 }}>
-          Management Gotel (MAITEI) — KPIs {maiteiYear} (vs {maiteiBaseYear})
+      {/* =====================================================
+          BLOQUE MAITEI
+      ====================================================== */}
+      <section className="section" id="maitei">
+        <div
+          className="sectionTitle"
+          style={{ fontSize: "1.45rem", fontWeight: 900 }}
+        >
+          Management Gotel (MAITEI) — KPIs {maiteiYear} vs{" "}
+          {maiteiBaseYear}
         </div>
 
-        <div style={{ position: "sticky", top: 10, zIndex: 20, display: "flex", justifyContent: "flex-start" }}>
+        {/* ===== Filtros MAITEI ===== */}
+        <div
+          style={{
+            position: "sticky",
+            top: 12,
+            zIndex: 20,
+            marginTop: ".75rem",
+            marginBottom: ".75rem",
+          }}
+        >
           <Pill bg="#0077b6" fg="#fff">
-            <span style={{ fontWeight: 950 }}>Hotel</span>
-            <span style={{ fontWeight: 950, opacity: 0.95 }}>MAITEI</span>
+            <strong>MAITEI</strong>
 
-            <span style={{ fontWeight: 950, marginLeft: ".25rem" }}>Año</span>
+            <strong>Año</strong>
             <select
               value={maiteiYear}
-              onChange={(e) => setMaiteiYear(Number(e.target.value))}
-              style={{
-                borderRadius: 12,
-                padding: ".35rem .5rem",
-                border: "1px solid rgba(255,255,255,0.35)",
-                background: "rgba(255,255,255,0.10)",
-                color: "#fff",
-                outline: "none",
-              }}
+              onChange={(e) =>
+                setMaiteiYear(Number(e.target.value))
+              }
             >
-              {[2025, 2024, 2023, 2022, 2021, 2020, 2019, 2018].map((y) => (
-                <option key={y} value={y} style={{ color: "#000" }}>
+              {[2025, 2024, 2023, 2022, 2021].map((y) => (
+                <option key={y} value={y}>
                   {y}
                 </option>
               ))}
             </select>
 
-            <span style={{ fontWeight: 950, marginLeft: ".25rem" }}>Base</span>
+            <strong>Base</strong>
             <select
               value={maiteiBaseYear}
-              onChange={(e) => setMaiteiBaseYear(Number(e.target.value))}
-              style={{
-                borderRadius: 12,
-                padding: ".35rem .5rem",
-                border: "1px solid rgba(255,255,255,0.35)",
-                background: "rgba(255,255,255,0.10)",
-                color: "#fff",
-                outline: "none",
-              }}
+              onChange={(e) =>
+                setMaiteiBaseYear(Number(e.target.value))
+              }
             >
-              {[2024, 2023, 2022, 2021, 2020, 2019, 2018].map((y) => (
-                <option key={y} value={y} style={{ color: "#000" }}>
+              {[2024, 2023, 2022, 2021].map((y) => (
+                <option key={y} value={y}>
                   {y}
                 </option>
               ))}
@@ -283,28 +251,25 @@ export default function YearComparator() {
           </Pill>
         </div>
 
-        <div style={{ marginTop: ".35rem" }}>
-          <HighlightsCarousel year={maiteiYear} hotel="MAITEI" filePath={HF_PATH} />
-        </div>
+        <HighlightsCarousel
+          year={maiteiYear}
+          hotel="MAITEI"
+          filePath={HF_PATH}
+        />
 
-        <div style={{ marginTop: ".85rem" }}>
-          <HofSummary
-            year={maiteiYear}
-            baseYear={maiteiBaseYear}
-            hotel="MAITEI"
-            filePath={HF_PATH}
-            title={`H&F — KPIs ${maiteiYear} (vs ${maiteiBaseYear}) · MAITEI`}
-          />
-        </div>
+        <HofSummary
+          year={maiteiYear}
+          baseYear={maiteiBaseYear}
+          hotel="MAITEI"
+          filePath={HF_PATH}
+        />
 
-        <div style={{ marginTop: ".85rem" }}>
-          <div className="sectionTitle" style={{ fontSize: "1.15rem", fontWeight: 950 }}>
-            History &amp; Forecast — Detalle (MAITEI)
-          </div>
-          <HofExplorer year={maiteiYear} hotel="MAITEI" filePath={HF_PATH} />
-        </div>
+        <HofExplorer
+          year={maiteiYear}
+          hotel="MAITEI"
+          filePath={HF_PATH}
+        />
       </section>
     </div>
   );
 }
-
