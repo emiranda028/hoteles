@@ -1,169 +1,113 @@
-// app/components/CountryRanking.tsx
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import { readXlsxFromPublic, XlsxRow } from "./xlsxClient";
+import { readXlsxFromPublic } from "./xlsxClient";
 
 type Props = {
   year: number;
-  filePath: string; // /data/jcr_nacionalidades.xlsx
+  filePath: string;
 };
 
-type Row = {
-  continent: string;
-  year: number;
-  month: number;
-  country: string;
-  value: number;
-};
-
-const COUNTRY_TO_ISO2: Record<string, string> = {
-  ARGENTINA: "AR",
-  BRASIL: "BR",
-  BRAZIL: "BR",
-  CHILE: "CL",
-  COLOMBIA: "CO",
-  MEXICO: "MX",
-  "MÉXICO": "MX",
-  "UNITED STATES": "US",
-  "ESTADOS UNIDOS": "US",
-  USA: "US",
-  EEUU: "US",
-  SPAIN: "ES",
-  "ESPAÑA": "ES",
-  ESPANA: "ES",
-  FRANCE: "FR",
-  ALEMANIA: "DE",
-  GERMANY: "DE",
-  "REINO UNIDO": "GB",
-  "UNITED KINGDOM": "GB",
-  INGLATERRA: "GB",
-  ITALIA: "IT",
-  ITALY: "IT",
-  URUGUAY: "UY",
-  PARAGUAY: "PY",
-  PERU: "PE",
-  "PERÚ": "PE",
-  BOLIVIA: "BO",
-  "CANADÁ": "CA",
-  CANADA: "CA",
-};
-
-function normalizeCountryName(s: any) {
-  return (s ?? "")
-    .toString()
-    .trim()
-    .toUpperCase()
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "");
+function pickKey(keys: string[], candidates: string[]): string | null {
+  const lower = new Map(keys.map((k) => [k.toLowerCase(), k]));
+  for (const c of candidates) {
+    const hit = lower.get(c.toLowerCase());
+    if (hit) return hit;
+  }
+  for (const c of candidates) {
+    const cLow = c.toLowerCase();
+    const found = keys.find((k) => k.toLowerCase().includes(cLow));
+    if (found) return found;
+  }
+  return null;
 }
 
-function flagFromIso2(iso2: string): string {
-  const cc = iso2.toUpperCase();
-  if (!/^[A-Z]{2}$/.test(cc)) return "";
-  const A = 0x1f1e6;
-  const code1 = A + (cc.charCodeAt(0) - 65);
-  const code2 = A + (cc.charCodeAt(1) - 65);
-  return String.fromCodePoint(code1, code2);
+function norm(v: any) {
+  return String(v ?? "").trim().toUpperCase().replace(/\s+/g, " ");
 }
 
-function numSmart(v: any): number {
+function toNum(v: any): number {
+  if (v === null || v === undefined) return 0;
   if (typeof v === "number") return Number.isFinite(v) ? v : 0;
-  const s = (v ?? "").toString().trim();
+  const s = String(v).trim();
   if (!s) return 0;
+  const cleaned = s.replace(/\./g, "").replace(",", ".").replace("%", "");
+  const n = Number(cleaned);
+  return isNaN(n) ? 0 : n;
+}
 
-  const raw = s.replace(/\s/g, "");
-  const hasComma = raw.includes(",");
-  const hasDot = raw.includes(".");
-
-  let norm = raw;
-  if (hasComma && hasDot) norm = norm.replace(/\./g, "").replace(",", ".");
-  else if (hasComma) norm = norm.replace(",", ".");
-
-  const n = Number(norm);
-  return Number.isFinite(n) ? n : 0;
+function formatInt(n: number) {
+  return Math.round(n).toLocaleString("es-AR");
 }
 
 export default function CountryRanking({ year, filePath }: Props) {
-  const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+
+  const [rows, setRows] = useState<any[]>([]);
+  const [info, setInfo] = useState<{ sheet: string; keys: string[] } | null>(null);
 
   useEffect(() => {
     let alive = true;
     setLoading(true);
     setErr("");
 
-    readXlsxFromPublic(filePath, { sheetName: "País Origen 2018 a 2025" })
-      .then(({ rows }) => {
+    readXlsxFromPublic(filePath)
+      .then((r) => {
         if (!alive) return;
-
-        const keys = Object.keys(rows?.[0] ?? {});
-        const kCont = keys.find((k) => normalizeCountryName(k) === "CONTINENTE") ?? "Continente";
-        const kYear = keys.find((k) => normalizeCountryName(k) === "ANO" || normalizeCountryName(k) === "AÑO") ?? "Año";
-        const kMonthN = keys.find((k) => normalizeCountryName(k).includes("N") && normalizeCountryName(k).includes("MES")) ?? "N° Mes";
-        const kCountry = keys.find((k) => normalizeCountryName(k).includes("PAIS")) ?? "PAÍS ";
-        const kVal = keys.find((k) => normalizeCountryName(k).includes("IMPORTE") || normalizeCountryName(k).includes("CANT")) ?? "Importe";
-
-        const parsed: Row[] = (rows as XlsxRow[])
-          .map((r) => {
-            const continent = (r[kCont] ?? "").toString().trim();
-            const yy = Number((r[kYear] ?? "").toString().trim());
-            const mm = Number((r[kMonthN] ?? "").toString().trim());
-            const country = (r[kCountry] ?? "").toString().trim();
-            const value = numSmart(r[kVal]);
-
-            return {
-              continent,
-              year: Number.isFinite(yy) ? yy : 0,
-              month: Number.isFinite(mm) ? mm : 0,
-              country,
-              value,
-            };
-          })
-          .filter((r) => r.year > 0 && r.month >= 1 && r.month <= 12 && r.country);
-
-        setRows(parsed);
-        setLoading(false);
+        const keys = r.rows?.[0] ? Object.keys(r.rows[0]) : [];
+        setInfo({ sheet: r.sheet, keys });
+        setRows(r.rows ?? []);
       })
       .catch((e) => {
-        if (!alive) return;
-        setErr(e?.message ?? "Error leyendo nacionalidades");
-        setLoading(false);
-      });
+        console.error(e);
+        setErr(String(e?.message ?? e));
+        setRows([]);
+      })
+      .finally(() => setLoading(false));
 
     return () => {
       alive = false;
     };
   }, [filePath]);
 
-  const yearRows = useMemo(() => rows.filter((r) => r.year === year), [rows, year]);
+  const computed = useMemo(() => {
+    if (!rows.length) return { ranking: [] as { country: string; value: number }[], byCont: [] as { cont: string; value: number }[] };
 
-  const total = useMemo(() => yearRows.reduce((acc, r) => acc + (r.value || 0), 0), [yearRows]);
+    const keys = Object.keys(rows[0] ?? {});
+    const kYear = pickKey(keys, ["Año", "Ano", "Year"]);
+    const kCountry = pickKey(keys, ["PAÍS", "PAIS", "Pais", "Country"]);
+    const kCont = pickKey(keys, ["Continente", "Continent"]);
+    const kValue = pickKey(keys, ["Importe", "Valor", "Total", "Cantidad", "Qty"]);
 
-  const byCountry = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const r of yearRows) {
-      const key = normalizeCountryName(r.country);
-      m.set(key, (m.get(key) ?? 0) + (r.value || 0));
+    const filtered = rows.filter((r) => {
+      const y = toNum(kYear ? r[kYear] : r["Año"]);
+      return y === year;
+    });
+
+    const byCountry = new Map<string, number>();
+    const byCont = new Map<string, number>();
+
+    for (const r of filtered) {
+      const c = norm(kCountry ? r[kCountry] : r["PAÍS"]);
+      const cont = norm(kCont ? r[kCont] : r["Continente"]);
+      const val = toNum(kValue ? r[kValue] : r["Importe"]);
+
+      if (c) byCountry.set(c, (byCountry.get(c) ?? 0) + val);
+      if (cont) byCont.set(cont, (byCont.get(cont) ?? 0) + val);
     }
-    return m;
-  }, [yearRows]);
 
-  const byContinent = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const r of yearRows) {
-      const key = (r.continent ?? "").toString().trim() || "Sin continente";
-      m.set(key, (m.get(key) ?? 0) + (r.value || 0));
-    }
-    return m;
-  }, [yearRows]);
+    const ranking = Array.from(byCountry.entries())
+      .map(([country, value]) => ({ country, value }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 15);
 
-  const top = useMemo(() => {
-    const arr = Array.from(byCountry.entries()).map(([k, v]) => ({ countryKey: k, value: v }));
-    arr.sort((a, b) => b.value - a.value);
-    return arr.slice(0, 10);
-  }, [byCountry]);
+    const byContArr = Array.from(byCont.entries())
+      .map(([cont, value]) => ({ cont, value }))
+      .sort((a, b) => b.value - a.value);
+
+    return { ranking, byCont: byContArr };
+  }, [rows, year]);
 
   if (loading) {
     return (
@@ -176,96 +120,71 @@ export default function CountryRanking({ year, filePath }: Props) {
   if (err) {
     return (
       <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        Error: {err}
+        <div style={{ color: "crimson" }}>Error: {err}</div>
       </div>
     );
   }
 
-  if (yearRows.length === 0) {
+  if (!computed.ranking.length) {
     return (
       <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        Sin datos para {year}. (Archivo: {filePath})
+        <div style={{ fontWeight: 900 }}>Nacionalidades</div>
+        <div style={{ marginTop: ".35rem", opacity: 0.85 }}>
+          Sin datos para {year}. (Archivo: {filePath})
+        </div>
+        {info ? (
+          <div style={{ marginTop: ".6rem", fontSize: ".9rem", opacity: 0.75 }}>
+            Sheet: {info.sheet} · Keys ejemplo: {info.keys.slice(0, 12).join(", ")}
+          </div>
+        ) : null}
       </div>
     );
   }
 
-  const fmtInt = (n: number) => new Intl.NumberFormat("es-AR").format(Math.round(n));
-  const fmtPct = (n: number) => `${(n * 100).toFixed(1)}%`;
+  const total = computed.ranking.reduce((a, x) => a + x.value, 0);
 
   return (
     <div style={{ display: "grid", gap: "1rem" }}>
-      {/* Ranking */}
       <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        <div style={{ fontWeight: 950, marginBottom: ".5rem" }}>
-          Ranking por país — {year}{" "}
-          <span style={{ opacity: 0.7, fontWeight: 800 }}>({fmtInt(total)} total)</span>
-        </div>
+        <div style={{ fontWeight: 950, fontSize: "1.05rem" }}>Ranking por país ({year})</div>
 
-        <div style={{ display: "grid", gap: ".5rem" }}>
-          {top.map((it) => {
-            const iso2 = COUNTRY_TO_ISO2[it.countryKey] ?? "";
-            const flag = iso2 ? flagFromIso2(iso2) : "";
-            const share = total > 0 ? it.value / total : 0;
-
+        <div style={{ marginTop: ".75rem", display: "grid", gap: ".5rem" }}>
+          {computed.ranking.map((x) => {
+            const pct = total > 0 ? x.value / total : 0;
             return (
-              <div
-                key={it.countryKey}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "44px 1fr auto",
-                  alignItems: "center",
-                  gap: ".75rem",
-                  padding: ".6rem .65rem",
-                  borderRadius: 14,
-                  border: "1px solid rgba(255,255,255,.08)",
-                }}
-              >
-                <div style={{ fontSize: "1.35rem", textAlign: "center" }}>{flag || "🏳️"}</div>
-
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {it.countryKey}
-                  </div>
-                  <div style={{ opacity: 0.8, fontSize: ".9rem" }}>
-                    {fmtInt(it.value)} <span style={{ opacity: 0.65 }}>· {fmtPct(share)}</span>
+              <div key={x.country} style={{ display: "grid", gap: ".25rem" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem" }}>
+                  <div style={{ fontWeight: 800 }}>{x.country}</div>
+                  <div style={{ fontWeight: 900 }}>
+                    {formatInt(x.value)} <span style={{ opacity: 0.75 }}>({(pct * 100).toFixed(1).replace(".", ",")}%)</span>
                   </div>
                 </div>
 
-                <div style={{ fontWeight: 950 }}>{fmtPct(share)}</div>
+                <div style={{ height: 10, background: "rgba(255,255,255,.08)", borderRadius: 999 }}>
+                  <div
+                    style={{
+                      height: "100%",
+                      width: `${Math.min(100, pct * 100)}%`,
+                      borderRadius: 999,
+                      background: "rgba(255,255,255,.35)",
+                    }}
+                  />
+                </div>
               </div>
             );
           })}
         </div>
       </div>
 
-      {/* Distribución por continente */}
       <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        <div style={{ fontWeight: 950, marginBottom: ".5rem" }}>Distribución por continente — {year}</div>
-
-        <div style={{ display: "grid", gap: ".5rem" }}>
-          {Array.from(byContinent.entries())
-            .sort((a, b) => b[1] - a[1])
-            .map(([cont, val]) => {
-              const share = total > 0 ? val / total : 0;
-              return (
-                <div
-                  key={cont}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "1fr auto",
-                    gap: ".75rem",
-                    padding: ".6rem .65rem",
-                    borderRadius: 14,
-                    border: "1px solid rgba(255,255,255,.08)",
-                  }}
-                >
-                  <div style={{ fontWeight: 850 }}>{cont}</div>
-                  <div style={{ fontWeight: 950 }}>
-                    {fmtInt(val)} <span style={{ opacity: 0.7 }}>· {fmtPct(share)}</span>
-                  </div>
-                </div>
-              );
-            })}
+        <div style={{ fontWeight: 900 }}>Distribución por continente ({year})</div>
+        <div style={{ marginTop: ".6rem", display: "grid", gap: ".35rem" }}>
+          {computed.byCont.map((x) => (
+            <div key={x.cont} style={{ display: "flex", justifyContent: "space-between", gap: "1rem" }}>
+              <div>{x.cont}</div>
+              <div style={{ fontWeight: 900 }}>{formatInt(x.value)}</div>
+            </div>
+          ))}
         </div>
       </div>
     </div>
