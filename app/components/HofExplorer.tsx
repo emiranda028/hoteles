@@ -37,7 +37,8 @@ export default function HofExplorer({ year, hotel, filePath }: Props) {
     readCsvFromPublic(filePath)
       .then((r) => {
         if (!alive) return;
-        setRows(r as HfRow[]);
+        // CORRECCIÓN DE TIPO PARA VERCEL
+        setRows(r as unknown as HfRow[]);
         setLoading(false);
       })
       .catch((e) => {
@@ -122,52 +123,4 @@ export default function HofExplorer({ year, hotel, filePath }: Props) {
       </div>
 
       {!yearRows.length ? (
-        <div className="card" style={{ padding: "1rem", borderRadius: 18, marginTop: ".75rem" }}>
-          Sin filas para {hotel} · {year} · {monthLabel(month)} (HoF: {hof}).
-        </div>
-      ) : (
-        <div className="card" style={{ padding: "1rem", borderRadius: 18, marginTop: ".75rem", overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 860 }}>
-            <thead>
-              <tr style={{ textAlign: "left", opacity: 0.8 }}>
-                <th style={{ padding: ".5rem" }}>Fecha</th>
-                <th style={{ padding: ".5rem" }}>HoF</th>
-                <th style={{ padding: ".5rem" }}>Occ.%</th>
-                <th style={{ padding: ".5rem" }}>ADR</th>
-                <th style={{ padding: ".5rem" }}>Room Revenue</th>
-                <th style={{ padding: ".5rem" }}>Total Occ.</th>
-                <th style={{ padding: ".5rem" }}>House Use</th>
-                <th style={{ padding: ".5rem" }}>Adl.&Chl.</th>
-              </tr>
-            </thead>
-            <tbody>
-              {yearRows.map((r, idx) => {
-                const dt = parseFechaSmart(r);
-                const occ = toNumberSmart(pick(r, ["Occ.%", "Occ.% ", "Occ.%\n"]));
-                const adr = toNumberSmart(pick(r, ["Average Rate", "Average\nRate"]));
-                const rev = toNumberSmart(pick(r, ["Room Revenue", "Room\nRevenue"]));
-                const totalOcc = toNumberSmart(pick(r, ['Total Occ.', 'Total\nOcc.']));
-                const house = toNumberSmart(pick(r, ['House Use', 'House\nUse']));
-                const pax = toNumberSmart(pick(r, ['Adl. & Chl.', 'Adl. &\nChl.']));
-                const hofVal = String(r["HoF"] ?? "").trim();
-
-                return (
-                  <tr key={idx} style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
-                    <td style={{ padding: ".5rem" }}>{dt ? dt.toLocaleDateString("es-AR") : "-"}</td>
-                    <td style={{ padding: ".5rem" }}>{hofVal}</td>
-                    <td style={{ padding: ".5rem" }}>{formatPct01(occ)}</td>
-                    <td style={{ padding: ".5rem" }}>{formatMoneyUSD(adr)}</td>
-                    <td style={{ padding: ".5rem" }}>{formatMoneyUSD(rev)}</td>
-                    <td style={{ padding: ".5rem" }}>{formatInt(totalOcc)}</td>
-                    <td style={{ padding: ".5rem" }}>{formatInt(house)}</td>
-                    <td style={{ padding: ".5rem" }}>{formatInt(pax)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-}
+        <div className="card" style={{ padding: "1rem", borderRadius: 18, marginTop
