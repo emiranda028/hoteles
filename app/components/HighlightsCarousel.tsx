@@ -159,4 +159,9 @@ export default function HighlightsCarousel({ year, hotel, filePath }: Props) {
         <CardKpi title="ADR (prom.)" value={formatMoneyUSD(agg.adrAvg)} sub="Promedio del Average Rate" />
         <CardKpi title="REVPAR (estim.)" value={formatMoneyUSD(agg.revpar)} sub="ADR × Ocupación" />
         <CardKpi title="Room Revenue" value={formatMoneyUSD(agg.roomRevenue)} sub="Suma del año" />
-        <CardKpi title="Pax (Adl.&Chl.)" value={formatInt(
+        <CardKpi title="Pax (Adl.&Chl.)" value={formatInt(agg.pax)} sub="Suma del año" />
+        <CardKpi title="Doble ocupación" value={(agg.dblOcc * 100).toFixed(0) + "%"} sub="Pax / OccNet" />
+      </div>
+    </div>
+  );
+}
