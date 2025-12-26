@@ -13,18 +13,14 @@ type Props = {
 
 type HfRow = Record<string, any>;
 
-function monthKey(dt: Date): number {
-  return dt.getMonth() + 1; // 1..12
-}
-
 function pick(row: HfRow, keys: string[]): any {
   for (const k of keys) if (row[k] !== undefined) return row[k];
   return undefined;
 }
 
 function aggregate(rows: HfRow[]) {
-  let occNet = 0; // TotalOcc - HouseUse
-  let pax = 0; // Adl & Chl
+  let occNet = 0; 
+  let pax = 0; 
   let roomRevenue = 0;
   let adrSum = 0;
   let adrCount = 0;
@@ -56,8 +52,8 @@ function aggregate(rows: HfRow[]) {
   }
 
   const adrAvg = adrCount ? adrSum / adrCount : 0;
-  const occAvg = occPctCount ? occPctSum / occPctCount : 0; // ya viene 0..1 por toNumberSmart
-  const dblOcc = safeDiv(pax, occNet); // >1 posible
+  const occAvg = occPctCount ? occPctSum / occPctCount : 0; 
+  const dblOcc = safeDiv(pax, occNet); 
   const revpar = adrAvg * clamp01(occAvg);
 
   return {
@@ -110,4 +106,57 @@ export default function HighlightsCarousel({ year, hotel, filePath }: Props) {
     readCsvFromPublic(filePath)
       .then((r) => {
         if (!alive) return;
-        // CORRECCIÓN AQUÍ: Se añade 'unknown' para evitar el error de solapamiento de tipos en
+        // Corrección del error de tipo para Vercel
+        setRows(r as unknown as HfRow[]);
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (!alive) return;
+        setErr(e?.message || "Error leyendo CSV");
+        setLoading(false);
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [filePath]);
+
+  const filtered = useMemo(() => {
+    const out: HfRow[] = [];
+    for (const r of rows) {
+      const emp = String(r["Empresa"] ?? "").trim();
+      if (emp !== hotel) continue;
+
+      const dt = parseFechaSmart(r);
+      if (!dt) continue;
+      if (dt.getFullYear() !== year) continue;
+
+      const hof = String(r["HoF"] ?? "").trim();
+      if (!hof) continue;
+
+      out.push(r);
+    }
+    return out;
+  }, [rows, hotel, year]);
+
+  const agg = useMemo(() => aggregate(filtered), [filtered]);
+
+  if (loading) return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Cargando KPIs…</div>;
+  if (err) return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Error: {err}</div>;
+  if (!filtered.length) return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Sin filas H&amp;F para {hotel} en {year}.</div>;
+
+  return (
+    <div style={{ overflowX: "auto", paddingBottom: ".25rem" }}>
+      <div
+        style={{
+          display: "flex",
+          gap: ".75rem",
+          scrollSnapType: "x mandatory",
+          WebkitOverflowScrolling: "touch",
+        }}
+      >
+        <CardKpi title="Ocupación (prom.)" value={formatPct01(agg.occAvg)} sub="Promedio del % Occ. del archivo" />
+        <CardKpi title="ADR (prom.)" value={formatMoneyUSD(agg.adrAvg)} sub="Promedio del Average Rate" />
+        <CardKpi title="REVPAR (estim.)" value={formatMoneyUSD(agg.revpar)} sub="ADR × Ocupación" />
+        <CardKpi title="Room Revenue" value={formatMoneyUSD(agg.roomRevenue)} sub="Suma del año" />
+        <CardKpi title="Pax (Adl.&Chl.)" value={formatInt(
