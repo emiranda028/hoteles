@@ -19,7 +19,8 @@ function pick(row: HfRow, keys: string[]): any {
 }
 
 function monthLabel(m: number) {
-  return ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"][m - 1] || String(m);
+  const labels = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
+  return labels[m - 1] || String(m);
 }
 
 export default function HofExplorer({ year, hotel, filePath }: Props) {
@@ -27,7 +28,7 @@ export default function HofExplorer({ year, hotel, filePath }: Props) {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [month, setMonth] = useState<number>(new Date().getMonth() + 1);
-  const [hof, setHof] = useState<string>("ALL"); // History / Forecast / hoy / ALL
+  const [hof, setHof] = useState<string>("ALL");
 
   useEffect(() => {
     let alive = true;
@@ -37,7 +38,6 @@ export default function HofExplorer({ year, hotel, filePath }: Props) {
     readCsvFromPublic(filePath)
       .then((r) => {
         if (!alive) return;
-        // CORRECCIÓN DE TIPO PARA VERCEL
         setRows(r as unknown as HfRow[]);
         setLoading(false);
       })
@@ -92,23 +92,23 @@ export default function HofExplorer({ year, hotel, filePath }: Props) {
     };
   }, [yearRows]);
 
-  if (loading) return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Cargando detalle…</div>;
+  if (loading) return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Cargando detalle...</div>;
   if (err) return <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>Error: {err}</div>;
 
   return (
     <div style={{ marginTop: ".85rem" }}>
       <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", alignItems: "center" }}>
         <div className="card" style={{ padding: ".5rem .75rem", borderRadius: 14 }}>
-          <b>Mes</b>{" "}
+          <b>Mes</b>
           <select value={month} onChange={(e) => setMonth(Number(e.target.value))} style={{ marginLeft: ".35rem" }}>
-            {Array.from({ length: 12 }).map((_, i) => (
-              <option key={i + 1} value={i + 1}>{monthLabel(i + 1)}</option>
+            {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((m) => (
+              <option key={m} value={m}>{monthLabel(m)}</option>
             ))}
           </select>
         </div>
 
         <div className="card" style={{ padding: ".5rem .75rem", borderRadius: 14 }}>
-          <b>HoF</b>{" "}
+          <b>HoF</b>
           <select value={hof} onChange={(e) => setHof(e.target.value)} style={{ marginLeft: ".35rem" }}>
             <option value="ALL">ALL</option>
             <option value="History">History</option>
@@ -123,4 +123,30 @@ export default function HofExplorer({ year, hotel, filePath }: Props) {
       </div>
 
       {!yearRows.length ? (
-        <div className="card" style={{ padding: "1rem", borderRadius: 18, marginTop
+        <div className="card" style={{ padding: "1rem", borderRadius: 18, marginTop: ".75rem" }}>
+          Sin filas para {hotel} en {monthLabel(month)}.
+        </div>
+      ) : (
+        <div className="card" style={{ padding: "1rem", borderRadius: 18, marginTop: ".75rem", overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 860 }}>
+            <thead>
+              <tr style={{ textAlign: "left", opacity: 0.8 }}>
+                <th style={{ padding: ".5rem" }}>Fecha</th>
+                <th style={{ padding: ".5rem" }}>HoF</th>
+                <th style={{ padding: ".5rem" }}>Occ.%</th>
+                <th style={{ padding: ".5rem" }}>ADR</th>
+                <th style={{ padding: ".5rem" }}>Room Revenue</th>
+                <th style={{ padding: ".5rem" }}>Total Occ.</th>
+                <th style={{ padding: ".5rem" }}>House Use</th>
+                <th style={{ padding: ".5rem" }}>Adl.&Chl.</th>
+              </tr>
+            </thead>
+            <tbody>
+              {yearRows.map((r, idx) => {
+                const dt = parseFechaSmart(r);
+                const occ = toNumberSmart(pick(r, ["Occ.%", "Occ.% ", "Occ.%\n"]));
+                const adr = toNumberSmart(pick(r, ["Average Rate", "Average\nRate"]));
+                const rev = toNumberSmart(pick(r, ["Room Revenue", "Room\nRevenue"]));
+                const totalOcc = toNumberSmart(pick(r, ['Total Occ.', 'Total\nOcc.']));
+                const house = toNumberSmart(pick(r, ['House Use', 'House\nUse']));
+                const pax = toNumberSmart(pick(r, ['Adl. & Chl.', 'Adl. &\nChl.
