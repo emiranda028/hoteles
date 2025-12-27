@@ -2,40 +2,95 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 
-/**
- * ============================
- * CONFIG
- * ============================
- * En Next.js, todo lo que está en /public se sirve desde "/"
- * Vos tenés: /public/data/hf_diario.csv
- * Entonces el path real es:
- */
-const HOF_PATH = "/data/hf_diario.csv";
+/* =========================================================
+   CONFIG
+========================================================= */
 
-// Valores reales (Empresa) según tu CSV:
-type HotelKey = "MARRIOTT" | "SHERATON BCR" | "SHERATON MDQ" | "MAITEI";
-type HofTab = "History" | "Forecast" | "All";
+type GlobalHotel = "MARRIOTT" | "SHERATON BCR" | "SHERATON MDQ" | "MAITEI";
 
-const JCR_HOTELS: HotelKey[] = ["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"];
-const MAITEI_HOTELS: HotelKey[] = ["MAITEI"];
+const JCR_HOTELS: GlobalHotel[] = ["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"];
+const GOTEL_HOTELS: GlobalHotel[] = ["MAITEI"];
 
-/**
- * ============================
- * CSV parsing (sin papaparse)
- * ============================
- */
-function splitCsvLine(line: string): string[] {
-  // Parser simple pero robusto para comillas
-  const out: string[] = [];
-  let cur = "";
+const HF_PATH = "/data/hf_diario.csv";
+
+// Importante: XLSX en navegador sin librerías rompe, así que lo dejo en CSV
+const MEMBERSHIP_CSV_PATH = "/data/jcr_membership.csv";
+const NACIONALIDADES_CSV_PATH = "/data/jcr_nacionalidades.csv";
+
+/* =========================================================
+   CSV ROBUST PARSER (sin libs)
+   - respeta comillas
+   - soporta \n dentro de "..."
+   - autodetecta delimitador: , ; \t
+========================================================= */
+
+function detectDelimiter(sampleLine: string): string {
+  const candidates = [",", ";", "\t"];
+  let best = ",";
+  let bestCount = -1;
+  for (const d of candidates) {
+    const count = sampleLine.split(d).length - 1;
+    if (count > bestCount) {
+      bestCount = count;
+      best = d;
+    }
+  }
+  return best;
+}
+
+function normalizeHeader(h: string): string {
+  return h
+    .replace(/^\uFEFF/, "")
+    .replace(/^"|"$/g, "")
+    .replace(/\r/g, "")
+    .replace(/\n/g, " ")
+    .replace(/\t/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeCell(v: string): string {
+  return String(v ?? "")
+    .replace(/^"|"$/g, "")
+    .replace(/\r/g, "")
+    .trim();
+}
+
+function parseCsvRobust(text: string): Record<string, string>[] {
+  const src = text.replace(/^\uFEFF/, "");
+  if (!src.trim()) return [];
+
+  // primera “línea lógica” (hasta \n fuera de comillas) para detectar delimitador
   let inQuotes = false;
+  let firstRecord = "";
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === '"') {
+      const next = src[i + 1];
+      if (inQuotes && next === '"') {
+        firstRecord += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+    if (ch === "\n" && !inQuotes) break;
+    firstRecord += ch;
+  }
 
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
+  const delimiter = detectDelimiter(firstRecord);
+
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cur = "";
+  inQuotes = false;
+
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
 
     if (ch === '"') {
-      // Dobles comillas dentro de quoted field: "" -> "
-      const next = line[i + 1];
+      const next = src[i + 1];
       if (inQuotes && next === '"') {
         cur += '"';
         i++;
@@ -45,86 +100,95 @@ function splitCsvLine(line: string): string[] {
       continue;
     }
 
-    if (ch === "," && !inQuotes) {
-      out.push(cur);
+    if (!inQuotes && ch === delimiter) {
+      row.push(cur);
       cur = "";
+      continue;
+    }
+
+    if (!inQuotes && ch === "\n") {
+      row.push(cur);
+      cur = "";
+      rows.push(row);
+      row = [];
       continue;
     }
 
     cur += ch;
   }
 
-  out.push(cur);
+  if (cur.length || row.length) {
+    row.push(cur);
+    rows.push(row);
+  }
+
+  if (!rows.length) return [];
+
+  const headers = rows[0].map((h) => normalizeHeader(h));
+  const out: Record<string, string>[] = [];
+
+  for (let r = 1; r < rows.length; r++) {
+    const cols = rows[r];
+    if (cols.every((c) => !String(c ?? "").trim())) continue;
+
+    const obj: Record<string, string> = {};
+    for (let c = 0; c < headers.length; c++) {
+      const key = headers[c] || `col_${c}`;
+      obj[key] = normalizeCell(cols[c] ?? "");
+    }
+    out.push(obj);
+  }
+
   return out;
 }
 
-function parseCsv(text: string): Record<string, string>[] {
-  const lines = text
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .split("\n")
-    .filter((l) => l.trim().length > 0);
-
-  if (lines.length === 0) return [];
-
-  const headers = splitCsvLine(lines[0]).map((h) => h.trim().replace(/^"|"$/g, ""));
-  const rows: Record<string, string>[] = [];
-
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitCsvLine(lines[i]);
-    const obj: Record<string, string> = {};
-    for (let c = 0; c < headers.length; c++) {
-      const key = headers[c] ?? `col_${c}`;
-      const raw = cols[c] ?? "";
-      obj[key] = raw.replace(/^"|"$/g, "").trim();
-    }
-    rows.push(obj);
+async function readCsv(path: string): Promise<Record<string, string>[]> {
+  const res = await fetch(path, { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error(`No se pudo leer CSV: ${path} (${res.status})`);
   }
-
-  return rows;
+  const text = await res.text();
+  return parseCsvRobust(text);
 }
 
-/**
- * ============================
- * Helpers numéricos y fechas
- * ============================
- */
+/* =========================================================
+   NUM HELPERS
+========================================================= */
+
 function toNumberSmart(v: any): number {
   if (v === null || v === undefined) return 0;
-  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+  if (typeof v === "number") return v;
   const s = String(v).trim();
   if (!s) return 0;
 
-  // Limpiar moneda / espacios
+  // soporta 22.441,71 / 22,441.71 / 59,40% etc
   const cleaned = s
-    .replace(/\s+/g, "")
-    // miles con punto (AR) y decimal con coma:
-    .replace(/\./g, "")
-    .replace(",", ".")
+    .replace(/\s/g, "")
+    .replace(/\./g, "") // miles
+    .replace(",", ".") // decimal
     .replace("%", "");
-
   const n = Number(cleaned);
-  return Number.isFinite(n) ? n : 0;
+  return isNaN(n) ? 0 : n;
 }
 
-function toPercent01Smart(v: any): number {
-  // Convierte "59,40%" -> 0.594
-  // Convierte "0,594" -> 0.594
-  // Convierte 59.4 -> 0.594 si viene como 59.4
-  const n = toNumberSmart(v);
-  if (n > 1.5) return n / 100;
+function safeDiv(a: number, b: number): number {
+  return b === 0 ? 0 : a / b;
+}
+
+function clamp01(n: number): number {
+  if (!isFinite(n)) return 0;
   if (n < 0) return 0;
+  if (n > 1) return 1;
   return n;
 }
 
 function formatInt(n: number): string {
-  const x = Number.isFinite(n) ? n : 0;
-  return Math.round(x).toLocaleString("es-AR");
+  return Math.round(n).toLocaleString("es-AR");
 }
 
-function formatMoneyUSD0(n: number): string {
-  const x = Number.isFinite(n) ? n : 0;
-  return x.toLocaleString("es-AR", {
+function formatMoney(n: number): string {
+  // Si tu revenue está en USD, ok. Si es ARS, cambiá currency.
+  return n.toLocaleString("es-AR", {
     style: "currency",
     currency: "USD",
     maximumFractionDigits: 0,
@@ -132,990 +196,865 @@ function formatMoneyUSD0(n: number): string {
 }
 
 function formatPct01(n: number): string {
-  const x = Number.isFinite(n) ? n : 0;
-  return (x * 100).toFixed(1).replace(".", ",") + "%";
+  return (clamp01(n) * 100).toFixed(1) + "%";
 }
 
-function clamp01(n: number): number {
-  if (!Number.isFinite(n)) return 0;
-  if (n < 0) return 0;
-  if (n > 1) return 1;
-  return n;
+function monthName(m: number): string {
+  const names = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
+  return names[m - 1] ?? `M${m}`;
 }
 
-function parseDateSmart(v: any): Date | null {
-  if (!v) return null;
+/* =========================================================
+   DATE / YEAR / MONTH HELPERS
+========================================================= */
 
-  // Caso "1/6/2022" (d/m/yyyy)
-  const s = String(v).trim();
+function parseDateSmart(row: Record<string, string>): Date | null {
+  // busca una columna Fecha o Date
+  const raw =
+    row["Fecha"] ||
+    row["FECHA"] ||
+    row["Date"] ||
+    row["DATE"] ||
+    row["date"] ||
+    "";
 
-  // dd-mm-yy Wed (col Date)
-  // 01-06-22 Wed
-  const m1 = s.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})/);
+  const s = String(raw).trim();
+  if (!s) return null;
+
+  // Caso Excel serial (si te llega algo como 46004, etc)
+  const asNum = Number(s);
+  if (Number.isFinite(asNum) && asNum > 30000) {
+    // Excel: days since 1899-12-30
+    const epoch = new Date(Date.UTC(1899, 11, 30));
+    const d = new Date(epoch.getTime() + asNum * 86400000);
+    return d;
+  }
+
+  // dd-mm-yy or dd/mm/yyyy
+  const m1 = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
   if (m1) {
     const dd = Number(m1[1]);
     const mm = Number(m1[2]);
     let yy = Number(m1[3]);
-    if (yy < 100) yy = 2000 + yy;
+    if (yy < 100) yy += 2000;
     const d = new Date(yy, mm - 1, dd);
-    return Number.isFinite(d.getTime()) ? d : null;
+    return isNaN(d.getTime()) ? null : d;
   }
 
-  const m2 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
-  if (m2) {
-    const dd = Number(m2[1]);
-    const mm = Number(m2[2]);
-    let yy = Number(m2[3]);
-    if (yy < 100) yy = 2000 + yy;
-    const d = new Date(yy, mm - 1, dd);
-    return Number.isFinite(d.getTime()) ? d : null;
-  }
-
-  const d = new Date(s);
-  return Number.isFinite(d.getTime()) ? d : null;
+  // ISO
+  const d2 = new Date(s);
+  return isNaN(d2.getTime()) ? null : d2;
 }
 
-/**
- * ============================
- * Data mapping (encabezados reales)
- * ============================
- * Tus encabezados (ejemplo):
- * Date, Total Occ., Arr. Rooms, Comp. Rooms, House Use, Deduct Indiv., Deduct Group,
- * Occ.%, Room Revenue, Average Rate, Dep. Rooms, Day Use Rooms, No Show Rooms, OOO Rooms, Adl. & Chl.,
- * Fecha, D??, HoF, Empresa
- */
-type RawRow = Record<string, string>;
+function getYear(row: Record<string, string>): number | null {
+  // algunos archivos de nacionalidades traen "Año"
+  const ay = row["Año"] || row["ANO"] || row["Anio"] || row["Year"];
+  if (ay) {
+    const n = Number(String(ay).trim());
+    if (Number.isFinite(n) && n > 1900 && n < 2200) return n;
+  }
 
-type HfRow = {
-  empresa: HotelKey | string;
-  hof: string;
-  date: Date | null;
-  year: number;
-  month: number;
+  const d = parseDateSmart(row);
+  return d ? d.getFullYear() : null;
+}
 
-  totalOcc: number; // "Total Occ."
-  occPct: number; // "Occ.%"
-  roomRevenue: number; // "Room Revenue"
-  averageRate: number; // "Average Rate"
-  adlChl: number; // "Adl. & Chl."
-  arrRooms: number; // Arr. Rooms
-  compRooms: number; // Comp. Rooms
-  houseUse: number; // House Use
-  deductIndiv: number; // Deduct Indiv.
-  deductGroup: number; // Deduct Group
+function getMonth(row: Record<string, string>): number | null {
+  // algunos archivos traen Mes o N° Mes
+  const nm = row["N° Mes"] || row["N°Mes"] || row["N Mes"] || row["N Mes."] || row["N Mes "] || row["Month"];
+  if (nm) {
+    const n = Number(String(nm).trim());
+    if (Number.isFinite(n) && n >= 1 && n <= 12) return n;
+  }
+
+  const d = parseDateSmart(row);
+  return d ? d.getMonth() + 1 : null;
+}
+
+function pickKey(keys: string[], candidates: string[]): string | null {
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+  const map = new Map(keys.map((k) => [norm(k), k]));
+  for (const c of candidates) {
+    const found = map.get(norm(c));
+    if (found) return found;
+  }
+  // fallback "includes"
+  for (const k of keys) {
+    const nk = norm(k);
+    for (const c of candidates) {
+      if (nk.includes(norm(c))) return k;
+    }
+  }
+  return null;
+}
+
+/* =========================================================
+   HF METRICS (History & Forecast)
+========================================================= */
+
+type HofRow = Record<string, string>;
+
+function isHistoryRow(r: HofRow): boolean {
+  const hof = (r["HoF"] || r["HOF"] || "").toLowerCase();
+  return hof.includes("history");
+}
+
+function rowHotel(r: HofRow): string {
+  return (r["Empresa"] || r["Hotel"] || r["EMPRESA"] || "").trim().toUpperCase();
+}
+
+function occPct01FromRow(r: HofRow): number {
+  const kOccPct = r["Occ.%"] ?? r["Occ%"] ?? r["Occ %"] ?? r["Occ. %"] ?? r["Occ. % "];
+  if (kOccPct !== undefined && kOccPct !== null && String(kOccPct).includes("%")) {
+    const n = toNumberSmart(kOccPct);
+    return clamp01(n / 100);
+  }
+  // si viene como 0,594
+  const n2 = toNumberSmart(kOccPct);
+  if (n2 > 0 && n2 <= 1) return clamp01(n2);
+  if (n2 > 1 && n2 <= 100) return clamp01(n2 / 100);
+
+  // si no hay Occ.% usamos estimación: Total Occ / (Total Occ + OOO + House Use)
+  const totalOcc = toNumberSmart(r['Total Occ.'] ?? r["Total Occ"] ?? r["Total Occ. "] ?? r["Total Occ.\t"]);
+  const ooo = toNumberSmart(r['"OOO\nRooms"'] ?? r["OOO Rooms"] ?? r["OOO\nRooms"] ?? r["OOO Rooms "]);
+  const house = toNumberSmart(r['"House\nUse"'] ?? r["House Use"] ?? r["House\nUse"]);
+  const denom = totalOcc + ooo + house;
+  return clamp01(safeDiv(totalOcc, denom));
+}
+
+function roomsOcc(r: HofRow): number {
+  return toNumberSmart(r['Total Occ.'] ?? r["Total Occ"] ?? r["Total Occ. "]);
+}
+
+function roomRevenue(r: HofRow): number {
+  return toNumberSmart(r["Room Revenue"] ?? r["RoomRevenue"] ?? r["Room\nRevenue"]);
+}
+
+function adr(r: HofRow): number {
+  return toNumberSmart(r["Average Rate"] ?? r["ADR"] ?? r["Average\nRate"]);
+}
+
+function persons(r: HofRow): number {
+  return toNumberSmart(r['"Adl. &\nChl."'] ?? r["Adl. & Chl."] ?? r["Adl. &\nChl."] ?? r["Adl. & Chl."]);
+}
+
+type HofAgg = {
+  days: number;
+  roomsOcc: number;
+  roomRevenue: number;
+  persons: number;
+  occPctSum: number; // para promedio simple si hace falta
+  adrWeightedSum: number; // ADR ponderado por roomsOcc
 };
 
-function pickFirst(obj: RawRow, keys: string[]): string {
-  for (const k of keys) {
-    if (k in obj) return obj[k];
-  }
-  // fallback: case-insensitive
-  const lowerMap = new Map<string, string>();
-  for (const kk of Object.keys(obj)) lowerMap.set(kk.toLowerCase(), kk);
-
-  for (const k of keys) {
-    const found = lowerMap.get(k.toLowerCase());
-    if (found) return obj[found];
-  }
-  return "";
+function emptyAgg(): HofAgg {
+  return { days: 0, roomsOcc: 0, roomRevenue: 0, persons: 0, occPctSum: 0, adrWeightedSum: 0 };
 }
 
-function normalizeRow(r: RawRow): HfRow {
-  const empresa = pickFirst(r, ["Empresa", "empresa", "Hotel", "hotel"]).trim();
-  const hof = pickFirst(r, ["HoF", "hof", "HOF"]).trim();
-
-  const fechaStr = pickFirst(r, ["Fecha", "fecha", "Date", "date"]);
-  const date = parseDateSmart(fechaStr);
-
-  const year = date ? date.getFullYear() : 0;
-  const month = date ? date.getMonth() + 1 : 0;
-
-  const totalOcc = toNumberSmart(pickFirst(r, ["Total Occ.", "Total", "Total Occ", "Total Rooms Occ", "TotalOcc"]));
-  const occPct = clamp01(toPercent01Smart(pickFirst(r, ["Occ.%", "Occ%", "Occ", "OCC.%", "OCC%"])));
-
-  const roomRevenue = toNumberSmart(pickFirst(r, ["Room Revenue", "Room Reven", "RoomReven", "Revenue", "RoomRevenue"]));
-  const averageRate = toNumberSmart(pickFirst(r, ["Average Rate", "ADR", "AverageRate"]));
-  const adlChl = toNumberSmart(pickFirst(r, ["Adl. & Chl.", "Adl & Chl", "Adl.&Chl.", "Persons", "Pax"]));
-
-  const arrRooms = toNumberSmart(pickFirst(r, ["Arr. Rooms", "Arr.", "Arr Rooms"]));
-  const compRooms = toNumberSmart(pickFirst(r, ["Comp. Rooms", "Comp.", "Comp Rooms"]));
-  const houseUse = toNumberSmart(pickFirst(r, ["House Use", "House"]));
-  const deductIndiv = toNumberSmart(pickFirst(r, ["Deduct Indiv.", "Deduct", "Deduct Indiv"]));
-  const deductGroup = toNumberSmart(pickFirst(r, ["Deduct Group", "Deduct2", "Deduct Group"]));
+function addAgg(a: HofAgg, r: HofRow): HofAgg {
+  const ro = roomsOcc(r);
+  const rev = roomRevenue(r);
+  const p = persons(r);
+  const occ = occPct01FromRow(r);
+  const rate = adr(r);
 
   return {
-    empresa,
-    hof,
-    date,
-    year,
-    month,
-    totalOcc,
-    occPct,
-    roomRevenue,
-    averageRate,
-    adlChl,
-    arrRooms,
-    compRooms,
-    houseUse,
-    deductIndiv,
-    deductGroup,
+    days: a.days + 1,
+    roomsOcc: a.roomsOcc + ro,
+    roomRevenue: a.roomRevenue + rev,
+    persons: a.persons + p,
+    occPctSum: a.occPctSum + occ,
+    adrWeightedSum: a.adrWeightedSum + rate * ro,
   };
 }
 
-/**
- * ============================
- * KPIs
- * ============================
- */
-type Kpis = {
-  days: number;
-  avgOcc: number; // promedio simple de Occ.% (válido <=100)
-  totalRevenue: number;
-  totalRoomsSold: number;
-  approxADR: number; // revenue / rooms sold
-  avgRate: number; // promedio de "Average Rate"
-  doubleOcc: number; // pax / rooms sold (aprox)
-};
+function finalizeAgg(a: HofAgg) {
+  const occ = a.days ? a.occPctSum / a.days : 0; // prom simple
+  const adrW = a.roomsOcc ? a.adrWeightedSum / a.roomsOcc : 0;
+  const dblOcc = a.roomsOcc ? a.persons / a.roomsOcc : 0;
+  // RevPAR proxy: ADR * Occ (si no tenemos total rooms)
+  const revparProxy = adrW * occ;
 
-function computeKpis(rows: HfRow[]): Kpis {
-  const days = rows.length;
-
-  const avgOcc = days ? rows.reduce((a, r) => a + clamp01(r.occPct), 0) / days : 0;
-
-  const totalRevenue = rows.reduce((a, r) => a + (Number.isFinite(r.roomRevenue) ? r.roomRevenue : 0), 0);
-  const totalRoomsSold = rows.reduce((a, r) => a + (Number.isFinite(r.totalOcc) ? r.totalOcc : 0), 0);
-
-  const avgRate = days ? rows.reduce((a, r) => a + (Number.isFinite(r.averageRate) ? r.averageRate : 0), 0) / days : 0;
-  const approxADR = totalRoomsSold > 0 ? totalRevenue / totalRoomsSold : avgRate;
-
-  const totalPax = rows.reduce((a, r) => a + (Number.isFinite(r.adlChl) ? r.adlChl : 0), 0);
-  const doubleOcc = totalRoomsSold > 0 ? totalPax / totalRoomsSold : 0;
-
-  return { days, avgOcc, totalRevenue, totalRoomsSold, approxADR, avgRate, doubleOcc };
+  return { occ, adr: adrW, roomRevenue: a.roomRevenue, dblOcc, revpar: revparProxy, roomsOcc: a.roomsOcc, persons: a.persons, days: a.days };
 }
 
-type MonthAgg = {
-  month: number;
-  kpis: Kpis;
-};
-
-function groupByMonth(rows: HfRow[]): MonthAgg[] {
-  const map = new Map<number, HfRow[]>();
+function groupByMonth(rows: HofRow[]): Map<number, HofAgg> {
+  const m = new Map<number, HofAgg>();
   for (const r of rows) {
-    const m = r.month || 0;
-    if (!m) continue;
-    if (!map.has(m)) map.set(m, []);
-    map.get(m)!.push(r);
+    const mm = getMonth(r);
+    if (!mm) continue;
+    const prev = m.get(mm) ?? emptyAgg();
+    m.set(mm, addAgg(prev, r));
   }
-
-  const out: MonthAgg[] = [];
-  for (const [m, rs] of map.entries()) {
-    out.push({ month: m, kpis: computeKpis(rs) });
-  }
-
-  out.sort((a, b) => a.month - b.month);
-  return out;
+  return m;
 }
 
-/**
- * ============================
- * UI bits
- * ============================
- */
+/* =========================================================
+   UI: Small components
+========================================================= */
+
 function Pill({
+  label,
   active,
-  children,
   onClick,
-  bgActive,
-  bgInactive,
+  color = "#b10f2e",
 }: {
+  label: string;
   active: boolean;
-  children: React.ReactNode;
   onClick: () => void;
-  bgActive: string;
-  bgInactive: string;
+  color?: string;
 }) {
   return (
     <button
       onClick={onClick}
       style={{
-        border: "1px solid rgba(255,255,255,.24)",
-        background: active ? bgActive : bgInactive,
-        color: "white",
-        padding: ".42rem .75rem",
-        borderRadius: 999,
-        fontWeight: 900,
+        border: "1px solid rgba(255,255,255,.25)",
+        background: active ? color : "rgba(255,255,255,.12)",
+        color: "#fff",
+        padding: ".45rem .7rem",
+        borderRadius: 14,
+        fontWeight: 800,
         cursor: "pointer",
+        letterSpacing: ".2px",
       }}
     >
-      {children}
+      {label}
     </button>
   );
 }
 
-function Card({
-  title,
-  value,
-  sub,
-}: {
-  title: string;
-  value: string;
-  sub?: string;
-}) {
+function Card({ children }: { children: React.ReactNode }) {
   return (
     <div
       className="card"
       style={{
+        background: "rgba(255,255,255,.06)",
+        border: "1px solid rgba(255,255,255,.10)",
         borderRadius: 18,
-        padding: ".9rem 1rem",
-        border: "1px solid rgba(0,0,0,.10)",
-        background: "white",
+        padding: "1rem",
+        backdropFilter: "blur(10px)",
       }}
     >
-      <div style={{ fontWeight: 900, opacity: 0.75, fontSize: ".95rem" }}>{title}</div>
-      <div style={{ fontWeight: 950, fontSize: "1.25rem", marginTop: ".2rem" }}>{value}</div>
-      {sub ? <div style={{ marginTop: ".2rem", opacity: 0.75, fontWeight: 700 }}>{sub}</div> : null}
+      {children}
     </div>
   );
 }
 
-function BarRow({
-  label,
-  value,
-  max,
-  right,
-}: {
-  label: string;
-  value: number;
-  max: number;
-  right: string;
-}) {
-  const pct = max > 0 ? Math.min(1, value / max) : 0;
+function KpiTile({ title, value, sub }: { title: string; value: string; sub?: string }) {
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "120px 1fr 140px", gap: ".6rem", alignItems: "center" }}>
-      <div style={{ fontWeight: 900 }}>{label}</div>
-      <div style={{ height: 10, borderRadius: 999, background: "rgba(0,0,0,.08)", overflow: "hidden" }}>
-        <div style={{ width: `${pct * 100}%`, height: 10, borderRadius: 999, background: "rgba(170,0,0,.75)" }} />
-      </div>
-      <div style={{ textAlign: "right", fontWeight: 900 }}>{right}</div>
+    <div
+      style={{
+        minWidth: 220,
+        padding: ".9rem 1rem",
+        borderRadius: 18,
+        border: "1px solid rgba(255,255,255,.12)",
+        background: "rgba(0,0,0,.18)",
+      }}
+    >
+      <div style={{ opacity: 0.85, fontWeight: 800, fontSize: ".95rem" }}>{title}</div>
+      <div style={{ fontSize: "1.45rem", fontWeight: 950, marginTop: ".25rem" }}>{value}</div>
+      {sub ? <div style={{ marginTop: ".3rem", opacity: 0.75, fontWeight: 700 }}>{sub}</div> : null}
     </div>
   );
 }
 
-/**
- * ============================
- * MAIN
- * ============================
- */
-export default function YearComparator() {
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState("");
-  const [rows, setRows] = useState<HfRow[]>([]);
+/* =========================================================
+   MAIN COMPONENT
+========================================================= */
 
+export default function YearComparator() {
+  const [year, setYear] = useState<number>(2024);
+  const [baseYear, setBaseYear] = useState<number>(2023);
+
+  // filtros separados
+  const [jcrHotel, setJcrHotel] = useState<GlobalHotel>("MARRIOTT");
+  const [maiteiHotel, setMaiteiHotel] = useState<GlobalHotel>("MAITEI");
+
+  const [hfRows, setHfRows] = useState<HofRow[]>([]);
+  const [hfErr, setHfErr] = useState<string>("");
+  const [hfLoading, setHfLoading] = useState<boolean>(false);
+
+  // membership / nacionalidades
+  const [memRows, setMemRows] = useState<Record<string, string>[]>([]);
+  const [memErr, setMemErr] = useState<string>("");
+  const [memLoading, setMemLoading] = useState<boolean>(false);
+
+  const [natRows, setNatRows] = useState<Record<string, string>[]>([]);
+  const [natErr, setNatErr] = useState<string>("");
+  const [natLoading, setNatLoading] = useState<boolean>(false);
+
+  // carga HF
   useEffect(() => {
     let alive = true;
-
-    setLoading(true);
-    setErr("");
-
-    fetch(HOF_PATH, { cache: "no-store" })
-      .then(async (res) => {
-        if (!res.ok) {
-          throw new Error(`No se pudo leer CSV: ${HOF_PATH} (${res.status})`);
-        }
-        const text = await res.text();
-        const raw = parseCsv(text);
-        const norm = raw.map(normalizeRow).filter((r) => r.year > 0 && r.month > 0);
+    setHfLoading(true);
+    setHfErr("");
+    readCsv(HF_PATH)
+      .then((rows) => {
         if (!alive) return;
-        setRows(norm);
-        setLoading(false);
+        setHfRows(rows);
+        setHfLoading(false);
+        // debug útil
+        console.log("[HF] rows:", rows.length);
+        console.log("[HF] headers:", rows[0] ? Object.keys(rows[0]) : []);
       })
       .catch((e) => {
         if (!alive) return;
-        setErr(e?.message ?? "Error leyendo CSV");
-        setLoading(false);
+        setHfErr(e?.message ?? "Error leyendo H&F");
+        setHfLoading(false);
       });
-
     return () => {
       alive = false;
     };
   }, []);
 
-  // ===== Detectar años por hotel =====
-  const yearsByHotel = useMemo(() => {
-    const map = new Map<string, number[]>();
-    const tmp = new Map<string, Set<number>>();
+  // carga membership (CSV)
+  useEffect(() => {
+    let alive = true;
+    setMemLoading(true);
+    setMemErr("");
+    readCsv(MEMBERSHIP_CSV_PATH)
+      .then((rows) => {
+        if (!alive) return;
+        setMemRows(rows);
+        setMemLoading(false);
+      })
+      .catch((e) => {
+        if (!alive) return;
+        // típico: sigue en xlsx
+        setMemErr(e?.message ?? "Error leyendo Membership");
+        setMemLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
-    for (const r of rows) {
-      const h = String(r.empresa || "").trim();
-      if (!h) continue;
-      if (!tmp.has(h)) tmp.set(h, new Set<number>());
-      tmp.get(h)!.add(r.year);
+  // carga nacionalidades (CSV)
+  useEffect(() => {
+    let alive = true;
+    setNatLoading(true);
+    setNatErr("");
+    readCsv(NACIONALIDADES_CSV_PATH)
+      .then((rows) => {
+        if (!alive) return;
+        setNatRows(rows);
+        setNatLoading(false);
+      })
+      .catch((e) => {
+        if (!alive) return;
+        setNatErr(e?.message ?? "Error leyendo Nacionalidades");
+        setNatLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // años disponibles desde HF
+  const availableYears = useMemo(() => {
+    const set = new Set<number>();
+    for (const r of hfRows) {
+      const y = getYear(r);
+      if (y) set.add(y);
+    }
+    return Array.from(set).sort((a, b) => b - a);
+  }, [hfRows]);
+
+  // si no hay años todavía, deja los defaults
+  useEffect(() => {
+    if (!availableYears.length) return;
+    // si el year actual no existe, tomar el más nuevo
+    if (!availableYears.includes(year)) setYear(availableYears[0]);
+    // baseYear: el anterior si existe
+    const idx = availableYears.indexOf(availableYears[0]);
+    const candidate = availableYears[idx + 1] ?? availableYears[0] - 1;
+    if (!availableYears.includes(baseYear)) setBaseYear(candidate);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [availableYears]);
+
+  // HF filtrado JCR (History + por hotel)
+  const hfJcrYear = useMemo(() => {
+    return hfRows.filter((r) => {
+      const y = getYear(r);
+      if (y !== year) return false;
+      if (!isHistoryRow(r)) return false;
+      return rowHotel(r) === jcrHotel;
+    });
+  }, [hfRows, year, jcrHotel]);
+
+  const hfJcrBase = useMemo(() => {
+    return hfRows.filter((r) => {
+      const y = getYear(r);
+      if (y !== baseYear) return false;
+      if (!isHistoryRow(r)) return false;
+      return rowHotel(r) === jcrHotel;
+    });
+  }, [hfRows, baseYear, jcrHotel]);
+
+  // HF filtrado MAITEI (History)
+  const hfMaiteiYear = useMemo(() => {
+    return hfRows.filter((r) => {
+      const y = getYear(r);
+      if (y !== year) return false;
+      if (!isHistoryRow(r)) return false;
+      return rowHotel(r) === maiteiHotel;
+    });
+  }, [hfRows, year, maiteiHotel]);
+
+  const hfMaiteiBase = useMemo(() => {
+    return hfRows.filter((r) => {
+      const y = getYear(r);
+      if (y !== baseYear) return false;
+      if (!isHistoryRow(r)) return false;
+      return rowHotel(r) === maiteiHotel;
+    });
+  }, [hfRows, baseYear, maiteiHotel]);
+
+  // agregados
+  const jcrAggYear = useMemo(() => {
+    let a = emptyAgg();
+    for (const r of hfJcrYear) a = addAgg(a, r);
+    return finalizeAgg(a);
+  }, [hfJcrYear]);
+
+  const jcrAggBase = useMemo(() => {
+    let a = emptyAgg();
+    for (const r of hfJcrBase) a = addAgg(a, r);
+    return finalizeAgg(a);
+  }, [hfJcrBase]);
+
+  const maiteiAggYear = useMemo(() => {
+    let a = emptyAgg();
+    for (const r of hfMaiteiYear) a = addAgg(a, r);
+    return finalizeAgg(a);
+  }, [hfMaiteiYear]);
+
+  const maiteiAggBase = useMemo(() => {
+    let a = emptyAgg();
+    for (const r of hfMaiteiBase) a = addAgg(a, r);
+    return finalizeAgg(a);
+  }, [hfMaiteiBase]);
+
+  // ranking mensual
+  const jcrByMonth = useMemo(() => groupByMonth(hfJcrYear), [hfJcrYear]);
+  const maiteiByMonth = useMemo(() => groupByMonth(hfMaiteiYear), [hfMaiteiYear]);
+
+  // membership resumen simple (acumulado por año, por hotel)
+  const membershipSummary = useMemo(() => {
+    if (!memRows.length) return null;
+
+    const keys = memRows[0] ? Object.keys(memRows[0]) : [];
+    const kHotel = pickKey(keys, ["Empresa", "Hotel"]);
+    const kYear = pickKey(keys, ["Año", "Anio", "Year"]);
+    const kQty = pickKey(keys, ["Cantidad", "Qty", "Total"]);
+
+    if (!kHotel || !kYear || !kQty) return null;
+
+    const sum = (yy: number) =>
+      memRows
+        .filter((r) => String(r[kHotel]).trim().toUpperCase() === jcrHotel && Number(r[kYear]) === yy)
+        .reduce((acc, r) => acc + toNumberSmart(r[kQty]), 0);
+
+    const y = sum(year);
+    const b = sum(baseYear);
+    return { y, b, delta: y - b, pct: b ? (y - b) / b : 0 };
+  }, [memRows, jcrHotel, year, baseYear]);
+
+  // nacionalidades: ranking top 10 por país para año, (solo JCR y hotel seleccionado si existe columna Empresa)
+  const nationalitiesTop = useMemo(() => {
+    if (!natRows.length) return null;
+
+    const keys = natRows[0] ? Object.keys(natRows[0]) : [];
+    const kYear = pickKey(keys, ["Año", "Anio", "Year"]);
+    const kCountry = pickKey(keys, ["PAÍS", "Pais", "País", "Country", "Pais Origen", "País Origen"]);
+    const kAmount = pickKey(keys, ["Importe", "Cantidad", "Total", "Rooms", "Room Nights"]);
+    const kHotel = pickKey(keys, ["Empresa", "Hotel"]);
+
+    if (!kYear || !kCountry || !kAmount) return null;
+
+    const filtered = natRows.filter((r) => {
+      const yy = Number(r[kYear]);
+      if (yy !== year) return false;
+      if (kHotel) {
+        const h = String(r[kHotel] ?? "").trim().toUpperCase();
+        // si el archivo es solo Marriott, no filtramos por hotel
+        if (h && JCR_HOTELS.includes(h as GlobalHotel)) {
+          return h === jcrHotel;
+        }
+      }
+      return true;
+    });
+
+    const map = new Map<string, number>();
+    for (const r of filtered) {
+      const c = String(r[kCountry]).trim();
+      if (!c) continue;
+      map.set(c, (map.get(c) ?? 0) + toNumberSmart(r[kAmount]));
     }
 
-    for (const [h, set] of tmp.entries()) {
-      map.set(h, Array.from(set).sort((a, b) => b - a));
-    }
-    return map;
-  }, [rows]);
+    const arr = Array.from(map.entries())
+      .map(([country, value]) => ({ country, value }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 10);
 
-  // Defaults: intenta agarrar el último año disponible para Marriott si existe
-  const defaultYear = useMemo(() => {
-    const ys = yearsByHotel.get("MARRIOTT");
-    return ys?.[0] ?? new Date().getFullYear();
-  }, [yearsByHotel]);
+    const total = Array.from(map.values()).reduce((a, b) => a + b, 0);
+    return { top: arr, total };
+  }, [natRows, year, jcrHotel]);
 
-  // ============================
-  // BLOQUE JCR
-  // ============================
-  const [jcrHotel, setJcrHotel] = useState<HotelKey>("MARRIOTT");
-  const [jcrYear, setJcrYear] = useState<number>(defaultYear);
-  const [jcrBaseYear, setJcrBaseYear] = useState<number>(defaultYear - 1);
-  const [jcrHof, setJcrHof] = useState<HofTab>("History");
-  const [jcrMonth, setJcrMonth] = useState<number>(0);
+  // estilos sticky
+  const stickyBar = (bg: string) => ({
+    position: "sticky" as const,
+    top: 0,
+    zIndex: 20,
+    background: bg,
+    border: "1px solid rgba(255,255,255,.16)",
+    borderRadius: 18,
+    padding: ".85rem 1rem",
+    backdropFilter: "blur(12px)",
+  });
 
-  // Ajuste cuando llegan años detectados
-  useEffect(() => {
-    const ys = yearsByHotel.get(jcrHotel);
-    if (!ys || ys.length === 0) return;
-
-    // si el seleccionado no existe, lo movemos al más reciente
-    if (!ys.includes(jcrYear)) setJcrYear(ys[0]);
-    if (!ys.includes(jcrBaseYear)) setJcrBaseYear(ys[Math.min(1, ys.length - 1)] ?? ys[0] - 1);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [yearsByHotel, jcrHotel]);
-
-  const jcrYears = useMemo(() => yearsByHotel.get(jcrHotel) ?? [], [yearsByHotel, jcrHotel]);
-
-  const jcrFiltered = useMemo(() => {
-    const hotelRows = rows.filter((r) => String(r.empresa).trim() === jcrHotel);
-
-    const applyHof = (rs: HfRow[]) => {
-      if (jcrHof === "All") return rs;
-      return rs.filter((r) => String(r.hof || "").toLowerCase() === jcrHof.toLowerCase());
-    };
-
-    const applyMonth = (rs: HfRow[]) => {
-      if (!jcrMonth) return rs;
-      return rs.filter((r) => r.month === jcrMonth);
-    };
-
-    const current = applyMonth(applyHof(hotelRows.filter((r) => r.year === jcrYear)));
-    const base = applyMonth(applyHof(hotelRows.filter((r) => r.year === jcrBaseYear)));
-
-    return { current, base };
-  }, [rows, jcrHotel, jcrYear, jcrBaseYear, jcrHof, jcrMonth]);
-
-  const jcrKpis = useMemo(() => computeKpis(jcrFiltered.current), [jcrFiltered.current]);
-  const jcrBaseKpis = useMemo(() => computeKpis(jcrFiltered.base), [jcrFiltered.base]);
-  const jcrMonthsAgg = useMemo(() => groupByMonth(jcrFiltered.current), [jcrFiltered.current]);
-  const jcrMaxMonthRevenue = useMemo(
-    () => Math.max(0, ...jcrMonthsAgg.map((m) => m.kpis.totalRevenue)),
-    [jcrMonthsAgg]
+  const SectionTitle = ({ children }: { children: React.ReactNode }) => (
+    <div style={{ fontSize: "1.25rem", fontWeight: 950, letterSpacing: ".2px" }}>{children}</div>
   );
-
-  // ============================
-  // BLOQUE MAITEI (separado)
-  // ============================
-  const [maiHotel, setMaiHotel] = useState<HotelKey>("MAITEI");
-  const [maiYear, setMaiYear] = useState<number>(defaultYear);
-  const [maiBaseYear, setMaiBaseYear] = useState<number>(defaultYear - 1);
-  const [maiHof, setMaiHof] = useState<HofTab>("History");
-  const [maiMonth, setMaiMonth] = useState<number>(0);
-
-  useEffect(() => {
-    const ys = yearsByHotel.get(maiHotel);
-    if (!ys || ys.length === 0) return;
-    if (!ys.includes(maiYear)) setMaiYear(ys[0]);
-    if (!ys.includes(maiBaseYear)) setMaiBaseYear(ys[Math.min(1, ys.length - 1)] ?? ys[0] - 1);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [yearsByHotel, maiHotel]);
-
-  const maiYears = useMemo(() => yearsByHotel.get(maiHotel) ?? [], [yearsByHotel, maiHotel]);
-
-  const maiFiltered = useMemo(() => {
-    const hotelRows = rows.filter((r) => String(r.empresa).trim() === maiHotel);
-
-    const applyHof = (rs: HfRow[]) => {
-      if (maiHof === "All") return rs;
-      return rs.filter((r) => String(r.hof || "").toLowerCase() === maiHof.toLowerCase());
-    };
-
-    const applyMonth = (rs: HfRow[]) => {
-      if (!maiMonth) return rs;
-      return rs.filter((r) => r.month === maiMonth);
-    };
-
-    const current = applyMonth(applyHof(hotelRows.filter((r) => r.year === maiYear)));
-    const base = applyMonth(applyHof(hotelRows.filter((r) => r.year === maiBaseYear)));
-
-    return { current, base };
-  }, [rows, maiHotel, maiYear, maiBaseYear, maiHof, maiMonth]);
-
-  const maiKpis = useMemo(() => computeKpis(maiFiltered.current), [maiFiltered.current]);
-  const maiBaseKpis = useMemo(() => computeKpis(maiFiltered.base), [maiFiltered.base]);
-  const maiMonthsAgg = useMemo(() => groupByMonth(maiFiltered.current), [maiFiltered.current]);
-  const maiMaxMonthRevenue = useMemo(
-    () => Math.max(0, ...maiMonthsAgg.map((m) => m.kpis.totalRevenue)),
-    [maiMonthsAgg]
-  );
-
-  // ============================
-  // Render
-  // ============================
-  if (loading) {
-    return (
-      <section className="section" style={{ padding: "1.25rem" }}>
-        <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-          Cargando H&F…
-        </div>
-      </section>
-    );
-  }
-
-  if (err) {
-    return (
-      <section className="section" style={{ padding: "1.25rem" }}>
-        <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-          Error leyendo H&F: {err}
-          <div style={{ marginTop: ".5rem", opacity: 0.8 }}>
-            Verificá que exista: <b>/public{HOF_PATH}</b> (ej: <b>/public/data/hf_diario.csv</b>)
-          </div>
-        </div>
-      </section>
-    );
-  }
 
   return (
-    <div style={{ display: "grid", gap: "1.35rem" }}>
-      {/* =====================================================
-          HEADER GENERAL
-      ====================================================== */}
-      <section className="section" style={{ padding: "1.25rem" }}>
-        <div
-          className="card"
-          style={{
-            borderRadius: 24,
-            padding: "1.1rem 1.2rem",
-            background: "linear-gradient(135deg, rgba(25,25,25,.98), rgba(40,40,40,.95))",
-            color: "white",
-            border: "1px solid rgba(255,255,255,.10)",
-          }}
-        >
-          <div style={{ fontSize: "1.45rem", fontWeight: 950, letterSpacing: ".2px" }}>Year Comparator</div>
-          <div style={{ marginTop: ".35rem", opacity: 0.85, fontWeight: 700 }}>
-            H&F · Comparativa anual · Ranking mensual · Detalle diario
-          </div>
-          <div style={{ marginTop: ".55rem", opacity: 0.75, fontWeight: 700, fontSize: ".95rem" }}>
-            Fuente: <b>{HOF_PATH}</b> · Filas cargadas: <b>{rows.length}</b>
-          </div>
-        </div>
-      </section>
-
-      {/* =====================================================
-          BLOQUE JCR (Sticky rojo)
-          Se mantiene “pegado” hasta terminar este bloque
-      ====================================================== */}
-      <section className="section" style={{ padding: "1.25rem" }} id="jcr">
-        <div style={{ position: "relative" }}>
-          <div
-            className="card"
-            style={{
-              borderRadius: 22,
-              padding: "1rem 1rem 1.1rem",
-              background: "linear-gradient(135deg, rgba(170,0,0,.90), rgba(120,0,0,.78))",
-              color: "white",
-              border: "1px solid rgba(255,255,255,.18)",
-              position: "sticky",
-              top: 10,
-              zIndex: 50,
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", gap: ".75rem", flexWrap: "wrap" }}>
-              <div>
-                <div style={{ fontSize: "1.25rem", fontWeight: 950 }}>Grupo JCR</div>
-                <div style={{ opacity: 0.9, fontWeight: 800, marginTop: ".1rem" }}>
-                  {jcrHotel} · {jcrYear} vs {jcrBaseYear} · {jcrHof}
-                  {jcrMonth ? ` · Mes ${jcrMonth}` : " · Año completo"}
-                </div>
-              </div>
-
-              <div style={{ opacity: 0.9, fontWeight: 800, textAlign: "right" }}>
-                Filas actuales: <b>{jcrFiltered.current.length}</b> · base: <b>{jcrFiltered.base.length}</b>
+    <div style={{ display: "grid", gap: "1.25rem" }}>
+      {/* =========================
+          BLOQUE JCR
+      ========================= */}
+      <div id="jcr" style={{ display: "grid", gap: ".9rem" }}>
+        <div style={stickyBar("rgba(177, 15, 46, .86)")}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: ".75rem", flexWrap: "wrap" }}>
+            <div style={{ color: "#fff" }}>
+              <div style={{ fontWeight: 950, fontSize: "1.25rem" }}>JCR — Reporte History & Forecast</div>
+              <div style={{ opacity: 0.9, fontWeight: 700 }}>
+                Hotel: <b>{jcrHotel}</b> · Año: <b>{year}</b> vs <b>{baseYear}</b>
               </div>
             </div>
 
-            <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", marginTop: ".85rem", alignItems: "center" }}>
-              {/* Hotel */}
-              <div style={{ display: "flex", gap: ".45rem", alignItems: "center" }}>
-                <span style={{ opacity: 0.95, fontWeight: 900 }}>Hotel</span>
-                <select
-                  value={jcrHotel}
-                  onChange={(e) => setJcrHotel(e.target.value as HotelKey)}
-                  style={{
-                    padding: ".38rem .55rem",
-                    borderRadius: 12,
-                    fontWeight: 900,
-                    border: "1px solid rgba(255,255,255,.35)",
-                    background: "rgba(255,255,255,.10)",
-                    color: "white",
-                    outline: "none",
-                  }}
-                >
-                  {JCR_HOTELS.map((h) => (
-                    <option key={h} value={h} style={{ color: "#111" }}>
-                      {h}
-                    </option>
-                  ))}
-                </select>
+            <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", alignItems: "center" }}>
+              <div style={{ display: "flex", gap: ".4rem", flexWrap: "wrap" }}>
+                {JCR_HOTELS.map((h) => (
+                  <Pill key={h} label={h} active={jcrHotel === h} onClick={() => setJcrHotel(h)} color="#b10f2e" />
+                ))}
               </div>
 
-              {/* Año */}
-              <div style={{ display: "flex", gap: ".45rem", alignItems: "center" }}>
-                <span style={{ opacity: 0.95, fontWeight: 900 }}>Año</span>
-                <select
-                  value={jcrYear}
-                  onChange={(e) => setJcrYear(Number(e.target.value))}
-                  style={{
-                    padding: ".38rem .55rem",
-                    borderRadius: 12,
-                    fontWeight: 900,
-                    border: "1px solid rgba(255,255,255,.35)",
-                    background: "rgba(255,255,255,.10)",
-                    color: "white",
-                    outline: "none",
-                  }}
-                >
-                  {(jcrYears.length ? jcrYears : [jcrYear]).map((y) => (
-                    <option key={y} value={y} style={{ color: "#111" }}>
+              <div style={{ width: 10 }} />
+
+              <select
+                value={year}
+                onChange={(e) => setYear(Number(e.target.value))}
+                style={{
+                  padding: ".45rem .65rem",
+                  borderRadius: 14,
+                  border: "1px solid rgba(255,255,255,.22)",
+                  background: "rgba(255,255,255,.12)",
+                  color: "#fff",
+                  fontWeight: 800,
+                }}
+              >
+                {availableYears.length ? (
+                  availableYears.map((y) => (
+                    <option key={y} value={y} style={{ color: "#000" }}>
                       {y}
                     </option>
-                  ))}
-                </select>
-              </div>
+                  ))
+                ) : (
+                  <>
+                    <option value={2024} style={{ color: "#000" }}>
+                      2024
+                    </option>
+                    <option value={2023} style={{ color: "#000" }}>
+                      2023
+                    </option>
+                  </>
+                )}
+              </select>
 
-              {/* Base */}
-              <div style={{ display: "flex", gap: ".45rem", alignItems: "center" }}>
-                <span style={{ opacity: 0.95, fontWeight: 900 }}>Vs</span>
-                <select
-                  value={jcrBaseYear}
-                  onChange={(e) => setJcrBaseYear(Number(e.target.value))}
-                  style={{
-                    padding: ".38rem .55rem",
-                    borderRadius: 12,
-                    fontWeight: 900,
-                    border: "1px solid rgba(255,255,255,.35)",
-                    background: "rgba(255,255,255,.10)",
-                    color: "white",
-                    outline: "none",
-                  }}
-                >
-                  {(jcrYears.length ? jcrYears : [jcrBaseYear]).map((y) => (
-                    <option key={y} value={y} style={{ color: "#111" }}>
+              <select
+                value={baseYear}
+                onChange={(e) => setBaseYear(Number(e.target.value))}
+                style={{
+                  padding: ".45rem .65rem",
+                  borderRadius: 14,
+                  border: "1px solid rgba(255,255,255,.22)",
+                  background: "rgba(255,255,255,.12)",
+                  color: "#fff",
+                  fontWeight: 800,
+                }}
+              >
+                {availableYears.length ? (
+                  availableYears.map((y) => (
+                    <option key={y} value={y} style={{ color: "#000" }}>
                       {y}
                     </option>
-                  ))}
-                </select>
+                  ))
+                ) : (
+                  <>
+                    <option value={2023} style={{ color: "#000" }}>
+                      2023
+                    </option>
+                    <option value={2022} style={{ color: "#000" }}>
+                      2022
+                    </option>
+                  </>
+                )}
+              </select>
+            </div>
+          </div>
+        </div>
+
+        {/* HF status */}
+        {hfLoading ? (
+          <Card>Cargando H&F…</Card>
+        ) : hfErr ? (
+          <Card>
+            <b>Error leyendo H&F:</b> {hfErr}
+            <div style={{ marginTop: ".5rem", opacity: 0.85 }}>
+              Verificá que exista en <code>/public/data</code> el archivo <b>hf_diario.csv</b>
+            </div>
+          </Card>
+        ) : null}
+
+        {/* KPI carousel JCR */}
+        <Card>
+          <SectionTitle>KPIs (History) — {jcrHotel}</SectionTitle>
+          <div style={{ marginTop: ".8rem", display: "flex", gap: ".75rem", overflowX: "auto", paddingBottom: ".25rem" }}>
+            <KpiTile title="Ocupación" value={formatPct01(jcrAggYear.occ)} sub={`vs ${baseYear}: ${formatPct01(jcrAggBase.occ)}`} />
+            <KpiTile title="ADR" value={formatMoney(jcrAggYear.adr)} sub={`vs ${baseYear}: ${formatMoney(jcrAggBase.adr)}`} />
+            <KpiTile title="RevPAR (proxy)" value={formatMoney(jcrAggYear.revpar)} sub={`vs ${baseYear}: ${formatMoney(jcrAggBase.revpar)}`} />
+            <KpiTile title="Room Revenue" value={formatMoney(jcrAggYear.roomRevenue)} sub={`vs ${baseYear}: ${formatMoney(jcrAggBase.roomRevenue)}`} />
+            <KpiTile title="Doble Ocupación" value={(jcrAggYear.dblOcc || 0).toFixed(2)} sub={`vs ${baseYear}: ${(jcrAggBase.dblOcc || 0).toFixed(2)}`} />
+          </div>
+
+          <div style={{ marginTop: ".8rem", opacity: 0.8, fontWeight: 700, fontSize: ".92rem" }}>
+            Nota: RevPAR es “proxy” (ADR × Ocupación) porque el archivo no trae “Total Rooms in Hotel”.
+          </div>
+        </Card>
+
+        {/* Comparativa */}
+        <Card>
+          <SectionTitle>Comparativa — {year} vs {baseYear}</SectionTitle>
+
+          {(!hfJcrYear.length && !hfJcrBase.length) ? (
+            <div style={{ marginTop: ".6rem", opacity: 0.9 }}>
+              Sin filas History para el filtro actual. Chequeá valores reales en columna <b>Empresa</b> y <b>HoF</b>.
+            </div>
+          ) : (
+            <div style={{ marginTop: ".8rem", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: ".75rem" }}>
+              <Card>
+                <div style={{ fontWeight: 950 }}>Rooms Occ</div>
+                <div style={{ fontSize: "1.25rem", fontWeight: 950, marginTop: ".3rem" }}>{formatInt(jcrAggYear.roomsOcc)}</div>
+                <div style={{ marginTop: ".2rem", opacity: 0.75 }}>vs {baseYear}: {formatInt(jcrAggBase.roomsOcc)}</div>
+              </Card>
+
+              <Card>
+                <div style={{ fontWeight: 950 }}>Persons</div>
+                <div style={{ fontSize: "1.25rem", fontWeight: 950, marginTop: ".3rem" }}>{formatInt(jcrAggYear.persons)}</div>
+                <div style={{ marginTop: ".2rem", opacity: 0.75 }}>vs {baseYear}: {formatInt(jcrAggBase.persons)}</div>
+              </Card>
+
+              <Card>
+                <div style={{ fontWeight: 950 }}>Room Revenue</div>
+                <div style={{ fontSize: "1.25rem", fontWeight: 950, marginTop: ".3rem" }}>{formatMoney(jcrAggYear.roomRevenue)}</div>
+                <div style={{ marginTop: ".2rem", opacity: 0.75 }}>
+                  Δ: {formatMoney(jcrAggYear.roomRevenue - jcrAggBase.roomRevenue)} ·{" "}
+                  {formatPct01(jcrAggBase.roomRevenue ? (jcrAggYear.roomRevenue - jcrAggBase.roomRevenue) / jcrAggBase.roomRevenue : 0)}
+                </div>
+              </Card>
+            </div>
+          )}
+        </Card>
+
+        {/* Ranking mensual */}
+        <Card>
+          <SectionTitle>Ranking por mes — {year} (History)</SectionTitle>
+
+          {!hfJcrYear.length ? (
+            <div style={{ marginTop: ".6rem", opacity: 0.9 }}>Sin datos para {jcrHotel} en {year}.</div>
+          ) : (
+            <div style={{ marginTop: ".8rem", overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: ".95rem" }}>
+                <thead>
+                  <tr style={{ textAlign: "left", opacity: 0.9 }}>
+                    <th style={{ padding: ".55rem .5rem" }}>Mes</th>
+                    <th style={{ padding: ".55rem .5rem" }}>Occ%</th>
+                    <th style={{ padding: ".55rem .5rem" }}>ADR</th>
+                    <th style={{ padding: ".55rem .5rem" }}>RevPAR (proxy)</th>
+                    <th style={{ padding: ".55rem .5rem" }}>Room Revenue</th>
+                    <th style={{ padding: ".55rem .5rem" }}>Rooms Occ</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Array.from(jcrByMonth.entries())
+                    .sort((a, b) => a[0] - b[0])
+                    .map(([m, agg]) => {
+                      const f = finalizeAgg(agg);
+                      return (
+                        <tr key={m} style={{ borderTop: "1px solid rgba(255,255,255,.10)" }}>
+                          <td style={{ padding: ".55rem .5rem", fontWeight: 900 }}>{monthName(m)}</td>
+                          <td style={{ padding: ".55rem .5rem" }}>{formatPct01(f.occ)}</td>
+                          <td style={{ padding: ".55rem .5rem" }}>{formatMoney(f.adr)}</td>
+                          <td style={{ padding: ".55rem .5rem" }}>{formatMoney(f.revpar)}</td>
+                          <td style={{ padding: ".55rem .5rem" }}>{formatMoney(f.roomRevenue)}</td>
+                          <td style={{ padding: ".55rem .5rem" }}>{formatInt(f.roomsOcc)}</td>
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+
+        {/* Membership */}
+        <Card>
+          <SectionTitle>Membership (JCR) — {year} vs {baseYear}</SectionTitle>
+
+          {memLoading ? (
+            <div style={{ marginTop: ".6rem" }}>Cargando membership…</div>
+          ) : memErr ? (
+            <div style={{ marginTop: ".6rem" }}>
+              <b>Error leyendo Membership:</b> {memErr}
+              <div style={{ marginTop: ".5rem", opacity: 0.85 }}>
+                Solución: convertí <code>jcr_membership.xlsx</code> a <code>jcr_membership.csv</code> y subilo a <code>/public/data</code>
+              </div>
+            </div>
+          ) : membershipSummary ? (
+            <div style={{ marginTop: ".8rem", display: "flex", gap: ".75rem", flexWrap: "wrap" }}>
+              <KpiTile title={`${year}`} value={formatInt(membershipSummary.y)} />
+              <KpiTile title={`${baseYear}`} value={formatInt(membershipSummary.b)} />
+              <KpiTile title="Δ" value={formatInt(membershipSummary.delta)} sub={formatPct01(membershipSummary.pct)} />
+            </div>
+          ) : (
+            <div style={{ marginTop: ".6rem", opacity: 0.9 }}>
+              Sin datos de membership para el esquema actual (CSV).
+            </div>
+          )}
+        </Card>
+
+        {/* Nacionalidades */}
+        <Card id="nacionalidades">
+          <SectionTitle>Nacionalidades — Ranking (JCR)</SectionTitle>
+
+          {natLoading ? (
+            <div style={{ marginTop: ".6rem" }}>Cargando nacionalidades…</div>
+          ) : natErr ? (
+            <div style={{ marginTop: ".6rem" }}>
+              <b>Error leyendo Nacionalidades:</b> {natErr}
+              <div style={{ marginTop: ".5rem", opacity: 0.85 }}>
+                Solución: convertí <code>jcr_nacionalidades.xlsx</code> a <code>jcr_nacionalidades.csv</code> y subilo a <code>/public/data</code>
+              </div>
+            </div>
+          ) : nationalitiesTop ? (
+            <div style={{ marginTop: ".8rem", overflowX: "auto" }}>
+              <div style={{ opacity: 0.85, fontWeight: 800, marginBottom: ".5rem" }}>
+                Año {year} · Total: {formatInt(nationalitiesTop.total)}
               </div>
 
-              {/* HoF */}
-              <div style={{ display: "flex", gap: ".45rem", alignItems: "center" }}>
-                <span style={{ opacity: 0.95, fontWeight: 900 }}>HoF</span>
-                <Pill active={jcrHof === "History"} onClick={() => setJcrHof("History")} bgActive="rgba(255,255,255,.22)" bgInactive="rgba(0,0,0,.12)">
-                  History
-                </Pill>
-                <Pill active={jcrHof === "Forecast"} onClick={() => setJcrHof("Forecast")} bgActive="rgba(255,255,255,.22)" bgInactive="rgba(0,0,0,.12)">
-                  Forecast
-                </Pill>
-                <Pill active={jcrHof === "All"} onClick={() => setJcrHof("All")} bgActive="rgba(255,255,255,.22)" bgInactive="rgba(0,0,0,.12)">
-                  Todo
-                </Pill>
-              </div>
-
-              {/* Mes */}
-              <div style={{ display: "flex", gap: ".45rem", alignItems: "center" }}>
-                <span style={{ opacity: 0.95, fontWeight: 900 }}>Mes</span>
-                <select
-                  value={jcrMonth}
-                  onChange={(e) => setJcrMonth(Number(e.target.value))}
-                  style={{
-                    padding: ".38rem .55rem",
-                    borderRadius: 12,
-                    fontWeight: 900,
-                    border: "1px solid rgba(255,255,255,.35)",
-                    background: "rgba(255,255,255,.10)",
-                    color: "white",
-                    outline: "none",
-                  }}
-                >
-                  <option value={0} style={{ color: "#111" }}>
-                    Año completo
-                  </option>
-                  {Array.from({ length: 12 }).map((_, i) => {
-                    const m = i + 1;
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: ".95rem" }}>
+                <thead>
+                  <tr style={{ textAlign: "left", opacity: 0.9 }}>
+                    <th style={{ padding: ".55rem .5rem" }}>País</th>
+                    <th style={{ padding: ".55rem .5rem" }}>Valor</th>
+                    <th style={{ padding: ".55rem .5rem" }}>%</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {nationalitiesTop.top.map((r) => {
+                    const pct = nationalitiesTop.total ? r.value / nationalitiesTop.total : 0;
                     return (
-                      <option key={m} value={m} style={{ color: "#111" }}>
-                        {m}
-                      </option>
+                      <tr key={r.country} style={{ borderTop: "1px solid rgba(255,255,255,.10)" }}>
+                        <td style={{ padding: ".55rem .5rem", fontWeight: 900 }}>{r.country}</td>
+                        <td style={{ padding: ".55rem .5rem" }}>{formatInt(r.value)}</td>
+                        <td style={{ padding: ".55rem .5rem" }}>{formatPct01(pct)}</td>
+                      </tr>
                     );
                   })}
-                </select>
+                </tbody>
+              </table>
+
+              <div style={{ marginTop: ".8rem", opacity: 0.8, fontWeight: 700 }}>
+                (Si querés banderas como antes: lo hacemos con una tabla de mapping País → código ISO y un `<img>` con CDN,
+                pero primero dejemos los datos perfectos.)
               </div>
             </div>
-          </div>
+          ) : (
+            <div style={{ marginTop: ".6rem", opacity: 0.9 }}>Sin datos para {year}.</div>
+          )}
+        </Card>
+      </div>
 
-          {/* Contenido JCR */}
-          <div style={{ marginTop: "1rem" }}>
-            {jcrFiltered.current.length === 0 ? (
-              <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-                <b>Sin datos</b> para <b>{jcrHotel}</b> en <b>{jcrYear}</b> con filtros actuales.
-                <div style={{ marginTop: ".45rem", opacity: 0.8 }}>
-                  Años detectados para {jcrHotel}: <b>{(jcrYears.length ? jcrYears : ["(ninguno)"]).join(", ")}</b>
-                </div>
+      {/* =========================
+          BLOQUE GOTEL / MAITEI
+      ========================= */}
+      <div id="gotel" style={{ display: "grid", gap: ".9rem", marginTop: ".5rem" }}>
+        <div style={stickyBar("rgba(20, 120, 190, .86)")}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: ".75rem", flexWrap: "wrap" }}>
+            <div style={{ color: "#fff" }}>
+              <div style={{ fontWeight: 950, fontSize: "1.25rem" }}>Gotel (Management) — Maitei</div>
+              <div style={{ opacity: 0.9, fontWeight: 700 }}>
+                Hotel: <b>{maiteiHotel}</b> · Año: <b>{year}</b> vs <b>{baseYear}</b>
               </div>
-            ) : (
-              <>
-                {/* KPIs (carrousel simple) */}
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: ".75rem" }}>
-                  <Card title="Ocupación (promedio)" value={formatPct01(jcrKpis.avgOcc)} sub={`${jcrYear} · vs ${formatPct01(jcrBaseKpis.avgOcc)}`} />
-                  <Card title="Room Revenue" value={formatMoneyUSD0(jcrKpis.totalRevenue)} sub={`${jcrYear} · vs ${formatMoneyUSD0(jcrBaseKpis.totalRevenue)}`} />
-                  <Card title="ADR (aprox.)" value={formatMoneyUSD0(jcrKpis.approxADR)} sub={`${jcrYear} · vs ${formatMoneyUSD0(jcrBaseKpis.approxADR)}`} />
-                  <Card title="Rooms Sold" value={formatInt(jcrKpis.totalRoomsSold)} sub={`${jcrYear} · vs ${formatInt(jcrBaseKpis.totalRoomsSold)}`} />
-                </div>
+            </div>
 
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: ".75rem", marginTop: ".75rem" }}>
-                  <Card title="Pax / Room (aprox.)" value={jcrKpis.doubleOcc.toFixed(2).replace(".", ",")} sub={`${jcrYear} · vs ${jcrBaseKpis.doubleOcc.toFixed(2).replace(".", ",")}`} />
-                  <Card title="Average Rate (promedio)" value={formatMoneyUSD0(jcrKpis.avgRate)} sub={`${jcrYear} · vs ${formatMoneyUSD0(jcrBaseKpis.avgRate)}`} />
-                </div>
-
-                {/* Ranking mensual + barras */}
-                <div style={{ marginTop: "1.1rem" }}>
-                  <div style={{ fontSize: "1.15rem", fontWeight: 950, marginBottom: ".5rem" }}>Ranking mensual (Revenue) — {jcrYear}</div>
-
-                  <div className="card" style={{ borderRadius: 18, padding: "1rem" }}>
-                    {jcrMonthsAgg.length === 0 ? (
-                      <div style={{ opacity: 0.85 }}>Sin filas para ranking mensual con los filtros actuales.</div>
-                    ) : (
-                      <div style={{ display: "grid", gap: ".55rem" }}>
-                        {jcrMonthsAgg
-                          .slice()
-                          .sort((a, b) => b.kpis.totalRevenue - a.kpis.totalRevenue)
-                          .map((m) => (
-                            <BarRow
-                              key={m.month}
-                              label={`Mes ${m.month}`}
-                              value={m.kpis.totalRevenue}
-                              max={jcrMaxMonthRevenue}
-                              right={formatMoneyUSD0(m.kpis.totalRevenue)}
-                            />
-                          ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Tabla mensual detallada */}
-                <div style={{ marginTop: "1rem" }}>
-                  <div style={{ fontSize: "1.15rem", fontWeight: 950, marginBottom: ".5rem" }}>
-                    Resumen mensual (Ocupación / ADR / Revenue) — {jcrYear}
-                  </div>
-
-                  <div className="card" style={{ borderRadius: 18, overflow: "hidden" }}>
-                    <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                      <thead>
-                        <tr style={{ background: "rgba(0,0,0,.06)" }}>
-                          <th style={{ textAlign: "left", padding: ".6rem .75rem" }}>Mes</th>
-                          <th style={{ textAlign: "right", padding: ".6rem .75rem" }}>Días</th>
-                          <th style={{ textAlign: "right", padding: ".6rem .75rem" }}>Ocup. prom</th>
-                          <th style={{ textAlign: "right", padding: ".6rem .75rem" }}>Revenue</th>
-                          <th style={{ textAlign: "right", padding: ".6rem .75rem" }}>ADR aprox</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {jcrMonthsAgg
-                          .slice()
-                          .sort((a, b) => a.month - b.month)
-                          .map((m) => (
-                            <tr key={m.month} style={{ borderTop: "1px solid rgba(0,0,0,.08)" }}>
-                              <td style={{ padding: ".55rem .75rem", fontWeight: 900 }}>{m.month}</td>
-                              <td style={{ padding: ".55rem .75rem", textAlign: "right" }}>{formatInt(m.kpis.days)}</td>
-                              <td style={{ padding: ".55rem .75rem", textAlign: "right" }}>{formatPct01(m.kpis.avgOcc)}</td>
-                              <td style={{ padding: ".55rem .75rem", textAlign: "right" }}>{formatMoneyUSD0(m.kpis.totalRevenue)}</td>
-                              <td style={{ padding: ".55rem .75rem", textAlign: "right" }}>{formatMoneyUSD0(m.kpis.approxADR)}</td>
-                            </tr>
-                          ))}
-                        {jcrMonthsAgg.length === 0 && (
-                          <tr>
-                            <td colSpan={5} style={{ padding: ".75rem", opacity: 0.85 }}>
-                              Sin filas para armar resumen mensual con los filtros actuales.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  <div style={{ marginTop: ".75rem", opacity: 0.8, fontSize: ".95rem", fontWeight: 700 }}>
-                    Nota: Ocupación = <b>promedio diario de Occ.%</b> (por eso nunca supera 100%).
-                  </div>
-                </div>
-
-                {/* Detalle diario (muestra hasta 60 filas para no matar UI) */}
-                <div style={{ marginTop: "1rem" }}>
-                  <div style={{ fontSize: "1.15rem", fontWeight: 950, marginBottom: ".5rem" }}>
-                    Detalle diario — {jcrHotel} · {jcrYear} {jcrMonth ? `(mes ${jcrMonth})` : ""}
-                  </div>
-
-                  <div className="card" style={{ borderRadius: 18, overflow: "hidden" }}>
-                    <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                      <thead>
-                        <tr style={{ background: "rgba(0,0,0,.06)" }}>
-                          <th style={{ textAlign: "left", padding: ".6rem .75rem" }}>Fecha</th>
-                          <th style={{ textAlign: "right", padding: ".6rem .75rem" }}>Occ.%</th>
-                          <th style={{ textAlign: "right", padding: ".6rem .75rem" }}>Revenue</th>
-                          <th style={{ textAlign: "right", padding: ".6rem .75rem" }}>ADR</th>
-                          <th style={{ textAlign: "right", padding: ".6rem .75rem" }}>Rooms</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {jcrFiltered.current
-                          .slice()
-                          .sort((a, b) => (a.date?.getTime() ?? 0) - (b.date?.getTime() ?? 0))
-                          .slice(0, 60)
-                          .map((r, idx) => (
-                            <tr key={idx} style={{ borderTop: "1px solid rgba(0,0,0,.08)" }}>
-                              <td style={{ padding: ".55rem .75rem", fontWeight: 900 }}>
-                                {r.date ? r.date.toLocaleDateString("es-AR") : "-"}
-                              </td>
-                              <td style={{ padding: ".55rem .75rem", textAlign: "right" }}>{formatPct01(r.occPct)}</td>
-                              <td style={{ padding: ".55rem .75rem", textAlign: "right" }}>{formatMoneyUSD0(r.roomRevenue)}</td>
-                              <td style={{ padding: ".55rem .75rem", textAlign: "right" }}>
-                                {formatMoneyUSD0(r.totalOcc > 0 ? r.roomRevenue / r.totalOcc : r.averageRate)}
-                              </td>
-                              <td style={{ padding: ".55rem .75rem", textAlign: "right" }}>{formatInt(r.totalOcc)}</td>
-                            </tr>
-                          ))}
-                        {jcrFiltered.current.length === 0 && (
-                          <tr>
-                            <td colSpan={5} style={{ padding: ".75rem", opacity: 0.85 }}>
-                              Sin filas con los filtros actuales.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  {jcrFiltered.current.length > 60 ? (
-                    <div style={{ marginTop: ".5rem", opacity: 0.75, fontWeight: 700 }}>
-                      Mostrando 60 de {formatInt(jcrFiltered.current.length)} filas (para performance).
-                    </div>
-                  ) : null}
-                </div>
-              </>
-            )}
+            <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", alignItems: "center" }}>
+              {GOTEL_HOTELS.map((h) => (
+                <Pill key={h} label={h} active={maiteiHotel === h} onClick={() => setMaiteiHotel(h)} color="#1478be" />
+              ))}
+            </div>
           </div>
         </div>
-      </section>
 
-      {/* =====================================================
-          BLOQUE MAITEI (Management Gotel) — separado
-      ====================================================== */}
-      <section className="section" style={{ padding: "1.25rem" }} id="maitei">
-        <div style={{ position: "relative" }}>
-          <div
-            className="card"
-            style={{
-              borderRadius: 22,
-              padding: "1rem 1rem 1.1rem",
-              background: "linear-gradient(135deg, rgba(30,140,220,.92), rgba(20,95,175,.82))",
-              color: "white",
-              border: "1px solid rgba(255,255,255,.18)",
-              position: "sticky",
-              top: 10,
-              zIndex: 40,
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", gap: ".75rem", flexWrap: "wrap" }}>
-              <div>
-                <div style={{ fontSize: "1.25rem", fontWeight: 950 }}>MAITEI · Management Gotel</div>
-                <div style={{ opacity: 0.9, fontWeight: 800, marginTop: ".1rem" }}>
-                  {maiHotel} · {maiYear} vs {maiBaseYear} · {maiHof}
-                  {maiMonth ? ` · Mes ${maiMonth}` : " · Año completo"}
-                </div>
-              </div>
-
-              <div style={{ opacity: 0.9, fontWeight: 800, textAlign: "right" }}>
-                Filas actuales: <b>{maiFiltered.current.length}</b> · base: <b>{maiFiltered.base.length}</b>
-              </div>
-            </div>
-
-            <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", marginTop: ".85rem", alignItems: "center" }}>
-              {/* Hotel (solo MAITEI, pero queda preparado) */}
-              <div style={{ display: "flex", gap: ".45rem", alignItems: "center" }}>
-                <span style={{ opacity: 0.95, fontWeight: 900 }}>Hotel</span>
-                <select
-                  value={maiHotel}
-                  onChange={(e) => setMaiHotel(e.target.value as HotelKey)}
-                  style={{
-                    padding: ".38rem .55rem",
-                    borderRadius: 12,
-                    fontWeight: 900,
-                    border: "1px solid rgba(255,255,255,.35)",
-                    background: "rgba(255,255,255,.10)",
-                    color: "white",
-                    outline: "none",
-                  }}
-                >
-                  {MAITEI_HOTELS.map((h) => (
-                    <option key={h} value={h} style={{ color: "#111" }}>
-                      {h}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Año */}
-              <div style={{ display: "flex", gap: ".45rem", alignItems: "center" }}>
-                <span style={{ opacity: 0.95, fontWeight: 900 }}>Año</span>
-                <select
-                  value={maiYear}
-                  onChange={(e) => setMaiYear(Number(e.target.value))}
-                  style={{
-                    padding: ".38rem .55rem",
-                    borderRadius: 12,
-                    fontWeight: 900,
-                    border: "1px solid rgba(255,255,255,.35)",
-                    background: "rgba(255,255,255,.10)",
-                    color: "white",
-                    outline: "none",
-                  }}
-                >
-                  {(maiYears.length ? maiYears : [maiYear]).map((y) => (
-                    <option key={y} value={y} style={{ color: "#111" }}>
-                      {y}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Base */}
-              <div style={{ display: "flex", gap: ".45rem", alignItems: "center" }}>
-                <span style={{ opacity: 0.95, fontWeight: 900 }}>Vs</span>
-                <select
-                  value={maiBaseYear}
-                  onChange={(e) => setMaiBaseYear(Number(e.target.value))}
-                  style={{
-                    padding: ".38rem .55rem",
-                    borderRadius: 12,
-                    fontWeight: 900,
-                    border: "1px solid rgba(255,255,255,.35)",
-                    background: "rgba(255,255,255,.10)",
-                    color: "white",
-                    outline: "none",
-                  }}
-                >
-                  {(maiYears.length ? maiYears : [maiBaseYear]).map((y) => (
-                    <option key={y} value={y} style={{ color: "#111" }}>
-                      {y}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* HoF */}
-              <div style={{ display: "flex", gap: ".45rem", alignItems: "center" }}>
-                <span style={{ opacity: 0.95, fontWeight: 900 }}>HoF</span>
-                <Pill active={maiHof === "History"} onClick={() => setMaiHof("History")} bgActive="rgba(255,255,255,.22)" bgInactive="rgba(0,0,0,.12)">
-                  History
-                </Pill>
-                <Pill active={maiHof === "Forecast"} onClick={() => setMaiHof("Forecast")} bgActive="rgba(255,255,255,.22)" bgInactive="rgba(0,0,0,.12)">
-                  Forecast
-                </Pill>
-                <Pill active={maiHof === "All"} onClick={() => setMaiHof("All")} bgActive="rgba(255,255,255,.22)" bgInactive="rgba(0,0,0,.12)">
-                  Todo
-                </Pill>
-              </div>
-
-              {/* Mes */}
-              <div style={{ display: "flex", gap: ".45rem", alignItems: "center" }}>
-                <span style={{ opacity: 0.95, fontWeight: 900 }}>Mes</span>
-                <select
-                  value={maiMonth}
-                  onChange={(e) => setMaiMonth(Number(e.target.value))}
-                  style={{
-                    padding: ".38rem .55rem",
-                    borderRadius: 12,
-                    fontWeight: 900,
-                    border: "1px solid rgba(255,255,255,.35)",
-                    background: "rgba(255,255,255,.10)",
-                    color: "white",
-                    outline: "none",
-                  }}
-                >
-                  <option value={0} style={{ color: "#111" }}>
-                    Año completo
-                  </option>
-                  {Array.from({ length: 12 }).map((_, i) => {
-                    const m = i + 1;
-                    return (
-                      <option key={m} value={m} style={{ color: "#111" }}>
-                        {m}
-                      </option>
-                    );
-                  })}
-                </select>
-              </div>
-            </div>
+        <Card>
+          <SectionTitle>KPIs (History) — {maiteiHotel}</SectionTitle>
+          <div style={{ marginTop: ".8rem", display: "flex", gap: ".75rem", overflowX: "auto", paddingBottom: ".25rem" }}>
+            <KpiTile title="Ocupación" value={formatPct01(maiteiAggYear.occ)} sub={`vs ${baseYear}: ${formatPct01(maiteiAggBase.occ)}`} />
+            <KpiTile title="ADR" value={formatMoney(maiteiAggYear.adr)} sub={`vs ${baseYear}: ${formatMoney(maiteiAggBase.adr)}`} />
+            <KpiTile title="RevPAR (proxy)" value={formatMoney(maiteiAggYear.revpar)} sub={`vs ${baseYear}: ${formatMoney(maiteiAggBase.revpar)}`} />
+            <KpiTile title="Room Revenue" value={formatMoney(maiteiAggYear.roomRevenue)} sub={`vs ${baseYear}: ${formatMoney(maiteiAggBase.roomRevenue)}`} />
+            <KpiTile title="Doble Ocupación" value={(maiteiAggYear.dblOcc || 0).toFixed(2)} sub={`vs ${baseYear}: ${(maiteiAggBase.dblOcc || 0).toFixed(2)}`} />
           </div>
+        </Card>
 
-          {/* Contenido MAITEI */}
-          <div style={{ marginTop: "1rem" }}>
-            {maiFiltered.current.length === 0 ? (
-              <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-                <b>Sin datos</b> para <b>{maiHotel}</b> en <b>{maiYear}</b> con filtros actuales.
-                <div style={{ marginTop: ".45rem", opacity: 0.8 }}>
-                  Años detectados para {maiHotel}: <b>{(maiYears.length ? maiYears : ["(ninguno)"]).join(", ")}</b>
-                </div>
-              </div>
-            ) : (
-              <>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: ".75rem" }}>
-                  <Card title="Ocupación (promedio)" value={formatPct01(maiKpis.avgOcc)} sub={`${maiYear} · vs ${formatPct01(maiBaseKpis.avgOcc)}`} />
-                  <Card title="Room Revenue" value={formatMoneyUSD0(maiKpis.totalRevenue)} sub={`${maiYear} · vs ${formatMoneyUSD0(maiBaseKpis.totalRevenue)}`} />
-                  <Card title="ADR (aprox.)" value={formatMoneyUSD0(maiKpis.approxADR)} sub={`${maiYear} · vs ${formatMoneyUSD0(maiBaseKpis.approxADR)}`} />
-                  <Card title="Rooms Sold" value={formatInt(maiKpis.totalRoomsSold)} sub={`${maiYear} · vs ${formatInt(maiBaseKpis.totalRoomsSold)}`} />
-                </div>
-
-                <div style={{ marginTop: "1.1rem" }}>
-                  <div style={{ fontSize: "1.15rem", fontWeight: 950, marginBottom: ".5rem" }}>Ranking mensual (Revenue) — {maiYear}</div>
-
-                  <div className="card" style={{ borderRadius: 18, padding: "1rem" }}>
-                    {maiMonthsAgg.length === 0 ? (
-                      <div style={{ opacity: 0.85 }}>Sin filas para ranking mensual con los filtros actuales.</div>
-                    ) : (
-                      <div style={{ display: "grid", gap: ".55rem" }}>
-                        {maiMonthsAgg
-                          .slice()
-                          .sort((a, b) => b.kpis.totalRevenue - a.kpis.totalRevenue)
-                          .map((m) => (
-                            <div key={m.month} style={{ display: "grid", gridTemplateColumns: "120px 1fr 140px", gap: ".6rem", alignItems: "center" }}>
-                              <div style={{ fontWeight: 900 }}>{`Mes ${m.month}`}</div>
-                              <div style={{ height: 10, borderRadius: 999, background: "rgba(0,0,0,.08)", overflow: "hidden" }}>
-                                <div style={{ width: `${(maiMaxMonthRevenue ? Math.min(1, m.kpis.totalRevenue / maiMaxMonthRevenue) : 0) * 100}%`, height: 10, borderRadius: 999, background: "rgba(30,140,220,.75)" }} />
-                              </div>
-                              <div style={{ textAlign: "right", fontWeight: 900 }}>{formatMoneyUSD0(m.kpis.totalRevenue)}</div>
-                            </div>
-                          ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      </section>
+        <Card>
+          <SectionTitle>Ranking por mes — {year} (History)</SectionTitle>
+          {!hfMaiteiYear.length ? (
+            <div style={{ marginTop: ".6rem", opacity: 0.9 }}>Sin datos para {maiteiHotel} en {year}.</div>
+          ) : (
+            <div style={{ marginTop: ".8rem", overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: ".95rem" }}>
+                <thead>
+                  <tr style={{ textAlign: "left", opacity: 0.9 }}>
+                    <th style={{ padding: ".55rem .5rem" }}>Mes</th>
+                    <th style={{ padding: ".55rem .5rem" }}>Occ%</th>
+                    <th style={{ padding: ".55rem .5rem" }}>ADR</th>
+                    <th style={{ padding: ".55rem .5rem" }}>RevPAR (proxy)</th>
+                    <th style={{ padding: ".55rem .5rem" }}>Room Revenue</th>
+                    <th style={{ padding: ".55rem .5rem" }}>Rooms Occ</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Array.from(maiteiByMonth.entries())
+                    .sort((a, b) => a[0] - b[0])
+                    .map(([m, agg]) => {
+                      const f = finalizeAgg(agg);
+                      return (
+                        <tr key={m} style={{ borderTop: "1px solid rgba(255,255,255,.10)" }}>
+                          <td style={{ padding: ".55rem .5rem", fontWeight: 900 }}>{monthName(m)}</td>
+                          <td style={{ padding: ".55rem .5rem" }}>{formatPct01(f.occ)}</td>
+                          <td style={{ padding: ".55rem .5rem" }}>{formatMoney(f.adr)}</td>
+                          <td style={{ padding: ".55rem .5rem" }}>{formatMoney(f.revpar)}</td>
+                          <td style={{ padding: ".55rem .5rem" }}>{formatMoney(f.roomRevenue)}</td>
+                          <td style={{ padding: ".55rem .5rem" }}>{formatInt(f.roomsOcc)}</td>
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+      </div>
     </div>
   );
 }
