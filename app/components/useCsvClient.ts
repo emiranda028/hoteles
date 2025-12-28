@@ -1,27 +1,21 @@
 // app/components/useCsvClient.ts
-
-/* =========================
-   Tipos
-========================= */
+// CSV client SIN dependencias externas (evita papaparse en Vercel)
 
 export type CsvRow = Record<string, any>;
 
 export type CsvReadResult = {
   rows: CsvRow[];
+  headers: string[];
 };
 
-/* =========================
-   CSV Parser (sin librerías)
-   - Soporta comillas
-   - Soporta comas dentro de comillas
-   - Limpia BOM (UTF-8)
-========================= */
-
-function stripBom(s: string): string {
+function stripBom(s: string) {
   return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s;
 }
 
 function splitCsvLine(line: string): string[] {
+  // Parser simple con soporte de comillas dobles.
+  // - Separador: coma (,)
+  // - Campos con comillas: "a,b" y escapes "" dentro de ""
   const out: string[] = [];
   let cur = "";
   let inQuotes = false;
@@ -30,9 +24,8 @@ function splitCsvLine(line: string): string[] {
     const ch = line[i];
 
     if (ch === '"') {
-      // Doble comilla escapada dentro de un string: ""
-      const next = line[i + 1];
-      if (inQuotes && next === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        // escape ""
         cur += '"';
         i++;
       } else {
@@ -49,77 +42,75 @@ function splitCsvLine(line: string): string[] {
 
     cur += ch;
   }
-
   out.push(cur);
-  return out.map((v) => v.trim());
+  return out.map((x) => x.trim());
 }
 
-function parseCsv(textRaw: string): CsvRow[] {
-  const text = stripBom(textRaw || "");
-  const lines = text
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
-
-  if (lines.length === 0) return [];
-
-  const headers = splitCsvLine(lines[0]).map((h) => h.replace(/^"|"$/g, "").trim());
-
-  const rows: CsvRow[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const values = splitCsvLine(lines[i]).map((v) => v.replace(/^"|"$/g, "").trim());
-
-    // Si viene alguna línea rara con menos columnas, la completamos
-    const row: CsvRow = {};
-    for (let c = 0; c < headers.length; c++) {
-      row[headers[c]] = values[c] ?? "";
-    }
-
-    // Evitar filas completamente vacías (por si hay líneas basura)
-    const hasAny = Object.values(row).some((v) => String(v ?? "").trim() !== "");
-    if (hasAny) rows.push(row);
-  }
-
-  return rows;
+function normalizeHeader(h: string) {
+  // respeta header exacto pero limpia espacios
+  return h.replace(/\s+/g, " ").trim();
 }
 
-/* =========================
-   Lectura CSV
-========================= */
+function isEmptyRow(obj: CsvRow) {
+  const keys = Object.keys(obj);
+  if (!keys.length) return true;
+  return keys.every((k) => {
+    const v = obj[k];
+    return v === null || v === undefined || String(v).trim() === "";
+  });
+}
 
 export async function readCsvFromPublic(path: string): Promise<CsvReadResult> {
   const res = await fetch(path, { cache: "no-store" });
-
   if (!res.ok) {
     throw new Error(`No se pudo leer CSV: ${path} (${res.status})`);
   }
 
-  const text = await res.text();
-  const rows = parseCsv(text);
+  const raw = stripBom(await res.text());
+  const lines = raw
+    .split(/\r?\n/)
+    .map((l) => l.trimEnd())
+    .filter((l) => l.trim() !== "");
 
-  return { rows };
+  if (!lines.length) {
+    return { rows: [], headers: [] };
+  }
+
+  const headers = splitCsvLine(lines[0]).map(normalizeHeader);
+
+  const rows: CsvRow[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = splitCsvLine(lines[i]);
+    const row: CsvRow = {};
+    for (let j = 0; j < headers.length; j++) {
+      row[headers[j]] = cols[j] ?? "";
+    }
+    if (!isEmptyRow(row)) rows.push(row);
+  }
+
+  return { rows, headers };
 }
 
-/* =========================
+/* ======================
    Helpers numéricos
-========================= */
+====================== */
 
 export function toNumberSmart(v: any): number {
   if (v === null || v === undefined) return 0;
-  if (typeof v === "number") return v;
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
 
-  if (typeof v === "string") {
-    const cleaned = v
-      .replace(/\./g, "") // miles 22.441,71 -> 22441,71
-      .replace(",", ".")  // decimal
-      .replace("%", "")
-      .trim();
+  const s = String(v).trim();
+  if (!s) return 0;
 
-    const n = Number(cleaned);
-    return isNaN(n) ? 0 : n;
-  }
+  // Maneja: "22.441,71" -> 22441.71 ; "59,40%" -> 59.4
+  const cleaned = s
+    .replace(/\s/g, "")
+    .replace(/\./g, "")
+    .replace(",", ".")
+    .replace("%", "");
 
-  return 0;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : 0;
 }
 
 export function safeDiv(a: number, b: number): number {
@@ -127,61 +118,26 @@ export function safeDiv(a: number, b: number): number {
 }
 
 export function toPercent01(v: number): number {
-  // Si viene 59,40 -> 59.4 => lo pasamos a 0.594
-  if (v > 1) return v / 100;
-  return v;
+  // Si viene 59.4 lo baja a 0.594
+  if (!Number.isFinite(v)) return 0;
+  return v > 1 ? v / 100 : v;
 }
 
-/* =========================
-   Formatters
-========================= */
-
-export function formatMoneyUSD0(n: number): string {
-  return n.toLocaleString("es-AR", {
+export function formatMoney(n: number): string {
+  const x = Number.isFinite(n) ? n : 0;
+  return x.toLocaleString("es-AR", {
     style: "currency",
     currency: "USD",
     maximumFractionDigits: 0,
   });
 }
 
-export function formatPct01(n: number): string {
-  return (n * 100).toFixed(1) + "%";
-}
-
 export function formatInt(n: number): string {
-  return n.toLocaleString("es-AR");
+  const x = Number.isFinite(n) ? n : 0;
+  return Math.round(x).toLocaleString("es-AR");
 }
 
-/* =========================
-   Fechas H&F
-========================= */
-
-export function parseDMY(value: any): Date | null {
-  if (!value) return null;
-  if (value instanceof Date) return value;
-
-  if (typeof value === "string") {
-    // soporta "1/6/2022"
-    const parts = value.split("/");
-    if (parts.length === 3) {
-      const d = Number(parts[0]);
-      const m = Number(parts[1]);
-      const y = Number(parts[2]);
-      if (!isNaN(d) && !isNaN(m) && !isNaN(y)) {
-        return new Date(y, m - 1, d);
-      }
-    }
-  }
-
-  return null;
-}
-
-export function getYearFromRow(row: CsvRow): number | null {
-  const d = parseDMY(row["Fecha"]) || parseDMY(row["Date"]) || parseDMY(row["FECHA"]);
-  return d ? d.getFullYear() : null;
-}
-
-export function getMonthFromRow(row: CsvRow): number | null {
-  const d = parseDMY(row["Fecha"]) || parseDMY(row["Date"]) || parseDMY(row["FECHA"]);
-  return d ? d.getMonth() + 1 : null;
+export function formatPct01(n01: number): string {
+  const x = Number.isFinite(n01) ? n01 : 0;
+  return (x * 100).toFixed(1) + "%";
 }
