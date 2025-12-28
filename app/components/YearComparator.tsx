@@ -13,15 +13,13 @@ const GOTEL_HOTELS: GlobalHotel[] = ["MAITEI"];
 
 const HF_PATH = "/data/hf_diario.csv";
 
-// Importante: XLSX en navegador sin librerías rompe, así que lo dejo en CSV
+// XLSX en navegador sin libs te rompe deploy.
+// Usamos CSV (convertidos desde xlsx).
 const MEMBERSHIP_CSV_PATH = "/data/jcr_membership.csv";
 const NACIONALIDADES_CSV_PATH = "/data/jcr_nacionalidades.csv";
 
 /* =========================================================
    CSV ROBUST PARSER (sin libs)
-   - respeta comillas
-   - soporta \n dentro de "..."
-   - autodetecta delimitador: , ; \t
 ========================================================= */
 
 function detectDelimiter(sampleLine: string): string {
@@ -60,7 +58,7 @@ function parseCsvRobust(text: string): Record<string, string>[] {
   const src = text.replace(/^\uFEFF/, "");
   if (!src.trim()) return [];
 
-  // primera “línea lógica” (hasta \n fuera de comillas) para detectar delimitador
+  // detectar delimitador mirando la primera “línea lógica”
   let inQuotes = false;
   let firstRecord = "";
   for (let i = 0; i < src.length; i++) {
@@ -144,9 +142,7 @@ function parseCsvRobust(text: string): Record<string, string>[] {
 
 async function readCsv(path: string): Promise<Record<string, string>[]> {
   const res = await fetch(path, { cache: "no-store" });
-  if (!res.ok) {
-    throw new Error(`No se pudo leer CSV: ${path} (${res.status})`);
-  }
+  if (!res.ok) throw new Error(`No se pudo leer CSV: ${path} (${res.status})`);
   const text = await res.text();
   return parseCsvRobust(text);
 }
@@ -161,11 +157,10 @@ function toNumberSmart(v: any): number {
   const s = String(v).trim();
   if (!s) return 0;
 
-  // soporta 22.441,71 / 22,441.71 / 59,40% etc
   const cleaned = s
     .replace(/\s/g, "")
-    .replace(/\./g, "") // miles
-    .replace(",", ".") // decimal
+    .replace(/\./g, "")
+    .replace(",", ".")
     .replace("%", "");
   const n = Number(cleaned);
   return isNaN(n) ? 0 : n;
@@ -187,7 +182,6 @@ function formatInt(n: number): string {
 }
 
 function formatMoney(n: number): string {
-  // Si tu revenue está en USD, ok. Si es ARS, cambiá currency.
   return n.toLocaleString("es-AR", {
     style: "currency",
     currency: "USD",
@@ -205,32 +199,21 @@ function monthName(m: number): string {
 }
 
 /* =========================================================
-   DATE / YEAR / MONTH HELPERS
+   DATE HELPERS
 ========================================================= */
 
 function parseDateSmart(row: Record<string, string>): Date | null {
-  // busca una columna Fecha o Date
-  const raw =
-    row["Fecha"] ||
-    row["FECHA"] ||
-    row["Date"] ||
-    row["DATE"] ||
-    row["date"] ||
-    "";
-
+  const raw = row["Fecha"] || row["FECHA"] || row["Date"] || row["DATE"] || row["date"] || "";
   const s = String(raw).trim();
   if (!s) return null;
 
-  // Caso Excel serial (si te llega algo como 46004, etc)
   const asNum = Number(s);
   if (Number.isFinite(asNum) && asNum > 30000) {
-    // Excel: days since 1899-12-30
     const epoch = new Date(Date.UTC(1899, 11, 30));
     const d = new Date(epoch.getTime() + asNum * 86400000);
     return d;
   }
 
-  // dd-mm-yy or dd/mm/yyyy
   const m1 = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
   if (m1) {
     const dd = Number(m1[1]);
@@ -241,31 +224,26 @@ function parseDateSmart(row: Record<string, string>): Date | null {
     return isNaN(d.getTime()) ? null : d;
   }
 
-  // ISO
   const d2 = new Date(s);
   return isNaN(d2.getTime()) ? null : d2;
 }
 
 function getYear(row: Record<string, string>): number | null {
-  // algunos archivos de nacionalidades traen "Año"
   const ay = row["Año"] || row["ANO"] || row["Anio"] || row["Year"];
   if (ay) {
     const n = Number(String(ay).trim());
     if (Number.isFinite(n) && n > 1900 && n < 2200) return n;
   }
-
   const d = parseDateSmart(row);
   return d ? d.getFullYear() : null;
 }
 
 function getMonth(row: Record<string, string>): number | null {
-  // algunos archivos traen Mes o N° Mes
-  const nm = row["N° Mes"] || row["N°Mes"] || row["N Mes"] || row["N Mes."] || row["N Mes "] || row["Month"];
+  const nm = row["N° Mes"] || row["N°Mes"] || row["N Mes"] || row["Month"];
   if (nm) {
     const n = Number(String(nm).trim());
     if (Number.isFinite(n) && n >= 1 && n <= 12) return n;
   }
-
   const d = parseDateSmart(row);
   return d ? d.getMonth() + 1 : null;
 }
@@ -277,7 +255,6 @@ function pickKey(keys: string[], candidates: string[]): string | null {
     const found = map.get(norm(c));
     if (found) return found;
   }
-  // fallback "includes"
   for (const k of keys) {
     const nk = norm(k);
     for (const c of candidates) {
@@ -288,7 +265,7 @@ function pickKey(keys: string[], candidates: string[]): string | null {
 }
 
 /* =========================================================
-   HF METRICS (History & Forecast)
+   HF METRICS
 ========================================================= */
 
 type HofRow = Record<string, string>;
@@ -302,39 +279,38 @@ function rowHotel(r: HofRow): string {
   return (r["Empresa"] || r["Hotel"] || r["EMPRESA"] || "").trim().toUpperCase();
 }
 
-function occPct01FromRow(r: HofRow): number {
-  const kOccPct = r["Occ.%"] ?? r["Occ%"] ?? r["Occ %"] ?? r["Occ. %"] ?? r["Occ. % "];
-  if (kOccPct !== undefined && kOccPct !== null && String(kOccPct).includes("%")) {
-    const n = toNumberSmart(kOccPct);
-    return clamp01(n / 100);
-  }
-  // si viene como 0,594
-  const n2 = toNumberSmart(kOccPct);
-  if (n2 > 0 && n2 <= 1) return clamp01(n2);
-  if (n2 > 1 && n2 <= 100) return clamp01(n2 / 100);
-
-  // si no hay Occ.% usamos estimación: Total Occ / (Total Occ + OOO + House Use)
-  const totalOcc = toNumberSmart(r['Total Occ.'] ?? r["Total Occ"] ?? r["Total Occ. "] ?? r["Total Occ.\t"]);
-  const ooo = toNumberSmart(r['"OOO\nRooms"'] ?? r["OOO Rooms"] ?? r["OOO\nRooms"] ?? r["OOO Rooms "]);
-  const house = toNumberSmart(r['"House\nUse"'] ?? r["House Use"] ?? r["House\nUse"]);
-  const denom = totalOcc + ooo + house;
-  return clamp01(safeDiv(totalOcc, denom));
-}
-
 function roomsOcc(r: HofRow): number {
-  return toNumberSmart(r['Total Occ.'] ?? r["Total Occ"] ?? r["Total Occ. "]);
+  return toNumberSmart(r["Total Occ."] ?? r["Total Occ"] ?? r["Total\nOcc."] ?? r["Total\nOcc. "]);
 }
 
 function roomRevenue(r: HofRow): number {
-  return toNumberSmart(r["Room Revenue"] ?? r["RoomRevenue"] ?? r["Room\nRevenue"]);
+  return toNumberSmart(r["Room Revenue"] ?? r["Room\nRevenue"] ?? r["RoomRevenue"]);
 }
 
 function adr(r: HofRow): number {
-  return toNumberSmart(r["Average Rate"] ?? r["ADR"] ?? r["Average\nRate"]);
+  return toNumberSmart(r["Average Rate"] ?? r["Average\nRate"] ?? r["ADR"]);
 }
 
 function persons(r: HofRow): number {
-  return toNumberSmart(r['"Adl. &\nChl."'] ?? r["Adl. & Chl."] ?? r["Adl. &\nChl."] ?? r["Adl. & Chl."]);
+  return toNumberSmart(r["Adl. &\nChl."] ?? r["Adl. & Chl."] ?? r["Adl.&Chl."]);
+}
+
+function occPct01FromRow(r: HofRow): number {
+  const k = r["Occ.%"] ?? r["Occ%"] ?? r["Occ %"] ?? r["Occ. %"];
+  if (k !== undefined && k !== null) {
+    const s = String(k).trim();
+    if (s.includes("%")) return clamp01(toNumberSmart(s) / 100);
+    const n = toNumberSmart(s);
+    if (n > 0 && n <= 1) return clamp01(n);
+    if (n > 1 && n <= 100) return clamp01(n / 100);
+  }
+
+  // fallback estimado
+  const totalOcc = roomsOcc(r);
+  const ooo = toNumberSmart(r["OOO\nRooms"] ?? r["OOO Rooms"] ?? r["OOO"]);
+  const house = toNumberSmart(r["House\nUse"] ?? r["House Use"] ?? r["House"]);
+  const denom = totalOcc + ooo + house;
+  return clamp01(safeDiv(totalOcc, denom));
 }
 
 type HofAgg = {
@@ -342,8 +318,8 @@ type HofAgg = {
   roomsOcc: number;
   roomRevenue: number;
   persons: number;
-  occPctSum: number; // para promedio simple si hace falta
-  adrWeightedSum: number; // ADR ponderado por roomsOcc
+  occPctSum: number;
+  adrWeightedSum: number;
 };
 
 function emptyAgg(): HofAgg {
@@ -368,13 +344,21 @@ function addAgg(a: HofAgg, r: HofRow): HofAgg {
 }
 
 function finalizeAgg(a: HofAgg) {
-  const occ = a.days ? a.occPctSum / a.days : 0; // prom simple
+  const occ = a.days ? a.occPctSum / a.days : 0;
   const adrW = a.roomsOcc ? a.adrWeightedSum / a.roomsOcc : 0;
   const dblOcc = a.roomsOcc ? a.persons / a.roomsOcc : 0;
-  // RevPAR proxy: ADR * Occ (si no tenemos total rooms)
   const revparProxy = adrW * occ;
 
-  return { occ, adr: adrW, roomRevenue: a.roomRevenue, dblOcc, revpar: revparProxy, roomsOcc: a.roomsOcc, persons: a.persons, days: a.days };
+  return {
+    occ,
+    adr: adrW,
+    roomRevenue: a.roomRevenue,
+    dblOcc,
+    revpar: revparProxy,
+    roomsOcc: a.roomsOcc,
+    persons: a.persons,
+    days: a.days,
+  };
 }
 
 function groupByMonth(rows: HofRow[]): Map<number, HofAgg> {
@@ -389,19 +373,19 @@ function groupByMonth(rows: HofRow[]): Map<number, HofAgg> {
 }
 
 /* =========================================================
-   UI: Small components
+   UI
 ========================================================= */
 
 function Pill({
   label,
   active,
   onClick,
-  color = "#b10f2e",
+  color,
 }: {
   label: string;
   active: boolean;
   onClick: () => void;
-  color?: string;
+  color: string;
 }) {
   return (
     <button
@@ -412,9 +396,8 @@ function Pill({
         color: "#fff",
         padding: ".45rem .7rem",
         borderRadius: 14,
-        fontWeight: 800,
+        fontWeight: 900,
         cursor: "pointer",
-        letterSpacing: ".2px",
       }}
     >
       {label}
@@ -425,7 +408,6 @@ function Pill({
 function Card({ children }: { children: React.ReactNode }) {
   return (
     <div
-      className="card"
       style={{
         background: "rgba(255,255,255,.06)",
         border: "1px solid rgba(255,255,255,.10)",
@@ -450,22 +432,34 @@ function KpiTile({ title, value, sub }: { title: string; value: string; sub?: st
         background: "rgba(0,0,0,.18)",
       }}
     >
-      <div style={{ opacity: 0.85, fontWeight: 800, fontSize: ".95rem" }}>{title}</div>
+      <div style={{ opacity: 0.85, fontWeight: 900, fontSize: ".95rem" }}>{title}</div>
       <div style={{ fontSize: "1.45rem", fontWeight: 950, marginTop: ".25rem" }}>{value}</div>
-      {sub ? <div style={{ marginTop: ".3rem", opacity: 0.75, fontWeight: 700 }}>{sub}</div> : null}
+      {sub ? <div style={{ marginTop: ".3rem", opacity: 0.75, fontWeight: 800 }}>{sub}</div> : null}
     </div>
   );
 }
 
+function stickyBar(bg: string) {
+  return {
+    position: "sticky" as const,
+    top: 0,
+    zIndex: 20,
+    background: bg,
+    border: "1px solid rgba(255,255,255,.16)",
+    borderRadius: 18,
+    padding: ".85rem 1rem",
+    backdropFilter: "blur(12px)",
+  };
+}
+
 /* =========================================================
-   MAIN COMPONENT
+   COMPONENT
 ========================================================= */
 
 export default function YearComparator() {
   const [year, setYear] = useState<number>(2024);
   const [baseYear, setBaseYear] = useState<number>(2023);
 
-  // filtros separados
   const [jcrHotel, setJcrHotel] = useState<GlobalHotel>("MARRIOTT");
   const [maiteiHotel, setMaiteiHotel] = useState<GlobalHotel>("MAITEI");
 
@@ -473,7 +467,6 @@ export default function YearComparator() {
   const [hfErr, setHfErr] = useState<string>("");
   const [hfLoading, setHfLoading] = useState<boolean>(false);
 
-  // membership / nacionalidades
   const [memRows, setMemRows] = useState<Record<string, string>[]>([]);
   const [memErr, setMemErr] = useState<string>("");
   const [memLoading, setMemLoading] = useState<boolean>(false);
@@ -482,35 +475,35 @@ export default function YearComparator() {
   const [natErr, setNatErr] = useState<string>("");
   const [natLoading, setNatLoading] = useState<boolean>(false);
 
-  // carga HF
+  // HF
   useEffect(() => {
     let alive = true;
     setHfLoading(true);
     setHfErr("");
+
     readCsv(HF_PATH)
       .then((rows) => {
         if (!alive) return;
-        setHfRows(rows);
+        setHfRows(rows as HofRow[]);
         setHfLoading(false);
-        // debug útil
-        console.log("[HF] rows:", rows.length);
-        console.log("[HF] headers:", rows[0] ? Object.keys(rows[0]) : []);
       })
       .catch((e) => {
         if (!alive) return;
         setHfErr(e?.message ?? "Error leyendo H&F");
         setHfLoading(false);
       });
+
     return () => {
       alive = false;
     };
   }, []);
 
-  // carga membership (CSV)
+  // Membership
   useEffect(() => {
     let alive = true;
     setMemLoading(true);
     setMemErr("");
+
     readCsv(MEMBERSHIP_CSV_PATH)
       .then((rows) => {
         if (!alive) return;
@@ -519,20 +512,21 @@ export default function YearComparator() {
       })
       .catch((e) => {
         if (!alive) return;
-        // típico: sigue en xlsx
         setMemErr(e?.message ?? "Error leyendo Membership");
         setMemLoading(false);
       });
+
     return () => {
       alive = false;
     };
   }, []);
 
-  // carga nacionalidades (CSV)
+  // Nacionalidades
   useEffect(() => {
     let alive = true;
     setNatLoading(true);
     setNatErr("");
+
     readCsv(NACIONALIDADES_CSV_PATH)
       .then((rows) => {
         if (!alive) return;
@@ -544,12 +538,12 @@ export default function YearComparator() {
         setNatErr(e?.message ?? "Error leyendo Nacionalidades");
         setNatLoading(false);
       });
+
     return () => {
       alive = false;
     };
   }, []);
 
-  // años disponibles desde HF
   const availableYears = useMemo(() => {
     const set = new Set<number>();
     for (const r of hfRows) {
@@ -559,57 +553,35 @@ export default function YearComparator() {
     return Array.from(set).sort((a, b) => b - a);
   }, [hfRows]);
 
-  // si no hay años todavía, deja los defaults
   useEffect(() => {
     if (!availableYears.length) return;
-    // si el year actual no existe, tomar el más nuevo
+
     if (!availableYears.includes(year)) setYear(availableYears[0]);
-    // baseYear: el anterior si existe
-    const idx = availableYears.indexOf(availableYears[0]);
-    const candidate = availableYears[idx + 1] ?? availableYears[0] - 1;
-    if (!availableYears.includes(baseYear)) setBaseYear(candidate);
+
+    if (!availableYears.includes(baseYear)) {
+      const idx = availableYears.indexOf(availableYears[0]);
+      const candidate = availableYears[idx + 1] ?? availableYears[0] - 1;
+      setBaseYear(candidate);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [availableYears]);
 
-  // HF filtrado JCR (History + por hotel)
   const hfJcrYear = useMemo(() => {
-    return hfRows.filter((r) => {
-      const y = getYear(r);
-      if (y !== year) return false;
-      if (!isHistoryRow(r)) return false;
-      return rowHotel(r) === jcrHotel;
-    });
+    return hfRows.filter((r) => getYear(r) === year && isHistoryRow(r) && rowHotel(r) === jcrHotel);
   }, [hfRows, year, jcrHotel]);
 
   const hfJcrBase = useMemo(() => {
-    return hfRows.filter((r) => {
-      const y = getYear(r);
-      if (y !== baseYear) return false;
-      if (!isHistoryRow(r)) return false;
-      return rowHotel(r) === jcrHotel;
-    });
+    return hfRows.filter((r) => getYear(r) === baseYear && isHistoryRow(r) && rowHotel(r) === jcrHotel);
   }, [hfRows, baseYear, jcrHotel]);
 
-  // HF filtrado MAITEI (History)
   const hfMaiteiYear = useMemo(() => {
-    return hfRows.filter((r) => {
-      const y = getYear(r);
-      if (y !== year) return false;
-      if (!isHistoryRow(r)) return false;
-      return rowHotel(r) === maiteiHotel;
-    });
+    return hfRows.filter((r) => getYear(r) === year && isHistoryRow(r) && rowHotel(r) === maiteiHotel);
   }, [hfRows, year, maiteiHotel]);
 
   const hfMaiteiBase = useMemo(() => {
-    return hfRows.filter((r) => {
-      const y = getYear(r);
-      if (y !== baseYear) return false;
-      if (!isHistoryRow(r)) return false;
-      return rowHotel(r) === maiteiHotel;
-    });
+    return hfRows.filter((r) => getYear(r) === baseYear && isHistoryRow(r) && rowHotel(r) === maiteiHotel);
   }, [hfRows, baseYear, maiteiHotel]);
 
-  // agregados
   const jcrAggYear = useMemo(() => {
     let a = emptyAgg();
     for (const r of hfJcrYear) a = addAgg(a, r);
@@ -634,11 +606,9 @@ export default function YearComparator() {
     return finalizeAgg(a);
   }, [hfMaiteiBase]);
 
-  // ranking mensual
   const jcrByMonth = useMemo(() => groupByMonth(hfJcrYear), [hfJcrYear]);
   const maiteiByMonth = useMemo(() => groupByMonth(hfMaiteiYear), [hfMaiteiYear]);
 
-  // membership resumen simple (acumulado por año, por hotel)
   const membershipSummary = useMemo(() => {
     if (!memRows.length) return null;
 
@@ -659,13 +629,12 @@ export default function YearComparator() {
     return { y, b, delta: y - b, pct: b ? (y - b) / b : 0 };
   }, [memRows, jcrHotel, year, baseYear]);
 
-  // nacionalidades: ranking top 10 por país para año, (solo JCR y hotel seleccionado si existe columna Empresa)
   const nationalitiesTop = useMemo(() => {
     if (!natRows.length) return null;
 
     const keys = natRows[0] ? Object.keys(natRows[0]) : [];
     const kYear = pickKey(keys, ["Año", "Anio", "Year"]);
-    const kCountry = pickKey(keys, ["PAÍS", "Pais", "País", "Country", "Pais Origen", "País Origen"]);
+    const kCountry = pickKey(keys, ["PAÍS", "Pais", "País", "Country", "País Origen", "Pais Origen"]);
     const kAmount = pickKey(keys, ["Importe", "Cantidad", "Total", "Rooms", "Room Nights"]);
     const kHotel = pickKey(keys, ["Empresa", "Hotel"]);
 
@@ -676,10 +645,7 @@ export default function YearComparator() {
       if (yy !== year) return false;
       if (kHotel) {
         const h = String(r[kHotel] ?? "").trim().toUpperCase();
-        // si el archivo es solo Marriott, no filtramos por hotel
-        if (h && JCR_HOTELS.includes(h as GlobalHotel)) {
-          return h === jcrHotel;
-        }
+        if (h && JCR_HOTELS.includes(h as GlobalHotel)) return h === jcrHotel;
       }
       return true;
     });
@@ -700,33 +666,16 @@ export default function YearComparator() {
     return { top: arr, total };
   }, [natRows, year, jcrHotel]);
 
-  // estilos sticky
-  const stickyBar = (bg: string) => ({
-    position: "sticky" as const,
-    top: 0,
-    zIndex: 20,
-    background: bg,
-    border: "1px solid rgba(255,255,255,.16)",
-    borderRadius: 18,
-    padding: ".85rem 1rem",
-    backdropFilter: "blur(12px)",
-  });
-
-  const SectionTitle = ({ children }: { children: React.ReactNode }) => (
-    <div style={{ fontSize: "1.25rem", fontWeight: 950, letterSpacing: ".2px" }}>{children}</div>
-  );
-
+  // ============ RENDER ============
   return (
     <div style={{ display: "grid", gap: "1.25rem" }}>
-      {/* =========================
-          BLOQUE JCR
-      ========================= */}
-      <div id="jcr" style={{ display: "grid", gap: ".9rem" }}>
+      {/* ========================= JCR ========================= */}
+      <div style={{ display: "grid", gap: ".9rem" }}>
         <div style={stickyBar("rgba(177, 15, 46, .86)")}>
           <div style={{ display: "flex", justifyContent: "space-between", gap: ".75rem", flexWrap: "wrap" }}>
             <div style={{ color: "#fff" }}>
               <div style={{ fontWeight: 950, fontSize: "1.25rem" }}>JCR — Reporte History & Forecast</div>
-              <div style={{ opacity: 0.9, fontWeight: 700 }}>
+              <div style={{ opacity: 0.9, fontWeight: 800 }}>
                 Hotel: <b>{jcrHotel}</b> · Año: <b>{year}</b> vs <b>{baseYear}</b>
               </div>
             </div>
@@ -738,8 +687,6 @@ export default function YearComparator() {
                 ))}
               </div>
 
-              <div style={{ width: 10 }} />
-
               <select
                 value={year}
                 onChange={(e) => setYear(Number(e.target.value))}
@@ -749,25 +696,14 @@ export default function YearComparator() {
                   border: "1px solid rgba(255,255,255,.22)",
                   background: "rgba(255,255,255,.12)",
                   color: "#fff",
-                  fontWeight: 800,
+                  fontWeight: 900,
                 }}
               >
-                {availableYears.length ? (
-                  availableYears.map((y) => (
-                    <option key={y} value={y} style={{ color: "#000" }}>
-                      {y}
-                    </option>
-                  ))
-                ) : (
-                  <>
-                    <option value={2024} style={{ color: "#000" }}>
-                      2024
-                    </option>
-                    <option value={2023} style={{ color: "#000" }}>
-                      2023
-                    </option>
-                  </>
-                )}
+                {(availableYears.length ? availableYears : [2024, 2023, 2022]).map((y) => (
+                  <option key={y} value={y} style={{ color: "#000" }}>
+                    {y}
+                  </option>
+                ))}
               </select>
 
               <select
@@ -779,45 +715,32 @@ export default function YearComparator() {
                   border: "1px solid rgba(255,255,255,.22)",
                   background: "rgba(255,255,255,.12)",
                   color: "#fff",
-                  fontWeight: 800,
+                  fontWeight: 900,
                 }}
               >
-                {availableYears.length ? (
-                  availableYears.map((y) => (
-                    <option key={y} value={y} style={{ color: "#000" }}>
-                      {y}
-                    </option>
-                  ))
-                ) : (
-                  <>
-                    <option value={2023} style={{ color: "#000" }}>
-                      2023
-                    </option>
-                    <option value={2022} style={{ color: "#000" }}>
-                      2022
-                    </option>
-                  </>
-                )}
+                {(availableYears.length ? availableYears : [2023, 2022, 2021]).map((y) => (
+                  <option key={y} value={y} style={{ color: "#000" }}>
+                    {y}
+                  </option>
+                ))}
               </select>
             </div>
           </div>
         </div>
 
-        {/* HF status */}
         {hfLoading ? (
           <Card>Cargando H&F…</Card>
         ) : hfErr ? (
           <Card>
             <b>Error leyendo H&F:</b> {hfErr}
             <div style={{ marginTop: ".5rem", opacity: 0.85 }}>
-              Verificá que exista en <code>/public/data</code> el archivo <b>hf_diario.csv</b>
+              Verificá: <code>/public/data/hf_diario.csv</code>
             </div>
           </Card>
         ) : null}
 
-        {/* KPI carousel JCR */}
         <Card>
-          <SectionTitle>KPIs (History) — {jcrHotel}</SectionTitle>
+          <div style={{ fontSize: "1.2rem", fontWeight: 950 }}>KPIs (History) — {jcrHotel}</div>
           <div style={{ marginTop: ".8rem", display: "flex", gap: ".75rem", overflowX: "auto", paddingBottom: ".25rem" }}>
             <KpiTile title="Ocupación" value={formatPct01(jcrAggYear.occ)} sub={`vs ${baseYear}: ${formatPct01(jcrAggBase.occ)}`} />
             <KpiTile title="ADR" value={formatMoney(jcrAggYear.adr)} sub={`vs ${baseYear}: ${formatMoney(jcrAggBase.adr)}`} />
@@ -825,50 +748,10 @@ export default function YearComparator() {
             <KpiTile title="Room Revenue" value={formatMoney(jcrAggYear.roomRevenue)} sub={`vs ${baseYear}: ${formatMoney(jcrAggBase.roomRevenue)}`} />
             <KpiTile title="Doble Ocupación" value={(jcrAggYear.dblOcc || 0).toFixed(2)} sub={`vs ${baseYear}: ${(jcrAggBase.dblOcc || 0).toFixed(2)}`} />
           </div>
-
-          <div style={{ marginTop: ".8rem", opacity: 0.8, fontWeight: 700, fontSize: ".92rem" }}>
-            Nota: RevPAR es “proxy” (ADR × Ocupación) porque el archivo no trae “Total Rooms in Hotel”.
-          </div>
         </Card>
 
-        {/* Comparativa */}
         <Card>
-          <SectionTitle>Comparativa — {year} vs {baseYear}</SectionTitle>
-
-          {(!hfJcrYear.length && !hfJcrBase.length) ? (
-            <div style={{ marginTop: ".6rem", opacity: 0.9 }}>
-              Sin filas History para el filtro actual. Chequeá valores reales en columna <b>Empresa</b> y <b>HoF</b>.
-            </div>
-          ) : (
-            <div style={{ marginTop: ".8rem", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: ".75rem" }}>
-              <Card>
-                <div style={{ fontWeight: 950 }}>Rooms Occ</div>
-                <div style={{ fontSize: "1.25rem", fontWeight: 950, marginTop: ".3rem" }}>{formatInt(jcrAggYear.roomsOcc)}</div>
-                <div style={{ marginTop: ".2rem", opacity: 0.75 }}>vs {baseYear}: {formatInt(jcrAggBase.roomsOcc)}</div>
-              </Card>
-
-              <Card>
-                <div style={{ fontWeight: 950 }}>Persons</div>
-                <div style={{ fontSize: "1.25rem", fontWeight: 950, marginTop: ".3rem" }}>{formatInt(jcrAggYear.persons)}</div>
-                <div style={{ marginTop: ".2rem", opacity: 0.75 }}>vs {baseYear}: {formatInt(jcrAggBase.persons)}</div>
-              </Card>
-
-              <Card>
-                <div style={{ fontWeight: 950 }}>Room Revenue</div>
-                <div style={{ fontSize: "1.25rem", fontWeight: 950, marginTop: ".3rem" }}>{formatMoney(jcrAggYear.roomRevenue)}</div>
-                <div style={{ marginTop: ".2rem", opacity: 0.75 }}>
-                  Δ: {formatMoney(jcrAggYear.roomRevenue - jcrAggBase.roomRevenue)} ·{" "}
-                  {formatPct01(jcrAggBase.roomRevenue ? (jcrAggYear.roomRevenue - jcrAggBase.roomRevenue) / jcrAggBase.roomRevenue : 0)}
-                </div>
-              </Card>
-            </div>
-          )}
-        </Card>
-
-        {/* Ranking mensual */}
-        <Card>
-          <SectionTitle>Ranking por mes — {year} (History)</SectionTitle>
-
+          <div style={{ fontSize: "1.2rem", fontWeight: 950 }}>Ranking por mes — {year} (History)</div>
           {!hfJcrYear.length ? (
             <div style={{ marginTop: ".6rem", opacity: 0.9 }}>Sin datos para {jcrHotel} en {year}.</div>
           ) : (
@@ -879,7 +762,7 @@ export default function YearComparator() {
                     <th style={{ padding: ".55rem .5rem" }}>Mes</th>
                     <th style={{ padding: ".55rem .5rem" }}>Occ%</th>
                     <th style={{ padding: ".55rem .5rem" }}>ADR</th>
-                    <th style={{ padding: ".55rem .5rem" }}>RevPAR (proxy)</th>
+                    <th style={{ padding: ".55rem .5rem" }}>RevPAR</th>
                     <th style={{ padding: ".55rem .5rem" }}>Room Revenue</th>
                     <th style={{ padding: ".55rem .5rem" }}>Rooms Occ</th>
                   </tr>
@@ -906,17 +789,15 @@ export default function YearComparator() {
           )}
         </Card>
 
-        {/* Membership */}
         <Card>
-          <SectionTitle>Membership (JCR) — {year} vs {baseYear}</SectionTitle>
-
+          <div style={{ fontSize: "1.2rem", fontWeight: 950 }}>Membership (JCR) — {year} vs {baseYear}</div>
           {memLoading ? (
             <div style={{ marginTop: ".6rem" }}>Cargando membership…</div>
           ) : memErr ? (
             <div style={{ marginTop: ".6rem" }}>
               <b>Error leyendo Membership:</b> {memErr}
               <div style={{ marginTop: ".5rem", opacity: 0.85 }}>
-                Solución: convertí <code>jcr_membership.xlsx</code> a <code>jcr_membership.csv</code> y subilo a <code>/public/data</code>
+                Convertí <code>jcr_membership.xlsx</code> → <code>jcr_membership.csv</code> y subilo a <code>/public/data</code>
               </div>
             </div>
           ) : membershipSummary ? (
@@ -926,23 +807,19 @@ export default function YearComparator() {
               <KpiTile title="Δ" value={formatInt(membershipSummary.delta)} sub={formatPct01(membershipSummary.pct)} />
             </div>
           ) : (
-            <div style={{ marginTop: ".6rem", opacity: 0.9 }}>
-              Sin datos de membership para el esquema actual (CSV).
-            </div>
+            <div style={{ marginTop: ".6rem", opacity: 0.9 }}>Sin datos de membership para el esquema actual.</div>
           )}
         </Card>
 
-        {/* Nacionalidades */}
-        <Card id="nacionalidades">
-          <SectionTitle>Nacionalidades — Ranking (JCR)</SectionTitle>
-
+        <Card>
+          <div style={{ fontSize: "1.2rem", fontWeight: 950 }}>Nacionalidades — Ranking (JCR)</div>
           {natLoading ? (
             <div style={{ marginTop: ".6rem" }}>Cargando nacionalidades…</div>
           ) : natErr ? (
             <div style={{ marginTop: ".6rem" }}>
               <b>Error leyendo Nacionalidades:</b> {natErr}
               <div style={{ marginTop: ".5rem", opacity: 0.85 }}>
-                Solución: convertí <code>jcr_nacionalidades.xlsx</code> a <code>jcr_nacionalidades.csv</code> y subilo a <code>/public/data</code>
+                Convertí <code>jcr_nacionalidades.xlsx</code> → <code>jcr_nacionalidades.csv</code> y subilo a <code>/public/data</code>
               </div>
             </div>
           ) : nationalitiesTop ? (
@@ -950,7 +827,6 @@ export default function YearComparator() {
               <div style={{ opacity: 0.85, fontWeight: 800, marginBottom: ".5rem" }}>
                 Año {year} · Total: {formatInt(nationalitiesTop.total)}
               </div>
-
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: ".95rem" }}>
                 <thead>
                   <tr style={{ textAlign: "left", opacity: 0.9 }}>
@@ -972,11 +848,6 @@ export default function YearComparator() {
                   })}
                 </tbody>
               </table>
-
-              <div style={{ marginTop: ".8rem", opacity: 0.8, fontWeight: 700 }}>
-                (Si querés banderas como antes: lo hacemos con una tabla de mapping País → código ISO y un `<img>` con CDN,
-                pero primero dejemos los datos perfectos.)
-              </div>
             </div>
           ) : (
             <div style={{ marginTop: ".6rem", opacity: 0.9 }}>Sin datos para {year}.</div>
@@ -984,15 +855,13 @@ export default function YearComparator() {
         </Card>
       </div>
 
-      {/* =========================
-          BLOQUE GOTEL / MAITEI
-      ========================= */}
-      <div id="gotel" style={{ display: "grid", gap: ".9rem", marginTop: ".5rem" }}>
+      {/* ========================= GOTEL / MAITEI ========================= */}
+      <div style={{ display: "grid", gap: ".9rem", marginTop: ".25rem" }}>
         <div style={stickyBar("rgba(20, 120, 190, .86)")}>
           <div style={{ display: "flex", justifyContent: "space-between", gap: ".75rem", flexWrap: "wrap" }}>
             <div style={{ color: "#fff" }}>
               <div style={{ fontWeight: 950, fontSize: "1.25rem" }}>Gotel (Management) — Maitei</div>
-              <div style={{ opacity: 0.9, fontWeight: 700 }}>
+              <div style={{ opacity: 0.9, fontWeight: 800 }}>
                 Hotel: <b>{maiteiHotel}</b> · Año: <b>{year}</b> vs <b>{baseYear}</b>
               </div>
             </div>
@@ -1006,7 +875,7 @@ export default function YearComparator() {
         </div>
 
         <Card>
-          <SectionTitle>KPIs (History) — {maiteiHotel}</SectionTitle>
+          <div style={{ fontSize: "1.2rem", fontWeight: 950 }}>KPIs (History) — {maiteiHotel}</div>
           <div style={{ marginTop: ".8rem", display: "flex", gap: ".75rem", overflowX: "auto", paddingBottom: ".25rem" }}>
             <KpiTile title="Ocupación" value={formatPct01(maiteiAggYear.occ)} sub={`vs ${baseYear}: ${formatPct01(maiteiAggBase.occ)}`} />
             <KpiTile title="ADR" value={formatMoney(maiteiAggYear.adr)} sub={`vs ${baseYear}: ${formatMoney(maiteiAggBase.adr)}`} />
@@ -1017,7 +886,7 @@ export default function YearComparator() {
         </Card>
 
         <Card>
-          <SectionTitle>Ranking por mes — {year} (History)</SectionTitle>
+          <div style={{ fontSize: "1.2rem", fontWeight: 950 }}>Ranking por mes — {year} (History)</div>
           {!hfMaiteiYear.length ? (
             <div style={{ marginTop: ".6rem", opacity: 0.9 }}>Sin datos para {maiteiHotel} en {year}.</div>
           ) : (
@@ -1028,7 +897,7 @@ export default function YearComparator() {
                     <th style={{ padding: ".55rem .5rem" }}>Mes</th>
                     <th style={{ padding: ".55rem .5rem" }}>Occ%</th>
                     <th style={{ padding: ".55rem .5rem" }}>ADR</th>
-                    <th style={{ padding: ".55rem .5rem" }}>RevPAR (proxy)</th>
+                    <th style={{ padding: ".55rem .5rem" }}>RevPAR</th>
                     <th style={{ padding: ".55rem .5rem" }}>Room Revenue</th>
                     <th style={{ padding: ".55rem .5rem" }}>Rooms Occ</th>
                   </tr>
@@ -1055,6 +924,8 @@ export default function YearComparator() {
           )}
         </Card>
       </div>
+
+      {/* EOF_MARKER__YEARCOMPARATOR_V1 */}
     </div>
   );
 }
