@@ -1,21 +1,21 @@
-"use client";
+// app/components/useCsvClient.ts
+// CSV client SIN dependencias externas (evita papaparse en Vercel)
 
-/**
- * CSV reader ultra simple (sin papaparse).
- * - Soporta separador ; o ,
- * - Soporta comillas "..."
- * - Devuelve array de objetos (header -> value)
- */
+export type CsvRow = Record<string, any>;
 
-export type CsvRow = Record<string, string>;
+export type CsvReadResult = {
+  rows: CsvRow[];
+  headers: string[];
+};
 
-function detectDelimiter(line: string) {
-  const sc = (line.match(/;/g) ?? []).length;
-  const cc = (line.match(/,/g) ?? []).length;
-  return sc >= cc ? ";" : ",";
+function stripBom(s: string) {
+  return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s;
 }
 
-function parseCsvLine(line: string, delimiter: string): string[] {
+function splitCsvLine(line: string): string[] {
+  // Parser simple con soporte de comillas dobles.
+  // - Separador: coma (,)
+  // - Campos con comillas: "a,b" y escapes "" dentro de ""
   const out: string[] = [];
   let cur = "";
   let inQuotes = false;
@@ -24,9 +24,8 @@ function parseCsvLine(line: string, delimiter: string): string[] {
     const ch = line[i];
 
     if (ch === '"') {
-      // escape "" dentro de quotes
-      const next = line[i + 1];
-      if (inQuotes && next === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        // escape ""
         cur += '"';
         i++;
       } else {
@@ -35,46 +34,61 @@ function parseCsvLine(line: string, delimiter: string): string[] {
       continue;
     }
 
-    if (!inQuotes && ch === delimiter) {
-      out.push(cur.trim());
+    if (ch === "," && !inQuotes) {
+      out.push(cur);
       cur = "";
       continue;
     }
 
     cur += ch;
   }
-
-  out.push(cur.trim());
-  return out;
+  out.push(cur);
+  return out.map((x) => x.trim());
 }
 
-export async function readCsvFromPublic(path: string): Promise<CsvRow[]> {
+function normalizeHeader(h: string) {
+  // respeta header exacto pero limpia espacios
+  return h.replace(/\s+/g, " ").trim();
+}
+
+function isEmptyRow(obj: CsvRow) {
+  const keys = Object.keys(obj);
+  if (!keys.length) return true;
+  return keys.every((k) => {
+    const v = obj[k];
+    return v === null || v === undefined || String(v).trim() === "";
+  });
+}
+
+export async function readCsvFromPublic(path: string): Promise<CsvReadResult> {
   const res = await fetch(path, { cache: "no-store" });
-  if (!res.ok) throw new Error(`No se pudo leer CSV (${res.status}): ${path}`);
-  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`No se pudo leer CSV: ${path} (${res.status})`);
+  }
 
-  const lines = text
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .split("\n")
-    .filter((l) => l.trim().length > 0);
+  const raw = stripBom(await res.text());
+  const lines = raw
+    .split(/\r?\n/)
+    .map((l) => l.trimEnd())
+    .filter((l) => l.trim() !== "");
 
-  if (lines.length === 0) return [];
+  if (!lines.length) {
+    return { rows: [], headers: [] };
+  }
 
-  const delimiter = detectDelimiter(lines[0]);
-  const headers = parseCsvLine(lines[0], delimiter).map((h) => h.replace(/^\uFEFF/, "").trim());
+  const headers = splitCsvLine(lines[0]).map(normalizeHeader);
 
   const rows: CsvRow[] = [];
   for (let i = 1; i < lines.length; i++) {
-    const values = parseCsvLine(lines[i], delimiter);
+    const cols = splitCsvLine(lines[i]);
     const row: CsvRow = {};
     for (let j = 0; j < headers.length; j++) {
-      row[headers[j]] = (values[j] ?? "").trim();
+      row[headers[j]] = cols[j] ?? "";
     }
-    rows.push(row);
+    if (!isEmptyRow(row)) rows.push(row);
   }
 
-  return rows;
+  return { rows, headers };
 }
 
 /* ======================
@@ -83,11 +97,12 @@ export async function readCsvFromPublic(path: string): Promise<CsvRow[]> {
 
 export function toNumberSmart(v: any): number {
   if (v === null || v === undefined) return 0;
-  if (typeof v === "number") return v;
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+
   const s = String(v).trim();
   if (!s) return 0;
 
-  // quita separadores miles y %
+  // Maneja: "22.441,71" -> 22441.71 ; "59,40%" -> 59.4
   const cleaned = s
     .replace(/\s/g, "")
     .replace(/\./g, "")
@@ -98,67 +113,31 @@ export function toNumberSmart(v: any): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-export function toPercent01(raw: any): number {
-  const n = toNumberSmart(raw);
-  // si viene 59,4 o 59.4 => 0.594
-  if (n > 1) return n / 100;
-  return n;
+export function safeDiv(a: number, b: number): number {
+  return b === 0 ? 0 : a / b;
 }
 
-export function formatInt(n: number): string {
-  return Math.round(n).toLocaleString("es-AR");
+export function toPercent01(v: number): number {
+  // Si viene 59.4 lo baja a 0.594
+  if (!Number.isFinite(v)) return 0;
+  return v > 1 ? v / 100 : v;
 }
 
-export function formatMoneyUSD0(n: number): string {
-  return n.toLocaleString("es-AR", {
+export function formatMoney(n: number): string {
+  const x = Number.isFinite(n) ? n : 0;
+  return x.toLocaleString("es-AR", {
     style: "currency",
     currency: "USD",
     maximumFractionDigits: 0,
   });
 }
 
-export function formatPct01(n: number): string {
-  return (n * 100).toFixed(1) + "%";
+export function formatInt(n: number): string {
+  const x = Number.isFinite(n) ? n : 0;
+  return Math.round(x).toLocaleString("es-AR");
 }
 
-export function safeDiv(a: number, b: number): number {
-  return b === 0 ? 0 : a / b;
-}
-
-/* ======================
-   Fechas / Año / Mes
-====================== */
-
-// CSV trae "Fecha" como 1/6/2022 (d/m/yyyy) o similar.
-// A veces puede venir algo raro: lo manejamos devolviendo null.
-export function parseDMY(s: string): Date | null {
-  const t = (s ?? "").trim();
-  if (!t) return null;
-
-  // intenta d/m/yyyy o dd-mm-yy etc.
-  const m = t.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
-  if (m) {
-    const dd = Number(m[1]);
-    const mm = Number(m[2]);
-    let yy = Number(m[3]);
-    if (yy < 100) yy = 2000 + yy;
-    const d = new Date(yy, mm - 1, dd);
-    if (!isNaN(d.getTime())) return d;
-  }
-
-  // intento Date.parse
-  const d2 = new Date(t);
-  if (!isNaN(d2.getTime())) return d2;
-
-  return null;
-}
-
-export function getYearFromRow(row: Record<string, any>, dateKey: string): number | null {
-  const d = parseDMY(String(row[dateKey] ?? ""));
-  return d ? d.getFullYear() : null;
-}
-
-export function getMonthFromRow(row: Record<string, any>, dateKey: string): number | null {
-  const d = parseDMY(String(row[dateKey] ?? ""));
-  return d ? d.getMonth() + 1 : null; // 1..12
+export function formatPct01(n01: number): string {
+  const x = Number.isFinite(n01) ? n01 : 0;
+  return (x * 100).toFixed(1) + "%";
 }
