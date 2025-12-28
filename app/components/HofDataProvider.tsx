@@ -1,208 +1,140 @@
-// app/components/HofDataProvider.tsx
 "use client";
 
 import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { readCsvFromPublic, CsvRow } from "./useCsvClient";
-import {
-  GlobalHotel,
-  HofFlag,
-  HofRow,
-  normalizeHofRows,
-  filterByHotel,
-  filterByYear,
-  filterByHoF,
-  availableYears,
-  detectedHotels,
-} from "./hofModel";
+import { readCsvFromPublic } from "./useCsvClient";
+import { GlobalHotel, HofFilter, HofRow, toHofRow } from "./hofModel";
 
-type HofContextValue = {
+type Ctx = {
   loading: boolean;
   error: string;
 
-  rawCsvRows: CsvRow[];
-  rows: HofRow[];
-
-  // data source
-  filePath: string;
-
-  // filtros comunes
-  year: number; // año activo
+  // filtros compartidos (por grupo)
+  year: number;
   setYear: (y: number) => void;
 
-  baseYear: number; // año comparativo
+  baseYear: number;
   setBaseYear: (y: number) => void;
 
-  hof: HofFlag | "All";
-  setHof: (v: HofFlag | "All") => void;
+  hof: HofFilter;
+  setHof: (h: HofFilter) => void;
 
-  // filtros por bloque
-  jcrHotel: Exclude<GlobalHotel, "MAITEI">;
-  setJcrHotel: (h: Exclude<GlobalHotel, "MAITEI">) => void;
+  // JCR
+  jcrHotel: GlobalHotel; // MARRIOTT / SHERATON BCR / SHERATON MDQ
+  setJcrHotel: (h: GlobalHotel) => void;
 
-  maiteiOn: boolean; // para habilitar bloque Gotel
+  // Maitei on/off (por si en algún momento lo querés ocultar)
+  maiteiOn: boolean;
   setMaiteiOn: (v: boolean) => void;
 
-  // derivados
-  jcrRows: HofRow[]; // ya filtrado por año/hof/hotel JCR
-  maiteiRows: HofRow[]; // ya filtrado por año/hof/MAITEI
-
-  yearsAvailableJcr: number[];
-  yearsAvailableMaitei: number[];
-
-  hotelsDetected: string[];
+  // datos normalizados
+  allRows: HofRow[];
+  jcrRows: HofRow[];    // ya filtradas por hotel y HoF (pero incluyen year/baseYear)
+  maiteiRows: HofRow[]; // ya filtradas por HoF (incluyen year/baseYear)
 };
 
-const HofContext = createContext<HofContextValue | null>(null);
+const HofContext = createContext<Ctx | null>(null);
+
+export function useHofData() {
+  const c = useContext(HofContext);
+  if (!c) throw new Error("useHofData debe usarse dentro de HofDataProvider");
+  return c;
+}
+
+function applyHofFilter(rows: HofRow[], hof: HofFilter) {
+  if (hof === "All") return rows;
+  return rows.filter((r) => r.hof === hof);
+}
 
 export function HofDataProvider({
-  children,
-  filePath = "/data/hf_diario.csv",
+  filePath,
   defaultYear = 2025,
   defaultBaseYear = 2024,
-  defaultJcrHotel = "MARRIOTT",
+  children,
 }: {
-  children: React.ReactNode;
-  filePath?: string;
+  filePath: string;
   defaultYear?: number;
   defaultBaseYear?: number;
-  defaultJcrHotel?: Exclude<GlobalHotel, "MAITEI">;
+  children: React.ReactNode;
 }) {
-  const [loading, setLoading] = useState<boolean>(true);
-  const [error, setError] = useState<string>("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
-  const [rawCsvRows, setRawCsvRows] = useState<CsvRow[]>([]);
-  const [rows, setRows] = useState<HofRow[]>([]);
-
-  // filtros
   const [year, setYear] = useState<number>(defaultYear);
   const [baseYear, setBaseYear] = useState<number>(defaultBaseYear);
-  const [hof, setHof] = useState<HofFlag | "All">("All");
+  const [hof, setHof] = useState<HofFilter>("All");
 
-  const [jcrHotel, setJcrHotel] = useState<Exclude<GlobalHotel, "MAITEI">>(defaultJcrHotel);
+  const [jcrHotel, setJcrHotel] = useState<GlobalHotel>("MARRIOTT");
   const [maiteiOn, setMaiteiOn] = useState<boolean>(true);
 
-  // carga CSV
+  const [allRows, setAllRows] = useState<HofRow[]>([]);
+
   useEffect(() => {
     let alive = true;
-
     setLoading(true);
     setError("");
 
-    readCsvFromPublic(filePath)
-      .then((data) => {
-        if (!alive) return;
+    (async () => {
+      try {
+        const r: any = await readCsvFromPublic(filePath);
 
-        // data es CsvRow[]
-        setRawCsvRows(data);
+        // Compatibilidad: a veces devuelve array directamente, a veces {rows}
+        const rawRows: Record<string, any>[] = Array.isArray(r) ? r : (r?.rows ?? []);
 
-        const normalized = normalizeHofRows(data);
-        setRows(normalized);
-
-        setLoading(false);
-
-        // si defaultYear no existe, ajusto al último disponible (ideal 2025)
-        const years = availableYears(normalized);
-        if (years.length > 0) {
-          const hasDefault = years.includes(defaultYear);
-          if (!hasDefault) {
-            const last = years[years.length - 1];
-            setYear(last);
-          }
-          // baseYear: si no existe, el anterior al year o el primero
-          const by = years.includes(defaultBaseYear) ? defaultBaseYear : years[Math.max(0, years.length - 2)] ?? years[0];
-          setBaseYear(by);
+        const normalized: HofRow[] = [];
+        for (const rr of rawRows) {
+          const hr = toHofRow(rr);
+          if (hr) normalized.push(hr);
         }
-      })
-      .catch((e: any) => {
+
         if (!alive) return;
-        setError(e?.message ? `No se pudo leer CSV: ${filePath} (${e.message})` : `No se pudo leer CSV: ${filePath}`);
+        setAllRows(normalized);
         setLoading(false);
-      });
+      } catch (e: any) {
+        if (!alive) return;
+        setError(e?.message ? `No se pudo leer CSV: ${e.message}` : "No se pudo leer CSV");
+        setLoading(false);
+      }
+    })();
 
     return () => {
       alive = false;
     };
-  }, [filePath, defaultYear, defaultBaseYear]);
+  }, [filePath]);
 
-  // detectados (para debug / ver nombres reales en Empresa)
-  const hotelsDetected = useMemo(() => detectedHotels(rows), [rows]);
-
-  // years disponibles por bloque
-  const yearsAvailableJcr = useMemo(() => {
-    const set = new Set<number>();
-    for (const h of ["MARRIOTT", "SHERATON BCR", "SHERATON MDQ"] as const) {
-      availableYears(rows, h).forEach((y) => set.add(y));
-    }
-    return Array.from(set).sort((a, b) => a - b);
-  }, [rows]);
-
-  const yearsAvailableMaitei = useMemo(() => availableYears(rows, "MAITEI"), [rows]);
-
-  // filtrado JCR: hotel elegido (solo esos 3), año y HoF
   const jcrRows = useMemo(() => {
-    let r = rows;
+    // JCR = 3 hoteles
+    const isJcr =
+      jcrHotel === "MARRIOTT" || jcrHotel === "SHERATON BCR" || jcrHotel === "SHERATON MDQ";
 
-    // JCR siempre excluye MAITEI
-    r = r.filter((x) => x.empresa !== "MAITEI");
+    if (!isJcr) return [];
 
-    // hotel puntual elegido
-    r = filterByHotel(r, jcrHotel);
+    const filtered = allRows.filter((r) => r.empresaNorm === jcrHotel);
+    return applyHofFilter(filtered, hof);
+  }, [allRows, jcrHotel, hof]);
 
-    // filtros comunes
-    r = filterByYear(r, year);
-    r = filterByHoF(r, hof);
-
-    return r;
-  }, [rows, jcrHotel, year, hof]);
-
-  // filtrado MAITEI: solo si maiteiOn, año y HoF
   const maiteiRows = useMemo(() => {
     if (!maiteiOn) return [];
-    let r = rows;
-    r = filterByHotel(r, "MAITEI");
-    r = filterByYear(r, year);
-    r = filterByHoF(r, hof);
-    return r;
-  }, [rows, maiteiOn, year, hof]);
+    const filtered = allRows.filter((r) => r.empresaNorm === "MAITEI");
+    return applyHofFilter(filtered, hof);
+  }, [allRows, hof, maiteiOn]);
 
-  const value: HofContextValue = {
+  const value: Ctx = {
     loading,
     error,
-
-    rawCsvRows,
-    rows,
-
-    filePath,
-
     year,
     setYear,
-
     baseYear,
     setBaseYear,
-
     hof,
     setHof,
-
     jcrHotel,
     setJcrHotel,
-
     maiteiOn,
     setMaiteiOn,
-
+    allRows,
     jcrRows,
     maiteiRows,
-
-    yearsAvailableJcr,
-    yearsAvailableMaitei,
-
-    hotelsDetected,
   };
 
   return <HofContext.Provider value={value}>{children}</HofContext.Provider>;
-}
-
-export function useHofData() {
-  const ctx = useContext(HofContext);
-  if (!ctx) throw new Error("useHofData debe usarse dentro de HofDataProvider");
-  return ctx;
 }
