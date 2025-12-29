@@ -2,30 +2,29 @@
 
 import { useEffect, useState } from "react";
 
-/* =============================
-   Tipos base
-============================= */
+/* =========================
+   Tipos
+========================= */
 
 export type CsvRow = Record<string, any>;
 
-export type CsvReadResult = {
+export type UseCsvResult = {
   rows: CsvRow[];
-  headers: string[];
+  loading: boolean;
+  error: string;
 };
 
-/* =============================
-   Loader CSV (fetch + parse)
-============================= */
+/* =========================
+   Parser CSV simple (sin libs)
+========================= */
 
-function parseCSV(text: string): CsvReadResult {
+function parseCSV(text: string): CsvRow[] {
   const lines = text
     .split(/\r?\n/)
     .map(l => l.trim())
     .filter(Boolean);
 
-  if (lines.length === 0) {
-    return { rows: [], headers: [] };
-  }
+  if (lines.length === 0) return [];
 
   const headers = lines[0]
     .split(",")
@@ -46,29 +45,17 @@ function parseCSV(text: string): CsvReadResult {
     rows.push(row);
   }
 
-  return { rows, headers };
+  return rows;
 }
 
-export async function readCsvFromPublic(path: string): Promise<CsvReadResult> {
-  const res = await fetch(path, { cache: "no-store" });
+/* =========================
+   Hook ÚNICO
+========================= */
 
-  if (!res.ok) {
-    throw new Error(`No se pudo leer CSV: ${path} (${res.status})`);
-  }
-
-  const text = await res.text();
-  return parseCSV(text);
-}
-
-/* =============================
-   Hook principal
-============================= */
-
-export function useCsvClient(filePath: string) {
+export function useCsvClient(filePath: string): UseCsvResult {
   const [rows, setRows] = useState<CsvRow[]>([]);
-  const [headers, setHeaders] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string>("");
+  const [error, setError] = useState("");
 
   useEffect(() => {
     let alive = true;
@@ -76,16 +63,21 @@ export function useCsvClient(filePath: string) {
     setLoading(true);
     setError("");
 
-    readCsvFromPublic(filePath)
-      .then(r => {
+    fetch(filePath, { cache: "no-store" })
+      .then(res => {
+        if (!res.ok) {
+          throw new Error(`No se pudo leer CSV: ${filePath}`);
+        }
+        return res.text();
+      })
+      .then(text => {
         if (!alive) return;
-        setRows(r.rows);
-        setHeaders(r.headers);
+        setRows(parseCSV(text));
         setLoading(false);
       })
-      .catch(e => {
+      .catch(err => {
         if (!alive) return;
-        setError(e?.message ?? "Error leyendo CSV");
+        setError(err?.message ?? "Error leyendo CSV");
         setLoading(false);
       });
 
@@ -94,48 +86,27 @@ export function useCsvClient(filePath: string) {
     };
   }, [filePath]);
 
-  return { rows, headers, loading, error };
+  return { rows, loading, error };
 }
 
-/* =============================
+/* =========================
    Helpers numéricos
-============================= */
+========================= */
 
-export function toNumberSmart(v: any): number {
+export function num(v: any): number {
   if (v === null || v === undefined) return 0;
   if (typeof v === "number") return v;
 
   if (typeof v === "string") {
-    const cleaned = v
-      .replace(/\./g, "")
-      .replace(",", ".")
-      .replace("%", "")
-      .trim();
-
-    const n = Number(cleaned);
+    const n = Number(
+      v.replace(/\./g, "").replace(",", ".").replace("%", "").trim()
+    );
     return isNaN(n) ? 0 : n;
   }
 
   return 0;
 }
 
-export function toPercent01(v: number): number {
-  if (v > 1) return v / 100;
-  return v;
-}
-
-export function safeDiv(a: number, b: number): number {
-  return b === 0 ? 0 : a / b;
-}
-
-export function formatMoneyUSD0(n: number): string {
-  return n.toLocaleString("es-AR", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  });
-}
-
-export function formatPct01(n: number): string {
-  return (n * 100).toFixed(1) + "%";
+export function pct(v: number): number {
+  return v > 1 ? v / 100 : v;
 }
