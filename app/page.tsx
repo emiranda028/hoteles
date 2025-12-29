@@ -66,7 +66,7 @@ export default function Page() {
           </div>
           <div style={{ opacity: 0.85, marginTop: ".35rem", lineHeight: 1.35 }}>
             Reporte de LTELC Consultora sobre performance operativa (History & Forecast),
-            comparativa interanual, ranking temporal y perfiles de huéspedes.
+            comparativa interanual, ranking temporal y perfiles de huéspedes. Información parcial de diciembre en H&F y nacionalidades a octubre 25.
           </div>
 
           <div style={{ marginTop: ".85rem", display: "grid", gap: ".35rem" }}>
