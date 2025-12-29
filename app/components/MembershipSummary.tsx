@@ -1,215 +1,198 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { readXlsxFromPublic } from "./xlsxClient";
-import { parseDateAny, toNumberSmart, formatInt, formatPct01 } from "./useCsvClient";
+import { readXlsxFromPublic, XlsxRow } from "./xlsxClient";
+import { toNumberSmart } from "./csvClient";
 
-type XlsxRow = Record<string, any>;
-
-export type Props = {
-  title?: string;
+type Props = {
   year: number;
   baseYear: number;
   filePath: string;
-  hotelFilter?: string; // "" = todos
+
+  /** "" => todos */
+  hotelFilter: string;
+
+  /** si lo pasás, limita hoteles válidos (por ej JCR) */
   allowedHotels?: string[];
+
+  /** si querés compacto */
   compactCharts?: boolean;
 };
 
 function pickKey(keys: string[], candidates: string[]): string {
-  const norm = (s: string) => s.trim().toLowerCase();
-  const map = new Map(keys.map((k) => [norm(k), k]));
+  const norm = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .replace(/\./g, "")
+      .trim();
+
+  const K = keys.map((k) => ({ raw: k, n: norm(k) }));
+
   for (const c of candidates) {
-    const hit = map.get(norm(c));
-    if (hit) return hit;
+    const cn = norm(c);
+    const hit = K.find((x) => x.n === cn);
+    if (hit) return hit.raw;
   }
   for (const c of candidates) {
-    const nc = norm(c);
-    const k = keys.find((kk) => norm(kk).includes(nc));
-    if (k) return k;
+    const cn = norm(c);
+    const hit = K.find((x) => x.n.includes(cn));
+    if (hit) return hit.raw;
   }
   return "";
 }
 
-function normHotel(v: any): string {
-  const s = String(v ?? "").trim().toUpperCase();
-  if (!s) return "";
+function parseDateAny(v: any): Date | null {
+  if (!v) return null;
+  if (v instanceof Date) return v;
 
-  if (s.includes("MARRIOTT")) return "MARRIOTT";
-  if (s.includes("MAITEI")) return "MAITEI";
+  const s = String(v).trim();
+  if (!s) return null;
 
-  // Sheraton separados
-  if (s.includes("SHERATON") && (s.includes("MDQ") || s.includes("MAR DEL PLATA"))) return "SHERATON MDQ";
-  if (s.includes("SHERATON") && (s.includes("BCR") || s.includes("BARILOCHE"))) return "SHERATON BCR";
+  const m1 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m1) {
+    const dd = Number(m1[1]);
+    const mm = Number(m1[2]);
+    const yy = Number(m1[3]);
+    const d = new Date(yy, mm - 1, dd);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
 
-  return s;
+  const t = Date.parse(s);
+  if (!Number.isNaN(t)) return new Date(t);
+
+  return null;
 }
 
-function normMember(v: any): string {
-  const s = String(v ?? "").trim();
-  if (!s) return "Sin dato";
-  const up = s.toUpperCase();
+function memColor(name: string): string {
+  const s = String(name ?? "").toLowerCase();
 
-  if (up.includes("AMBASSADOR")) return "Ambassador";
-  if (up.includes("TITANIUM")) return "Titanium";
-  if (up.includes("PLATINUM")) return "Platinum";
-  if (up.includes("GOLD")) return "Gold";
-  if (up.includes("SILVER")) return "Silver";
-  if (up.includes("MEMBER")) return "Member";
-  if (up.includes("NON") || up.includes("NO ") || up.includes("SIN")) return "Non Member";
-
-  return s;
+  // Ajustá acá si tus nombres vienen distinto
+  if (s.includes("gold")) return "#D4AF37"; // oro
+  if (s.includes("platinum")) return "#C0C0C0"; // plata
+  if (s.includes("silver")) return "#B0B0B0";
+  if (s.includes("titanium")) return "#7A7A7A";
+  if (s.includes("ambassador")) return "#4FA3FF"; // celeste
+  if (s.includes("member")) return "#8A8A8A";
+  if (s.includes("other") || s.includes("otros")) return "#666";
+  return "#888";
 }
 
-function memberColor(member: string): string {
-  const m = member.toUpperCase();
-
-  // pedidos tuyos
-  if (m.includes("GOLD")) return "#d4af37"; // oro
-  if (m.includes("PLATINUM")) return "#c0c0c0"; // plata
-  if (m.includes("AMBASSADOR")) return "#2bb3ff"; // celeste
-
-  // extras razonables
-  if (m.includes("TITANIUM")) return "#6f7a86"; // gris azulado
-  if (m.includes("SILVER")) return "#a7a7a7";
-  if (m.includes("MEMBER")) return "#2563eb"; // azul
-  if (m.includes("NON")) return "#6b7280"; // gris
-
-  return "#9ca3af";
+function formatInt(n: number): string {
+  return Math.round(n).toLocaleString("es-AR");
 }
 
-export default function MembershipSummary(props: Props) {
-  const {
-    year,
-    baseYear,
-    filePath,
-    title = `Membership — Acumulado ${year} · vs ${baseYear}`,
-    hotelFilter = "",
-    allowedHotels = [],
-    compactCharts = false,
-  } = props;
-
+export default function MembershipSummary({
+  year,
+  baseYear,
+  filePath,
+  hotelFilter,
+  allowedHotels = [],
+  compactCharts = false,
+}: Props) {
   const [rows, setRows] = useState<XlsxRow[]>([]);
+  const [sheet, setSheet] = useState<string>("");
+  const [keysDetected, setKeysDetected] = useState<{ kHotel: string; kMem: string; kQty: string; kFecha: string }>({
+    kHotel: "",
+    kMem: "",
+    kQty: "",
+    kFecha: "",
+  });
+
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
-
-  const [sheetInfo, setSheetInfo] = useState<{
-    sheet?: string;
-    keys: string[];
-    detected: { hotel: string; member: string; qty: string; date: string };
-  }>({ keys: [], detected: { hotel: "", member: "", qty: "", date: "" } });
 
   useEffect(() => {
     let alive = true;
     setLoading(true);
     setErr("");
 
-    (async () => {
-      try {
-        const r = await readXlsxFromPublic(filePath);
+    readXlsxFromPublic(filePath)
+      .then((r) => {
         if (!alive) return;
-
-        const rr = (r as any)?.rows ?? [];
-        const keys = rr?.[0] ? Object.keys(rr[0]) : [];
-
-        const kHotel = pickKey(keys, ["Empresa", "Hotel"]);
-        const kMem = pickKey(keys, ["Bonboy", "Bonvoy", "Membership", "Membresia", "Membresía"]);
-        const kQty = pickKey(keys, ["Cantidad", "Qty", "Count", "Rooms", "Room Nights"]);
-        const kDate = pickKey(keys, ["Fecha", "Date", "Día", "Dia", "Day"]);
-
-        setSheetInfo({
-          sheet: (r as any)?.sheet,
-          keys,
-          detected: { hotel: kHotel, member: kMem, qty: kQty, date: kDate },
-        });
-
-        setRows(rr as XlsxRow[]);
+        setSheet(r.sheet ?? "");
+        setRows((r.rows ?? []) as XlsxRow[]);
         setLoading(false);
-      } catch (e: any) {
+      })
+      .catch((e) => {
         if (!alive) return;
         setErr(e?.message ?? "Error leyendo XLSX");
         setLoading(false);
-      }
-    })();
+      });
 
     return () => {
       alive = false;
     };
   }, [filePath]);
 
-  const analysis = useMemo(() => {
-    const { hotel: kHotel, member: kMem, qty: kQty, date: kDate } = sheetInfo.detected;
-    const okColumns = Boolean(kHotel && kMem && kQty && kDate);
+  useEffect(() => {
+    if (!rows.length) return;
 
-    const allowedSet = new Set((allowedHotels ?? []).map(normHotel).filter(Boolean));
-    const hasAllowed = allowedSet.size > 0;
-    const filterHotel = normHotel(hotelFilter);
+    const keys = Object.keys(rows[0] ?? {});
+    const kHotel = pickKey(keys, ["Empresa", "Hotel"]);
+    const kMem = pickKey(keys, ["Bonboy", "Membership", "Membresia", "Membresía"]);
+    const kQty = pickKey(keys, ["Cantidad", "Qty", "Quantity", "Guests", "Pax"]);
+    const kFecha = pickKey(keys, ["Fecha", "Date"]);
 
-    const totalsY = new Map<string, number>();
-    const totalsB = new Map<string, number>();
+    setKeysDetected({ kHotel, kMem, kQty, kFecha });
+  }, [rows]);
 
-    let totalYear = 0;
-    let totalBase = 0;
+  const filtered = useMemo(() => {
+    const { kHotel, kMem, kQty, kFecha } = keysDetected;
+    if (!rows.length || !kMem || !kQty) return [];
 
-    if (!okColumns) {
-      return { okColumns, totalYear, totalBase, totalsY, totalsB };
+    const hf = String(hotelFilter ?? "").trim();
+    const allowSet = new Set((allowedHotels ?? []).map((x) => String(x).trim()).filter(Boolean));
+
+    return rows
+      .map((r) => {
+        const emp = String(r[kHotel] ?? "").trim();
+        const mem = String(r[kMem] ?? "").trim();
+        const qty = toNumberSmart(r[kQty]);
+        const d = parseDateAny(r[kFecha]);
+        const yy = d ? d.getFullYear() : null;
+
+        return { emp, mem, qty, yy };
+      })
+      .filter((x) => x.mem && x.qty >= 0)
+      .filter((x) => (x.yy ? x.yy === year : true))
+      .filter((x) => {
+        // allowedHotels: si está definido, solo esos
+        if (allowSet.size > 0 && !allowSet.has(x.emp)) return false;
+        return true;
+      })
+      .filter((x) => {
+        // hotelFilter exacto, sin mezclar Sheratons
+        if (!hf) return true;
+        return x.emp === hf;
+      });
+  }, [rows, keysDetected, year, hotelFilter, allowedHotels]);
+
+  const totals = useMemo(() => {
+    // acumulado por membresía
+    const map = new Map<string, number>();
+    for (const x of filtered) {
+      map.set(x.mem, (map.get(x.mem) ?? 0) + x.qty);
     }
 
-    for (const r of rows) {
-      const hotel = normHotel(r[kHotel]);
-      if (!hotel) continue;
+    const items = Array.from(map.entries())
+      .map(([mem, qty]) => ({ mem, qty }))
+      .sort((a, b) => b.qty - a.qty);
 
-      if (hasAllowed && !allowedSet.has(hotel)) continue;
-      if (filterHotel && hotel !== filterHotel) continue;
+    const total = items.reduce((acc, it) => acc + it.qty, 0);
 
-      const d = parseDateAny(r[kDate]);
-      if (!d) continue;
+    return { items, total };
+  }, [filtered]);
 
-      const y = d.getFullYear();
-      const mem = normMember(r[kMem]);
-      const qty = Math.max(0, toNumberSmart(r[kQty]));
-
-      if (y === year) {
-        totalYear += qty;
-        totalsY.set(mem, (totalsY.get(mem) ?? 0) + qty);
-      } else if (y === baseYear) {
-        totalBase += qty;
-        totalsB.set(mem, (totalsB.get(mem) ?? 0) + qty);
-      }
-    }
-
-    return { okColumns, totalYear, totalBase, totalsY, totalsB };
-  }, [rows, sheetInfo.detected, allowedHotels, hotelFilter, year, baseYear]);
-
-  const table = useMemo(() => {
-    const members = new Set<string>();
-    for (const k of analysis.totalsY.keys()) members.add(k);
-    for (const k of analysis.totalsB.keys()) members.add(k);
-
-    const totalY = analysis.totalYear || 0;
-    const totalB = analysis.totalBase || 0;
-
-    const arr = Array.from(members).map((m) => {
-      const y = analysis.totalsY.get(m) ?? 0;
-      const b = analysis.totalsB.get(m) ?? 0;
-      return {
-        member: m,
-        y,
-        b,
-        pY: totalY ? y / totalY : 0,
-        pB: totalB ? b / totalB : 0,
-        delta: y - b,
-      };
-    });
-
-    arr.sort((a, b) => b.y - a.y);
-    return arr.slice(0, 12);
-  }, [analysis]);
+  const title = useMemo(() => {
+    const h = hotelFilter ? hotelFilter : "JCR (Todos)";
+    return `Membership — ${h} · ${year} (acumulado)`;
+  }, [hotelFilter, year]);
 
   if (loading) {
     return (
-      <div className="card" style={{ padding: compactCharts ? ".85rem" : "1rem", borderRadius: 18 }}>
-        Cargando membership…
+      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
+        Cargando Membership…
       </div>
     );
   }
@@ -217,104 +200,80 @@ export default function MembershipSummary(props: Props) {
   if (err) {
     return (
       <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        Error: {err}
+        Error Membership: {err}
       </div>
     );
   }
 
-  const detected = sheetInfo.detected;
-  const hasData = analysis.totalYear > 0 || analysis.totalBase > 0;
-
-  return (
-    <div className="card" style={{ padding: compactCharts ? ".9rem" : "1.1rem", borderRadius: 18 }}>
-      <div style={{ display: "flex", gap: ".75rem", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap" }}>
-        <div>
-          <div style={{ fontSize: "1.15rem", fontWeight: 950 }}>{title}</div>
-          <div style={{ marginTop: ".25rem", opacity: 0.85, fontSize: ".95rem" }}>
-            {hasData ? (
-              <>
-                Filtro hotel: <b>{hotelFilter ? normHotel(hotelFilter) : "Todos"}</b> · Sheet: <b>{sheetInfo.sheet ?? "—"}</b>
-              </>
-            ) : (
-              <>
-                <b>Sin datos</b> para {year}. (Revisá fecha/empresa en el XLSX)
-              </>
-            )}
-          </div>
-          <div style={{ marginTop: ".35rem", opacity: 0.75, fontSize: ".85rem" }}>
-            Detectado: hotel=<b>{detected.hotel || "—"}</b> · membership=<b>{detected.member || "—"}</b> · qty=<b>{detected.qty || "—"}</b> · fecha=<b>{detected.date || "—"}</b>
-          </div>
+  if (!totals.items.length) {
+    return (
+      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
+        <div style={{ fontWeight: 950 }}>{title}</div>
+        <div style={{ opacity: 0.8, marginTop: ".35rem" }}>
+          Sin datos para {year} con el filtro actual.
         </div>
-
-        <div style={{ minWidth: 220, textAlign: "right" }}>
-          <div style={{ fontSize: compactCharts ? "1.6rem" : "2.0rem", fontWeight: 950 }}>
-            {formatInt(analysis.totalYear)}
-          </div>
-          <div style={{ opacity: 0.8, marginTop: ".15rem" }}>
-            Total {year} · vs {baseYear}: <b>{formatInt(analysis.totalBase)}</b>
-          </div>
+        <div style={{ opacity: 0.7, marginTop: ".5rem", fontSize: ".9rem" }}>
+          Sheet: {sheet || "—"} · Detectado: hotel={keysDetected.kHotel || "—"} · membership=
+          {keysDetected.kMem || "—"} · qty={keysDetected.kQty || "—"} · fecha={keysDetected.kFecha || "—"}
         </div>
       </div>
+    );
+  }
 
-      {!analysis.okColumns && (
-        <div className="card" style={{ marginTop: ".85rem", padding: ".85rem", borderRadius: 14 }}>
-          No pude detectar columnas clave. Asegurate que el XLSX tenga: <b>Empresa</b>, <b>Bonboy/Bonvoy</b>, <b>Cantidad</b> y <b>Fecha</b>.
-        </div>
-      )}
+  const max = Math.max(...totals.items.map((x) => x.qty), 1);
 
-      <div style={{ marginTop: "1rem" }}>
-        <div style={{ fontWeight: 950, marginBottom: ".5rem" }}>Top categorías</div>
+  return (
+    <section className="section" id="membership">
+      <div className="sectionTitle" style={{ fontSize: "1.25rem", fontWeight: 950 }}>
+        {title}
+      </div>
 
-        <div style={{ display: "grid", gap: ".45rem" }}>
-          {table.map((r) => {
-            const bar = Math.min(1, Math.max(0, r.pY));
-            const c = memberColor(r.member);
+      <div className="sectionDesc" style={{ marginTop: ".35rem", opacity: 0.85 }}>
+        Total:{" "}
+        <span style={{ fontSize: "1.6rem", fontWeight: 950, marginLeft: ".35rem" }}>
+          {formatInt(totals.total)}
+        </span>
+      </div>
 
+      <div className="card" style={{ padding: compactCharts ? ".85rem" : "1rem", borderRadius: 18, marginTop: ".85rem" }}>
+        <div style={{ display: "grid", gap: ".55rem" }}>
+          {totals.items.map((it) => {
+            const w = Math.round((it.qty / max) * 100);
+            const color = memColor(it.mem);
             return (
-              <div
-                key={r.member}
-                className="card"
-                style={{
-                  padding: ".55rem .75rem",
-                  borderRadius: 14,
-                  display: "grid",
-                  gridTemplateColumns: "1.2fr .6fr .6fr .6fr",
-                  gap: ".5rem",
-                  alignItems: "center",
-                }}
-              >
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontWeight: 850, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {r.member}
-                  </div>
+              <div key={it.mem} style={{ display: "grid", gridTemplateColumns: "220px 1fr 90px", gap: ".75rem", alignItems: "center" }}>
+                <div style={{ fontWeight: 850 }}>{it.mem}</div>
 
-                  <div style={{ height: 9, borderRadius: 999, background: "rgba(0,0,0,.08)", marginTop: ".35rem" }}>
-                    <div style={{ height: 9, width: `${bar * 100}%`, borderRadius: 999, background: c }} />
-                  </div>
+                <div style={{ height: 12, borderRadius: 999, background: "rgba(255,255,255,.10)", overflow: "hidden" }}>
+                  <div
+                    style={{
+                      width: `${w}%`,
+                      height: "100%",
+                      background: color,
+                      borderRadius: 999,
+                    }}
+                    title={`${it.mem}: ${formatInt(it.qty)}`}
+                  />
                 </div>
 
-                <div style={{ textAlign: "right" }}>
-                  <div style={{ fontWeight: 900 }}>{formatInt(r.y)}</div>
-                  <div style={{ opacity: 0.75 }}>{formatPct01(r.pY)}</div>
-                </div>
-
-                <div style={{ textAlign: "right", opacity: 0.9 }}>
-                  <div style={{ fontWeight: 800 }}>{formatInt(r.b)}</div>
-                  <div style={{ opacity: 0.75 }}>{formatPct01(r.pB)}</div>
-                </div>
-
-                <div style={{ textAlign: "right", opacity: 0.9 }}>
-                  <div style={{ fontWeight: 900, color: r.delta >= 0 ? "#1a7f37" : "#b42318" }}>
-                    {r.delta >= 0 ? "+" : ""}
-                    {formatInt(r.delta)}
-                  </div>
-                  <div style={{ opacity: 0.7, fontSize: ".85rem" }}>Δ</div>
-                </div>
+                <div style={{ textAlign: "right", fontWeight: 900 }}>{formatInt(it.qty)}</div>
               </div>
             );
           })}
         </div>
+
+        <div style={{ opacity: 0.7, marginTop: ".75rem", fontSize: ".9rem" }}>
+          Sheet: {sheet || "—"} · Detectado: hotel={keysDetected.kHotel || "—"} · membership=
+          {keysDetected.kMem || "—"} · qty={keysDetected.kQty || "—"} · fecha={keysDetected.kFecha || "—"}
+          {allowedHotels?.length ? ` · allowedHotels=${allowedHotels.join(", ")}` : ""}
+          {hotelFilter ? ` · filtroHotel=${hotelFilter}` : ""}
+        </div>
+
+        {/* baseYear queda listo para comparativa futura, pero ahora no te meto líneas */}
+        <div style={{ opacity: 0.65, marginTop: ".35rem", fontSize: ".85rem" }}>
+          (Comparativa vs {baseYear} lista para agregar luego, manteniendo esta base estable.)
+        </div>
       </div>
-    </div>
+    </section>
   );
 }
