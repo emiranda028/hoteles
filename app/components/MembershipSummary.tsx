@@ -1,257 +1,305 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
-import { readXlsxFromPublic, XlsxRow } from "./xlsxClient";
+import { useEffect, useMemo, useState } from "react";
+import { readXlsxFromPublic } from "./xlsxClient";
 
-type GlobalHotel = "MARRIOTT" | "SHERATON MDQ" | "SHERATON BCR" | "MAITEI";
+type XlsxRow = Record<string, any>;
 
-type Props = {
+export type MembershipSummaryProps = {
   year: number;
   baseYear: number;
   filePath: string;
-  globalHotel: GlobalHotel;
+
+  /** "" => todos (pero respetando allowedHotels si viene) */
+  hotelFilter?: string;
+
+  /** Si viene, limita universo de hoteles (por Empresa) */
+  allowedHotels?: string[];
+
+  /** Solo estético */
   compactCharts?: boolean;
 };
 
-function norm(s: any) {
-  return String(s ?? "").trim().toUpperCase().replace(/\s+/g, " ");
-}
-
-function pickKey(keys: string[], candidates: string[]): string | null {
-  const lower = new Map(keys.map((k) => [k.toLowerCase(), k]));
+function pickKey(keys: string[], candidates: string[]) {
+  const norm = (s: string) => s.trim().toLowerCase();
+  const map = new Map(keys.map((k) => [norm(k), k]));
   for (const c of candidates) {
-    const hit = lower.get(c.toLowerCase());
+    const hit = map.get(norm(c));
     if (hit) return hit;
   }
+  // fallback: contiene
   for (const c of candidates) {
-    const cLow = c.toLowerCase();
-    const found = keys.find((k) => k.toLowerCase().includes(cLow));
-    if (found) return found;
+    const cN = norm(c);
+    const hit = keys.find((k) => norm(k).includes(cN));
+    if (hit) return hit;
   }
-  return null;
+  return "";
+}
+
+/** Excel serial date -> JS Date (UTC base 1899-12-30) */
+function excelSerialToDate(n: number): Date {
+  const utc = Date.UTC(1899, 11, 30) + Math.round(n) * 86400000;
+  return new Date(utc);
 }
 
 function parseAnyDate(v: any): Date | null {
-  if (v === null || v === undefined) return null;
+  if (v === null || v === undefined || v === "") return null;
+
+  // already Date
   if (v instanceof Date && !isNaN(v.getTime())) return v;
 
-  if (typeof v === "number" && Number.isFinite(v)) {
-    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
-    const d = new Date(excelEpoch.getTime() + v * 86400000);
+  // excel serial
+  if (typeof v === "number" && isFinite(v) && v > 1000) {
+    const d = excelSerialToDate(v);
     return isNaN(d.getTime()) ? null : d;
   }
 
-  const s = String(v).trim();
-  if (!s) return null;
+  // string
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (!s) return null;
 
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
-  if (m) {
-    const dd = Number(m[1]);
-    const mm = Number(m[2]);
-    let yy = Number(m[3]);
-    if (yy < 100) yy += 2000;
-    const d = new Date(yy, mm - 1, dd);
-    return isNaN(d.getTime()) ? null : d;
+    // yyyy-mm-dd
+    const iso = new Date(s);
+    if (!isNaN(iso.getTime())) return iso;
+
+    // dd/mm/yyyy or d/m/yyyy
+    const m1 = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+    if (m1) {
+      const dd = Number(m1[1]);
+      const mm = Number(m1[2]);
+      let yy = Number(m1[3]);
+      if (yy < 100) yy += 2000;
+      const d = new Date(yy, mm - 1, dd);
+      return isNaN(d.getTime()) ? null : d;
+    }
+
+    // dd-mm-yy with text day (rare)
+    // fallback: try Date again
+    const d2 = new Date(s);
+    return isNaN(d2.getTime()) ? null : d2;
   }
 
-  const d2 = new Date(s);
-  return isNaN(d2.getTime()) ? null : d2;
+  return null;
 }
 
-function toNum(v: any): number {
+function toNumberSmart(v: any): number {
   if (v === null || v === undefined) return 0;
-  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
-  const s = String(v).trim();
-  if (!s) return 0;
-  const cleaned = s.replace(/\./g, "").replace(",", ".").replace("%", "");
-  const n = Number(cleaned);
-  return isNaN(n) ? 0 : n;
+  if (typeof v === "number") return isFinite(v) ? v : 0;
+  if (typeof v === "string") {
+    const cleaned = v
+      .replace(/\./g, "")
+      .replace(",", ".")
+      .replace("%", "")
+      .trim();
+    const n = Number(cleaned);
+    return isNaN(n) ? 0 : n;
+  }
+  return 0;
 }
 
-const MONTHS = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
+function formatInt(n: number): string {
+  return Math.round(n).toLocaleString("es-AR");
+}
 
-export default function MembershipSummary({ year, baseYear, filePath, globalHotel, compactCharts = false }: Props) {
-  const [rows, setRows] = useState<any[]>([]);
+function cardStyle(radius = 18): React.CSSProperties {
+  return {
+    background: "rgba(255,255,255,.06)",
+    border: "1px solid rgba(255,255,255,.12)",
+    borderRadius: radius,
+    padding: "1rem",
+    backdropFilter: "blur(6px)",
+  };
+}
+
+export default function MembershipSummary(props: MembershipSummaryProps) {
+  const { year, baseYear, filePath, hotelFilter = "", allowedHotels = [], compactCharts = false } = props;
+
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
-
-  const [meta, setMeta] = useState<{ sheet: string; keys: string[] } | null>(null);
-  const [detected, setDetected] = useState<{ kHotel: string | null; kMem: string | null; kQty: string | null; kDate: string | null } | null>(null);
+  const [rows, setRows] = useState<XlsxRow[]>([]);
+  const [detected, setDetected] = useState<{ sheet?: string; hotel?: string; mem?: string; qty?: string; fecha?: string }>({});
 
   useEffect(() => {
     let alive = true;
     setLoading(true);
     setErr("");
 
-    readXlsxFromPublic(filePath)
-      .then((r) => {
-        if (!alive) return;
+    (async () => {
+      try {
+        const r = await readXlsxFromPublic(filePath);
+        // r: { sheet: string; rows: XlsxRow[] }
+        const sheet = (r as any)?.sheet ?? "";
+        const data: XlsxRow[] = ((r as any)?.rows ?? []) as XlsxRow[];
 
-        const keys = r.rows?.[0] ? Object.keys(r.rows[0]) : [];
-        setMeta({ sheet: r.sheet, keys });
-
+        const keys = Object.keys(data?.[0] ?? {});
         const kHotel = pickKey(keys, ["Empresa", "Hotel"]);
         const kMem = pickKey(keys, ["Bonboy", "Membership", "Membresia", "Membresía"]);
-        const kQty = pickKey(keys, ["Cantidad", "Qty", "QTY", "Cant"]);
-        const kDate = pickKey(keys, ["Fecha", "Date"]);
+        const kQty = pickKey(keys, ["Cantidad", "Qty", "Count", "Total", "Rooms", "Huéspedes", "Huespedes"]);
+        const kFecha = pickKey(keys, ["Fecha", "Date", "Día", "Dia"]);
 
-        setDetected({ kHotel, kMem, kQty, kDate });
+        if (!alive) return;
 
-        setRows(r.rows ?? []);
-      })
-      .catch((e) => {
-        console.error(e);
-        setErr(String(e?.message ?? e));
-        setRows([]);
-      })
-      .finally(() => setLoading(false));
+        setDetected({ sheet, hotel: kHotel, mem: kMem, qty: kQty, fecha: kFecha });
+        setRows(data);
+        setLoading(false);
+      } catch (e: any) {
+        if (!alive) return;
+        setErr(e?.message ?? "Error leyendo XLSX");
+        setLoading(false);
+      }
+    })();
 
     return () => {
       alive = false;
     };
   }, [filePath]);
 
-  // mapeo por si el XLSX trae nombres distintos a tu filtro
-  const hotelsToUse = useMemo(() => {
-    const h = norm(globalHotel);
-    // si tu XLSX usa otras etiquetas, agregalas acá
-    // ej: "SHERATON BARILOCHE" etc.
-    return [h];
-  }, [globalHotel]);
+  const filtered = useMemo(() => {
+    const kHotel = detected.hotel || "Empresa";
+    const kMem = detected.mem || "Bonboy";
+    const kQty = detected.qty || "Cantidad";
+    const kFecha = detected.fecha || "Fecha";
 
-  const normalized = useMemo(() => {
-    if (!rows.length || !detected) return [];
-    const { kHotel, kMem, kQty, kDate } = detected;
+    const allowedSet = new Set((allowedHotels || []).filter(Boolean));
+    const mustRestrictToAllowed = allowedSet.size > 0;
 
-    return rows
-      .map((r: XlsxRow) => {
-        const hotel = norm(kHotel ? r[kHotel] : r["Empresa"] ?? r["Hotel"]);
-        const mem = String(kMem ? r[kMem] : r["Bonboy"] ?? r["Membership"] ?? "").trim();
-        const qty = toNum(kQty ? r[kQty] : r["Cantidad"] ?? r["Qty"]);
-        const d = parseAnyDate(kDate ? r[kDate] : r["Fecha"] ?? r["Date"]);
-        if (!d) return null;
+    const out = (rows || []).filter((r) => {
+      const empresa = String(r?.[kHotel] ?? "").trim();
+      if (!empresa) return false;
 
-        return {
-          hotel,
-          mem,
-          qty,
-          year: d.getFullYear(),
-          month: d.getMonth() + 1,
-        };
-      })
-      .filter(Boolean) as { hotel: string; mem: string; qty: number; year: number; month: number }[];
-  }, [rows, detected]);
+      // universo permitido (JCR)
+      if (mustRestrictToAllowed && !allowedSet.has(empresa)) return false;
 
-  const yearRows = useMemo(() => {
-    return normalized.filter((r) => r.year === year && hotelsToUse.includes(r.hotel));
-  }, [normalized, year, hotelsToUse]);
+      // filtro hotel exacto (no mezclar Sheratons)
+      if (hotelFilter && empresa !== hotelFilter) return false;
 
-  const baseRows = useMemo(() => {
-    return normalized.filter((r) => r.year === baseYear && hotelsToUse.includes(r.hotel));
-  }, [normalized, baseYear, hotelsToUse]);
+      // año
+      const d = parseAnyDate(r?.[kFecha]);
+      const y = d ? d.getFullYear() : NaN;
+      if (!Number.isFinite(y)) return false;
+      if (y !== year) return false;
 
-  const sumYear = useMemo(() => yearRows.reduce((a, r) => a + r.qty, 0), [yearRows]);
-  const sumBase = useMemo(() => baseRows.reduce((a, r) => a + r.qty, 0), [baseRows]);
+      // debe existir membership
+      const mem = String(r?.[kMem] ?? "").trim();
+      if (!mem) return false;
 
-  const byMonth = useMemo(() => {
-    const m = new Map<number, number>();
-    for (const r of yearRows) m.set(r.month, (m.get(r.month) ?? 0) + r.qty);
-    return Array.from({ length: 12 }).map((_, i) => m.get(i + 1) ?? 0);
-  }, [yearRows]);
+      // cantidad > 0 (si está)
+      const qty = toNumberSmart(r?.[kQty]);
+      if (qty <= 0) return false;
 
-  const composition = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const r of yearRows) m.set(r.mem || "Sin definir", (m.get(r.mem || "Sin definir") ?? 0) + r.qty);
+      return true;
+    });
 
-    return Array.from(m.entries())
-      .map(([k, v]) => ({ k, v }))
-      .sort((a, b) => b.v - a.v);
-  }, [yearRows]);
+    return out;
+  }, [rows, detected, hotelFilter, allowedHotels, year]);
+
+  const summary = useMemo(() => {
+    const kMem = detected.mem || "Bonboy";
+    const kQty = detected.qty || "Cantidad";
+
+    const map = new Map<string, number>();
+    for (const r of filtered) {
+      const mem = String(r?.[kMem] ?? "").trim();
+      const qty = toNumberSmart(r?.[kQty]);
+      map.set(mem, (map.get(mem) ?? 0) + qty);
+    }
+
+    const items = Array.from(map.entries())
+      .map(([membership, qty]) => ({ membership, qty }))
+      .sort((a, b) => b.qty - a.qty);
+
+    const total = items.reduce((acc, it) => acc + it.qty, 0);
+
+    return { items, total };
+  }, [filtered, detected]);
+
+  const title = `Membership (JCR) — Acumulado ${year} · vs ${baseYear}`;
 
   if (loading) {
-    return (
-      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        Cargando membership…
-      </div>
-    );
+    return <div style={cardStyle(22)}>Cargando membership…</div>;
   }
 
   if (err) {
     return (
-      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        <div style={{ color: "crimson" }}>Error: {err}</div>
+      <div style={cardStyle(22)}>
+        <b>{title}</b>
+        <div style={{ marginTop: ".5rem" }}>Error: {err}</div>
+        <div style={{ marginTop: ".5rem", opacity: 0.85, fontSize: ".92rem" }}>
+          Sheet: {detected.sheet ?? "·"} · Detectado: hotel={detected.hotel ?? "·"} · membership={detected.mem ?? "·"} · qty=
+          {detected.qty ?? "·"} · fecha={detected.fecha ?? "·"}
+        </div>
+      </div>
+    );
+  }
+
+  if (!summary.items.length) {
+    return (
+      <div style={cardStyle(22)}>
+        <b>{title}</b>
+        <div style={{ marginTop: ".5rem" }}>
+          Sin datos para <b>{year}</b>
+          {hotelFilter ? (
+            <>
+              {" "}
+              en <b>{hotelFilter}</b>
+            </>
+          ) : null}
+          .
+        </div>
+        <div style={{ marginTop: ".5rem", opacity: 0.85, fontSize: ".92rem" }}>
+          Sheet: {detected.sheet ?? "·"} · Detectado: hotel={detected.hotel ?? "·"} · membership={detected.mem ?? "·"} · qty=
+          {detected.qty ?? "·"} · fecha={detected.fecha ?? "·"}
+        </div>
       </div>
     );
   }
 
   return (
-    <div style={{ display: "grid", gap: "1rem" }}>
-      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        <div style={{ fontWeight: 950, fontSize: "1.05rem" }}>
-          Membership (JCR) — Acumulado {year} · vs {baseYear}
+    <div style={cardStyle(22)}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap" }}>
+        <div style={{ fontSize: "1.1rem", fontWeight: 950 }}>{title}</div>
+        <div style={{ opacity: 0.85 }}>
+          Total: <b>{formatInt(summary.total)}</b>
         </div>
-
-        <div style={{ marginTop: ".5rem", opacity: 0.85 }}>
-          {sumYear ? (
-            <>
-              <b>{sumYear.toLocaleString("es-AR")}</b> (Δ vs {baseYear}:{" "}
-              <b>{(sumYear - sumBase).toLocaleString("es-AR")}</b>)
-            </>
-          ) : (
-            <>Sin datos para {globalHotel} en {year}.</>
-          )}
-        </div>
-
-        {meta && detected ? (
-          <div style={{ marginTop: ".6rem", fontSize: ".9rem", opacity: 0.75 }}>
-            Sheet: {meta.sheet} · Detectado: hotel={detected.kHotel ?? "?"} · membership={detected.kMem ?? "?"} · qty={detected.kQty ?? "?"} · fecha={detected.kDate ?? "?"}
-          </div>
-        ) : null}
       </div>
 
-      <div
-        className="card"
-        style={{
-          padding: "1rem",
-          borderRadius: 18,
-          overflowX: "auto",
-        }}
-      >
-        <div style={{ fontWeight: 900 }}>Ranking por mes</div>
-        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 520, marginTop: ".5rem" }}>
-          <thead>
-            <tr style={{ textAlign: "left", opacity: 0.85 }}>
-              {MONTHS.map((m) => (
-                <th key={m} style={{ padding: ".4rem .35rem" }}>
-                  {m}
-                </th>
-              ))}
-              <th style={{ padding: ".4rem .35rem" }}>Total</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr style={{ borderTop: "1px solid rgba(255,255,255,.08)" }}>
-              {byMonth.map((v, i) => (
-                <td key={i} style={{ padding: ".5rem .35rem" }}>
-                  {v.toLocaleString("es-AR")}
-                </td>
-              ))}
-              <td style={{ padding: ".5rem .35rem", fontWeight: 900 }}>{sumYear.toLocaleString("es-AR")}</td>
-            </tr>
-          </tbody>
-        </table>
+      <div style={{ marginTop: ".45rem", opacity: 0.82, fontSize: ".92rem" }}>
+        Sheet: {detected.sheet ?? "·"} · Detectado: hotel={detected.hotel ?? "·"} · membership={detected.mem ?? "·"} · qty=
+        {detected.qty ?? "·"} · fecha={detected.fecha ?? "·"}
       </div>
 
-      <div className="card" style={{ padding: "1rem", borderRadius: 18 }}>
-        <div style={{ fontWeight: 900 }}>Composición</div>
-        <div style={{ marginTop: ".6rem", display: "grid", gap: ".35rem" }}>
-          {composition.slice(0, compactCharts ? 8 : 14).map((x) => (
-            <div key={x.k} style={{ display: "flex", justifyContent: "space-between", gap: "1rem" }}>
-              <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{x.k}</div>
-              <div style={{ fontWeight: 900 }}>{x.v.toLocaleString("es-AR")}</div>
+      <div style={{ marginTop: ".9rem", display: "grid", gap: ".5rem" }}>
+        {summary.items.slice(0, compactCharts ? 6 : 12).map((it) => {
+          const pct = summary.total ? it.qty / summary.total : 0;
+          return (
+            <div
+              key={it.membership}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr auto",
+                gap: ".75rem",
+                alignItems: "center",
+                padding: ".6rem .75rem",
+                borderRadius: 14,
+                border: "1px solid rgba(255,255,255,.12)",
+                background: "rgba(0,0,0,.18)",
+              }}
+            >
+              <div style={{ display: "grid", gap: ".35rem" }}>
+                <div style={{ fontWeight: 900 }}>{it.membership}</div>
+                <div style={{ height: 8, borderRadius: 999, background: "rgba(255,255,255,.10)", overflow: "hidden" }}>
+                  <div style={{ width: `${Math.round(pct * 100)}%`, height: "100%", background: "rgba(255,255,255,.40)" }} />
+                </div>
+              </div>
+
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontWeight: 950 }}>{formatInt(it.qty)}</div>
+                <div style={{ opacity: 0.8, fontSize: ".9rem" }}>{(pct * 100).toFixed(1)}%</div>
+              </div>
             </div>
-          ))}
-        </div>
+          );
+        })}
       </div>
     </div>
   );
