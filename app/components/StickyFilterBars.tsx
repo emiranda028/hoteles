@@ -2,306 +2,209 @@
 
 import React from "react";
 
-type ToggleOption = { value: string; label: string };
+type Opt = { value: string | number; label: string };
 
-function TogglePill({
-  active,
+type BarProps = {
+  title: string;
+  accent: "jcr" | "maitei";
+  year: number;
+  baseYear: number;
+  onYear: (v: number) => void;
+  onBaseYear: (v: number) => void;
+  years: number[];
+  hotel?: string;
+  onHotel?: (v: string) => void;
+  hotels?: { value: string; label: string }[];
+  quarter: number;
+  onQuarter: (v: number) => void;
+  month: number;
+  onMonth: (v: number) => void;
+};
+
+const ACC = {
+  jcr: {
+    bg: "rgba(165,0,0,0.10)",
+    border: "rgba(165,0,0,0.25)",
+    chip: "rgba(165,0,0,0.12)",
+    chipOn: "rgba(165,0,0,0.22)",
+    text: "#2b0a0a",
+    strong: "#7b0000",
+  },
+  maitei: {
+    bg: "rgba(0,140,255,0.10)",
+    border: "rgba(0,140,255,0.25)",
+    chip: "rgba(0,140,255,0.12)",
+    chipOn: "rgba(0,140,255,0.22)",
+    text: "#082235",
+    strong: "#0066cc",
+  },
+};
+
+function Chip({
+  label,
+  on,
   onClick,
-  children,
+  accent,
 }: {
-  active: boolean;
+  label: string;
+  on: boolean;
   onClick: () => void;
-  children: React.ReactNode;
+  accent: "jcr" | "maitei";
 }) {
+  const a = ACC[accent];
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`pill ${active ? "active" : ""}`}
+      style={{
+        border: `1px solid ${a.border}`,
+        background: on ? a.chipOn : a.chip,
+        padding: ".45rem .65rem",
+        borderRadius: 999,
+        cursor: "pointer",
+        fontWeight: on ? 900 : 750,
+        color: a.text,
+        boxShadow: on ? "0 8px 22px rgba(0,0,0,0.10)" : "none",
+        transform: on ? "translateY(-1px)" : "none",
+      }}
     >
-      {children}
+      {label}
     </button>
   );
 }
 
-export function JcrStickyFilters(props: {
-  year: number;
-  baseYear: number;
-  onYear: (y: number) => void;
-  onBaseYear: (y: number) => void;
-
-  hotel: string; // "MARRIOTT" | "SHERATON BCR" | "SHERATON MDQ" | "ALL"
-  onHotel: (h: string) => void;
-
-  years: number[];
-  hotels: ToggleOption[];
+function Select({
+  value,
+  onChange,
+  options,
+  accent,
+}: {
+  value: string | number;
+  onChange: (v: any) => void;
+  options: Opt[];
+  accent: "jcr" | "maitei";
 }) {
+  const a = ACC[accent];
   return (
-    <div className="stickyWrap stickyJcr">
-      <div className="bar">
-        <div className="title">
-          <div className="kicker">Grupo JCR</div>
-          <div className="heading">Filtros globales</div>
+    <select
+      value={value}
+      onChange={(e) => onChange(typeof value === "number" ? Number(e.target.value) : e.target.value)}
+      style={{
+        border: `1px solid ${a.border}`,
+        background: "white",
+        padding: ".55rem .7rem",
+        borderRadius: 12,
+        fontWeight: 800,
+        color: a.text,
+        outline: "none",
+      }}
+    >
+      {options.map((o) => (
+        <option key={String(o.value)} value={o.value}>
+          {o.label}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function StickyBar(p: BarProps) {
+  const a = ACC[p.accent];
+
+  const qOpts: Opt[] = [
+    { value: 0, label: "Todos los trimestres" },
+    { value: 1, label: "Q1" },
+    { value: 2, label: "Q2" },
+    { value: 3, label: "Q3" },
+    { value: 4, label: "Q4" },
+  ];
+  const mOpts: Opt[] = [
+    { value: 0, label: "Todos los meses" },
+    { value: 1, label: "Enero" },
+    { value: 2, label: "Febrero" },
+    { value: 3, label: "Marzo" },
+    { value: 4, label: "Abril" },
+    { value: 5, label: "Mayo" },
+    { value: 6, label: "Junio" },
+    { value: 7, label: "Julio" },
+    { value: 8, label: "Agosto" },
+    { value: 9, label: "Septiembre" },
+    { value: 10, label: "Octubre" },
+    { value: 11, label: "Noviembre" },
+    { value: 12, label: "Diciembre" },
+  ];
+
+  return (
+    <div
+      style={{
+        position: "sticky",
+        top: 10,
+        zIndex: 50,
+        borderRadius: 18,
+        border: `1px solid ${a.border}`,
+        background: a.bg,
+        padding: ".85rem",
+        backdropFilter: "blur(10px)",
+        boxShadow: "0 14px 35px rgba(0,0,0,0.08)",
+      }}
+    >
+      <div style={{ display: "flex", flexWrap: "wrap", gap: ".75rem", alignItems: "center" }}>
+        <div style={{ fontWeight: 950, fontSize: "1.05rem", color: a.strong }}>
+          {p.title}
         </div>
 
-        <div className="controls">
-          <div className="block">
-            <div className="label">Año</div>
-            <div className="pillRow">
-              {props.years.map((y) => (
-                <TogglePill key={y} active={props.year === y} onClick={() => props.onYear(y)}>
-                  {y}
-                </TogglePill>
-              ))}
-            </div>
-          </div>
+        <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontWeight: 850, opacity: 0.9 }}>Año</span>
+          <Select
+            accent={p.accent}
+            value={p.year}
+            onChange={p.onYear}
+            options={p.years.map((y) => ({ value: y, label: String(y) }))}
+          />
+        </div>
 
-          <div className="block">
-            <div className="label">Base</div>
-            <div className="pillRow">
-              {props.years.map((y) => (
-                <TogglePill key={y} active={props.baseYear === y} onClick={() => props.onBaseYear(y)}>
-                  {y}
-                </TogglePill>
-              ))}
-            </div>
-          </div>
+        <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontWeight: 850, opacity: 0.9 }}>Comparar vs</span>
+          <Select
+            accent={p.accent}
+            value={p.baseYear}
+            onChange={p.onBaseYear}
+            options={p.years.map((y) => ({ value: y, label: String(y) }))}
+          />
+        </div>
 
-          <div className="block">
-            <div className="label">Hotel</div>
-            <div className="pillRow">
-              {props.hotels.map((h) => (
-                <TogglePill
-                  key={h.value}
-                  active={props.hotel === h.value}
-                  onClick={() => props.onHotel(h.value)}
-                >
-                  {h.label}
-                </TogglePill>
-              ))}
-            </div>
-          </div>
+        <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontWeight: 850, opacity: 0.9 }}>Trimestre</span>
+          <Select accent={p.accent} value={p.quarter} onChange={p.onQuarter} options={qOpts} />
+        </div>
+
+        <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontWeight: 850, opacity: 0.9 }}>Mes</span>
+          <Select accent={p.accent} value={p.month} onChange={p.onMonth} options={mOpts} />
         </div>
       </div>
 
-      <style jsx>{`
-        .stickyWrap {
-          position: sticky;
-          top: 0;
-          z-index: 50;
-          padding: 10px 0;
-          backdrop-filter: blur(10px);
-        }
-
-        .stickyJcr {
-          background: linear-gradient(
-            180deg,
-            rgba(15, 16, 20, 0.92),
-            rgba(15, 16, 20, 0.55)
-          );
-        }
-
-        .bar {
-          border-radius: 18px;
-          padding: 14px 14px;
-          border: 1px solid rgba(255, 255, 255, 0.10);
-          background: rgba(255, 255, 255, 0.04);
-          display: grid;
-          gap: 10px;
-        }
-
-        .title {
-          display: flex;
-          align-items: baseline;
-          justify-content: space-between;
-          gap: 12px;
-        }
-        .kicker {
-          font-weight: 900;
-          letter-spacing: 0.02em;
-          color: rgba(255, 255, 255, 0.70);
-          font-size: 0.85rem;
-        }
-        .heading {
-          font-weight: 950;
-          font-size: 1.05rem;
-        }
-
-        .controls {
-          display: grid;
-          gap: 10px;
-        }
-
-        .block {
-          display: grid;
-          gap: 6px;
-        }
-        .label {
-          font-size: 0.88rem;
-          color: rgba(255, 255, 255, 0.75);
-          font-weight: 800;
-        }
-
-        .pillRow {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-        }
-
-        .pill {
-          cursor: pointer;
-          border-radius: 999px;
-          padding: 8px 12px;
-          font-weight: 900;
-          border: 1px solid rgba(255, 255, 255, 0.14);
-          background: rgba(255, 255, 255, 0.04);
-          color: rgba(255, 255, 255, 0.90);
-        }
-
-        /* === ESTILO “MARriott” rojo === */
-        .pill.active {
-          border-color: rgba(255, 70, 70, 0.55);
-          background: rgba(255, 70, 70, 0.22);
-          color: rgba(255, 255, 255, 0.98);
-          box-shadow: 0 0 0 2px rgba(255, 70, 70, 0.12) inset;
-        }
-      `}</style>
+      {p.hotels && p.hotel !== undefined && p.onHotel && (
+        <div style={{ marginTop: ".75rem", display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
+          {p.hotels.map((h) => (
+            <Chip
+              key={h.value}
+              label={h.label}
+              on={p.hotel === h.value}
+              onClick={() => p.onHotel?.(h.value)}
+              accent={p.accent}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-export function MaiteiStickyFilters(props: {
-  year: number;
-  baseYear: number;
-  onYear: (y: number) => void;
-  onBaseYear: (y: number) => void;
-  years: number[];
-}) {
-  return (
-    <div className="stickyWrap stickyMai">
-      <div className="bar">
-        <div className="title">
-          <div className="kicker">Management Gotel</div>
-          <div className="heading">Filtros Maitei</div>
-        </div>
+export function JcrStickyFilters(props: Omit<BarProps, "title" | "accent">) {
+  return <StickyBar {...props} title="Filtros Grupo JCR" accent="jcr" />;
+}
 
-        <div className="controls">
-          <div className="block">
-            <div className="label">Año</div>
-            <div className="pillRow">
-              {props.years.map((y) => (
-                <button
-                  type="button"
-                  key={y}
-                  onClick={() => props.onYear(y)}
-                  className={`pill ${props.year === y ? "active" : ""}`}
-                >
-                  {y}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="block">
-            <div className="label">Base</div>
-            <div className="pillRow">
-              {props.years.map((y) => (
-                <button
-                  type="button"
-                  key={y}
-                  onClick={() => props.onBaseYear(y)}
-                  className={`pill ${props.baseYear === y ? "active" : ""}`}
-                >
-                  {y}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <style jsx>{`
-        .stickyWrap {
-          position: sticky;
-          top: 0;
-          z-index: 50;
-          padding: 10px 0;
-          backdrop-filter: blur(10px);
-        }
-
-        .stickyMai {
-          background: linear-gradient(
-            180deg,
-            rgba(15, 16, 20, 0.92),
-            rgba(15, 16, 20, 0.55)
-          );
-        }
-
-        .bar {
-          border-radius: 18px;
-          padding: 14px 14px;
-          border: 1px solid rgba(255, 255, 255, 0.10);
-          background: rgba(255, 255, 255, 0.04);
-          display: grid;
-          gap: 10px;
-        }
-
-        .title {
-          display: flex;
-          align-items: baseline;
-          justify-content: space-between;
-          gap: 12px;
-        }
-        .kicker {
-          font-weight: 900;
-          letter-spacing: 0.02em;
-          color: rgba(255, 255, 255, 0.70);
-          font-size: 0.85rem;
-        }
-        .heading {
-          font-weight: 950;
-          font-size: 1.05rem;
-        }
-
-        .controls {
-          display: grid;
-          gap: 10px;
-        }
-
-        .block {
-          display: grid;
-          gap: 6px;
-        }
-        .label {
-          font-size: 0.88rem;
-          color: rgba(255, 255, 255, 0.75);
-          font-weight: 800;
-        }
-
-        .pillRow {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-        }
-
-        .pill {
-          cursor: pointer;
-          border-radius: 999px;
-          padding: 8px 12px;
-          font-weight: 900;
-          border: 1px solid rgba(255, 255, 255, 0.14);
-          background: rgba(255, 255, 255, 0.04);
-          color: rgba(255, 255, 255, 0.90);
-        }
-
-        /* === ESTILO “celeste Maitei” === */
-        .pill.active {
-          border-color: rgba(90, 190, 255, 0.60);
-          background: rgba(90, 190, 255, 0.22);
-          color: rgba(255, 255, 255, 0.98);
-          box-shadow: 0 0 0 2px rgba(90, 190, 255, 0.12) inset;
-        }
-      `}</style>
-    </div>
-  );
+export function MaiteiStickyFilters(props: Omit<BarProps, "title" | "accent" | "hotel" | "onHotel" | "hotels">) {
+  return <StickyBar {...props} title="Filtros Grupo GOTEL (Maitei)" accent="maitei" />;
 }
