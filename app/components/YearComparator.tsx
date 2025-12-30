@@ -433,19 +433,196 @@ export default function YearComparator({ filePath, year, baseYear, hotelFilter }
       .sort((a, b) => a.monthIdx - b.monthIdx);
   }, [filtered]);
 
-  // Ranking de meses por % ocupación (promedio)
-  const monthRanking = useMemo(() => {
-    const list = aggByMonth.map((a: any) => ({
-      monthIdx: a.monthIdx as number,
-      label: monthName(a.monthIdx),
-      occ: a.avgOcc as number,
-      adr: a.avgAdr as number,
-      revpar: a.revpar as number,
-      dbl: a.doubleOcc as number,
-      days: a.countDays as number,
-    }));
-    return [...list].sort((a, b) => b.occ - a.occ);
-  }, [aggByMonth]);
+ /* =========================
+   Ranking de Meses (por % ocupación) — estilo nuevo
+   - Mes 1..12
+   - Medallas Top 3
+   - Solo Ocupación + Revenue
+========================= */
+
+function medalForRank(i: number): string {
+  if (i === 0) return "🥇";
+  if (i === 1) return "🥈";
+  if (i === 2) return "🥉";
+  return "";
+}
+
+function rankChipBg(tone: "red" | "blue" | "neutral", idx: number): string {
+  // Más color sin depender de librerías:
+  // - top: más vibrante
+  // - resto: gradiente suave por posición
+  const base =
+    tone === "blue"
+      ? ["rgba(59,130,246,.95)", "rgba(14,165,233,.85)", "rgba(56,189,248,.75)"]
+      : tone === "red"
+      ? ["rgba(220,38,38,.95)", "rgba(244,63,94,.85)", "rgba(251,113,133,.75)"]
+      : ["rgba(255,255,255,.30)", "rgba(255,255,255,.18)", "rgba(255,255,255,.10)"];
+
+  // Variación por rank para que no sea todo igual
+  const a = base[0];
+  const b = base[(idx % 3) as 0 | 1 | 2];
+  return `linear-gradient(135deg, ${a}, ${b})`;
+}
+
+function fmtMonthNum(mIdx: number): string {
+  // monthIdx viene 0..11
+  return String(mIdx + 1);
+}
+
+function clamp01(x: number) {
+  return Math.max(0, Math.min(1, x));
+}
+
+function niceMoneyShort(n: number): string {
+  // Compacto tipo "USD 125k" / "USD 1.2M"
+  const abs = Math.abs(n);
+  if (abs >= 1_000_000) return `USD ${(n / 1_000_000).toFixed(1)}M`;
+  if (abs >= 1_000) return `USD ${(n / 1_000).toFixed(0)}k`;
+  return formatMoneyUsd(n);
+}
+
+const monthRankingSimple = useMemo(() => {
+  // Usa aggByMonth (que ya respeta filtros año/trimestre/mes + hotel + H/F)
+  // y arma: mesNum, occ, revenue
+  const list = (aggByMonth as any[]).map((a) => ({
+    monthIdx: Number(a.monthIdx),
+    monthNum: Number(a.monthIdx) + 1, // 1..12
+    occ: Number(a.avgOcc) || 0,
+    revenue: Number(a.sumRev ?? 0), // sumRev está dentro del Agg (lo preservamos)
+  }));
+
+  // Ordena por ocupación (principal)
+  return list.sort((x, y) => y.occ - x.occ);
+}, [aggByMonth]);
+
+/* =========================
+   En el JSX:
+   reemplazá tu bloque de ranking por este
+========================= */
+
+<Card>
+  <SectionTitle
+    title="Ranking de Meses (por % ocupación)"
+    desc="Ordenado por ocupación promedio. Se muestra también Room Revenue como referencia."
+  />
+
+  {monthRankingSimple.length ? (
+    (() => {
+      const maxOcc = Math.max(...monthRankingSimple.map((x) => x.occ), 0.00001);
+      const maxRev = Math.max(...monthRankingSimple.map((x) => x.revenue), 0.00001);
+
+      return (
+        <div
+          style={{
+            marginTop: ".85rem",
+            display: "grid",
+            gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+            gap: ".75rem",
+          }}
+        >
+          {monthRankingSimple.map((x, i) => {
+            const medal = medalForRank(i);
+            const occW = clamp01(x.occ / maxOcc);
+            const revW = clamp01(x.revenue / maxRev);
+
+            return (
+              <div
+                key={`rk-m-${x.monthNum}`}
+                style={{
+                  borderRadius: 18,
+                  padding: ".9rem",
+                  border: "1px solid rgba(255,255,255,.12)",
+                  background: "rgba(255,255,255,.04)",
+                  position: "relative",
+                  overflow: "hidden",
+                }}
+              >
+                {/* banda de color (para que no sean todas barras rojas) */}
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    background: rankChipBg(tone, i),
+                    opacity: 0.12,
+                  }}
+                />
+
+                <div style={{ position: "relative", display: "grid", gap: ".55rem" }}>
+                  {/* Header: rank + mes */}
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <div style={{ display: "flex", gap: ".5rem", alignItems: "center" }}>
+                      <div
+                        style={{
+                          minWidth: 42,
+                          height: 34,
+                          borderRadius: 999,
+                          display: "grid",
+                          placeItems: "center",
+                          fontWeight: 950,
+                          border: "1px solid rgba(255,255,255,.14)",
+                          background: rankChipBg(tone, i),
+                          boxShadow: "0 10px 24px rgba(0,0,0,.18)",
+                        }}
+                        title={`Puesto ${i + 1}`}
+                      >
+                        {medal ? medal : i + 1}
+                      </div>
+
+                      <div style={{ fontWeight: 950, fontSize: "1.05rem" }}>
+                        Mes {x.monthNum}
+                      </div>
+                    </div>
+
+                    <div style={{ opacity: 0.85, fontWeight: 900 }}>
+                      {formatPct01(x.occ)}
+                    </div>
+                  </div>
+
+                  {/* Ocupación bar (suave) */}
+                  <div style={{ display: "grid", gap: ".25rem" }}>
+                    <div style={{ opacity: 0.75, fontSize: ".85rem", fontWeight: 800 }}>Ocupación</div>
+                    <div style={{ height: 10, borderRadius: 999, background: "rgba(255,255,255,.10)", overflow: "hidden" }}>
+                      <div
+                        style={{
+                          width: `${Math.round(occW * 100)}%`,
+                          height: "100%",
+                          borderRadius: 999,
+                          background: "linear-gradient(90deg, rgba(34,197,94,.92), rgba(253,224,71,.70))",
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Revenue bar (otra paleta) */}
+                  <div style={{ display: "grid", gap: ".25rem" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                      <div style={{ opacity: 0.75, fontSize: ".85rem", fontWeight: 800 }}>Room Revenue</div>
+                      <div style={{ fontWeight: 900, opacity: 0.9 }}>{niceMoneyShort(x.revenue)}</div>
+                    </div>
+
+                    <div style={{ height: 10, borderRadius: 999, background: "rgba(255,255,255,.10)", overflow: "hidden" }}>
+                      <div
+                        style={{
+                          width: `${Math.round(revW * 100)}%`,
+                          height: "100%",
+                          borderRadius: 999,
+                          background: "linear-gradient(90deg, rgba(168,85,247,.92), rgba(59,130,246,.70))",
+                        }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    })()
+  ) : (
+    <div style={{ opacity: 0.8, marginTop: ".85rem" }}>Sin datos con el filtro actual.</div>
+  )}
+</Card>
+
 
   // Ranking por día de semana
   const weekdayRanking = useMemo(() => {
@@ -839,3 +1016,4 @@ export default function YearComparator({ filePath, year, baseYear, hotelFilter }
     </section>
   );
 }
+
