@@ -15,37 +15,102 @@ export type UseCsvResult = {
 };
 
 /* =========================
-   Parser CSV simple (sin libs)
+   CSV Parser robusto (sin libs)
+   - soporta comillas
+   - soporta comas dentro de comillas
+   - soporta saltos de línea dentro de comillas (CLAVE para tu hf_diario.csv)
 ========================= */
 
 function parseCSV(text: string): CsvRow[] {
-  const lines = text
-    .split(/\r?\n/)
-    .map(l => l.trim())
-    .filter(Boolean);
+  if (!text) return [];
 
-  if (lines.length === 0) return [];
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let inQuotes = false;
 
-  const headers = lines[0]
-    .split(",")
-    .map(h => h.replace(/^"|"$/g, "").trim());
+  const pushField = () => {
+    row.push(field);
+    field = "";
+  };
 
-  const rows: CsvRow[] = [];
+  const pushRow = () => {
+    // Evita rows vacías totales
+    const allEmpty = row.every((x) => (x ?? "").trim() === "");
+    if (!allEmpty) rows.push(row);
+    row = [];
+  };
 
-  for (let i = 1; i < lines.length; i++) {
-    const values = lines[i]
-      .split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/)
-      .map(v => v.replace(/^"|"$/g, "").trim());
+  // Normalizo \r\n a \n, pero NO rompo por líneas (lo manejamos con el parser)
+  const s = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
-    const row: CsvRow = {};
-    headers.forEach((h, idx) => {
-      row[h] = values[idx] ?? "";
-    });
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
 
-    rows.push(row);
+    if (ch === '"') {
+      // Si estamos en comillas y viene "" => comilla escapada
+      const next = s[i + 1];
+      if (inQuotes && next === '"') {
+        field += '"';
+        i++; // salto la segunda comilla
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    // separador de columna
+    if (ch === "," && !inQuotes) {
+      pushField();
+      continue;
+    }
+
+    // fin de línea
+    if (ch === "\n" && !inQuotes) {
+      pushField();
+      pushRow();
+      continue;
+    }
+
+    // caracter normal (incluye \n si está dentro de comillas)
+    field += ch;
   }
 
-  return rows;
+  // flush final
+  pushField();
+  pushRow();
+
+  if (!rows.length) return [];
+
+  // headers
+  const headersRaw = rows[0] ?? [];
+  const headers = headersRaw.map((h, idx) => {
+    const clean = String(h ?? "")
+      .replace(/^"|"$/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    // si viniera vacío, generamos un nombre
+    return clean || `col_${idx + 1}`;
+  });
+
+  // data
+  const out: CsvRow[] = [];
+  for (let r = 1; r < rows.length; r++) {
+    const values = rows[r] ?? [];
+    const obj: CsvRow = {};
+
+    for (let c = 0; c < headers.length; c++) {
+      const key = headers[c];
+      const v = values[c] ?? "";
+      // limpiamos comillas externas y espacios, pero NO destruimos contenido
+      obj[key] = String(v).replace(/^"|"$/g, "").trim();
+    }
+
+    out.push(obj);
+  }
+
+  return out;
 }
 
 /* =========================
@@ -64,18 +129,19 @@ export function useCsvClient(filePath: string): UseCsvResult {
     setError("");
 
     fetch(filePath, { cache: "no-store" })
-      .then(res => {
+      .then((res) => {
         if (!res.ok) {
-          throw new Error(`No se pudo leer CSV: ${filePath}`);
+          throw new Error(`No se pudo leer CSV: ${filePath} (${res.status})`);
         }
         return res.text();
       })
-      .then(text => {
+      .then((text) => {
         if (!alive) return;
-        setRows(parseCSV(text));
+        const parsed = parseCSV(text);
+        setRows(parsed);
         setLoading(false);
       })
-      .catch(err => {
+      .catch((err) => {
         if (!alive) return;
         setError(err?.message ?? "Error leyendo CSV");
         setLoading(false);
@@ -90,23 +156,29 @@ export function useCsvClient(filePath: string): UseCsvResult {
 }
 
 /* =========================
-   Helpers numéricos
+   Helpers numéricos (mejorados)
 ========================= */
 
 export function num(v: any): number {
   if (v === null || v === undefined) return 0;
   if (typeof v === "number") return v;
 
-  if (typeof v === "string") {
-    const n = Number(
-      v.replace(/\./g, "").replace(",", ".").replace("%", "").trim()
-    );
-    return isNaN(n) ? 0 : n;
-  }
+  const s = String(v).trim();
+  if (!s) return 0;
 
-  return 0;
+  // Ej: "22.441,71" -> 22441.71  |  "59,40%" -> 59.40
+  const cleaned = s
+    .replace(/\s/g, "")
+    .replace(/\./g, "")
+    .replace(",", ".")
+    .replace("%", "");
+
+  const n = Number(cleaned);
+  return isNaN(n) ? 0 : n;
 }
 
-export function pct(v: number): number {
-  return v > 1 ? v / 100 : v;
+export function pct(v: any): number {
+  const n = typeof v === "number" ? v : num(v);
+  // si viene 59.4 => 0.594
+  return n > 1 ? n / 100 : n;
 }
