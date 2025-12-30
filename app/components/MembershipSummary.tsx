@@ -69,13 +69,23 @@ function toNumberSmart(v: any): number {
 }
 
 function parseDateAny(v: any): Date | null {
-  if (!v) return null;
+  if (v === null || v === undefined || v === "") return null;
+
+  // Excel serial date (muy común en XLSX)
+  if (typeof v === "number" && isFinite(v)) {
+    // Excel: día 1 = 1899-12-31 (con bug 1900), práctica estándar: base 1899-12-30
+    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
+    const ms = v * 24 * 60 * 60 * 1000;
+    const d = new Date(excelEpoch.getTime() + ms);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
   if (v instanceof Date) return v;
 
   const s = String(v).trim();
   if (!s) return null;
 
-  // dd/mm/yyyy (preferido)
+  // dd/mm/yyyy
   const m1 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (m1) {
     const dd = Number(m1[1]);
@@ -84,6 +94,14 @@ function parseDateAny(v: any): Date | null {
     const d = new Date(yy, mm - 1, dd);
     return Number.isNaN(d.getTime()) ? null : d;
   }
+
+  // fallback Date.parse
+  const t = Date.parse(s);
+  if (!Number.isNaN(t)) return new Date(t);
+
+  return null;
+}
+
 
   // dd-mm-yy o dd-mm-yyyy
   const m2 = s.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})/);
@@ -436,3 +454,4 @@ export default function MembershipSummary({
     </section>
   );
 }
+
