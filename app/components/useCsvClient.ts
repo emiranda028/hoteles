@@ -196,3 +196,33 @@ export function pct01(v: any): number {
   const n = num(v);
   return n > 1 ? n / 100 : n;
 }
+
+/* =========================
+   Helpers COMPAT (para no romper componentes viejos)
+   Antes estaban en csvClient.ts
+========================= */
+
+export function safeDiv(a: number, b: number): number {
+  return b === 0 ? 0 : a / b;
+}
+
+// Alias clásicos
+export function toNumberSmart(v: any): number {
+  return num(v);
+}
+
+export function toPercent01(v: any): number {
+  return pct01(v);
+}
+
+export function formatMoney(n: number): string {
+  return n.toLocaleString("es-AR", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  });
+}
+
+export function formatPct(n01: number): string {
+  return (n01 * 100).toFixed(1) + "%";
+}
