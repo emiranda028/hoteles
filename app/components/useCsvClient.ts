@@ -8,6 +8,11 @@ import { useEffect, useState } from "react";
 
 export type CsvRow = Record<string, any>;
 
+export type CsvReadResult = {
+  rows: CsvRow[];
+  rawText?: string;
+};
+
 export type UseCsvResult = {
   rows: CsvRow[];
   loading: boolean;
@@ -15,106 +20,100 @@ export type UseCsvResult = {
 };
 
 /* =========================
-   CSV Parser robusto (sin libs)
-   - soporta comillas
+   CSV parser robusto (sin libs)
+   - respeta comillas
    - soporta comas dentro de comillas
-   - soporta saltos de línea dentro de comillas (CLAVE para tu hf_diario.csv)
 ========================= */
 
-function parseCSV(text: string): CsvRow[] {
-  if (!text) return [];
-
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = "";
+function splitCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = "";
   let inQuotes = false;
 
-  const pushField = () => {
-    row.push(field);
-    field = "";
-  };
-
-  const pushRow = () => {
-    // Evita rows vacías totales
-    const allEmpty = row.every((x) => (x ?? "").trim() === "");
-    if (!allEmpty) rows.push(row);
-    row = [];
-  };
-
-  // Normalizo \r\n a \n, pero NO rompo por líneas (lo manejamos con el parser)
-  const s = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i];
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
 
     if (ch === '"') {
-      // Si estamos en comillas y viene "" => comilla escapada
-      const next = s[i + 1];
+      // escape de comillas dobles "" dentro de campo
+      const next = line[i + 1];
       if (inQuotes && next === '"') {
-        field += '"';
-        i++; // salto la segunda comilla
+        cur += '"';
+        i++;
       } else {
         inQuotes = !inQuotes;
       }
       continue;
     }
 
-    // separador de columna
     if (ch === "," && !inQuotes) {
-      pushField();
+      out.push(cur);
+      cur = "";
       continue;
     }
 
-    // fin de línea
-    if (ch === "\n" && !inQuotes) {
-      pushField();
-      pushRow();
-      continue;
-    }
-
-    // caracter normal (incluye \n si está dentro de comillas)
-    field += ch;
+    cur += ch;
   }
 
-  // flush final
-  pushField();
-  pushRow();
+  out.push(cur);
+  return out.map((v) => v.trim());
+}
 
-  if (!rows.length) return [];
+function stripOuterQuotes(s: string): string {
+  const t = String(s ?? "").trim();
+  if (t.startsWith('"') && t.endsWith('"')) return t.slice(1, -1).trim();
+  return t;
+}
+
+function parseCSV(text: string): CsvRow[] {
+  if (!text) return [];
+
+  // normaliza fin de línea
+  const lines = text
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .filter((l) => l.trim().length > 0);
+
+  if (lines.length === 0) return [];
 
   // headers
-  const headersRaw = rows[0] ?? [];
-  const headers = headersRaw.map((h, idx) => {
-    const clean = String(h ?? "")
-      .replace(/^"|"$/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
+  const headerParts = splitCsvLine(lines[0]).map(stripOuterQuotes);
+  const headers = headerParts.map((h, idx) => (h ? h : `col_${idx + 1}`));
 
-    // si viniera vacío, generamos un nombre
-    return clean || `col_${idx + 1}`;
-  });
+  const rows: CsvRow[] = [];
 
-  // data
-  const out: CsvRow[] = [];
-  for (let r = 1; r < rows.length; r++) {
-    const values = rows[r] ?? [];
-    const obj: CsvRow = {};
+  for (let i = 1; i < lines.length; i++) {
+    const parts = splitCsvLine(lines[i]).map(stripOuterQuotes);
+    const row: CsvRow = {};
 
     for (let c = 0; c < headers.length; c++) {
-      const key = headers[c];
-      const v = values[c] ?? "";
-      // limpiamos comillas externas y espacios, pero NO destruimos contenido
-      obj[key] = String(v).replace(/^"|"$/g, "").trim();
+      row[headers[c]] = parts[c] ?? "";
     }
 
-    out.push(obj);
+    rows.push(row);
   }
 
-  return out;
+  return rows;
 }
 
 /* =========================
-   Hook ÚNICO
+   API COMPAT (clave)
+   Muchos componentes viejos hacen:
+     readCsvFromPublic(file).then(({ rows }) => ...)
+========================= */
+
+export async function readCsvFromPublic(path: string): Promise<CsvReadResult> {
+  const res = await fetch(path, { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error(`No se pudo leer CSV: ${path} (${res.status})`);
+  }
+  const text = await res.text();
+  const rows = parseCSV(text);
+  return { rows, rawText: text };
+}
+
+/* =========================
+   Hook
 ========================= */
 
 export function useCsvClient(filePath: string): UseCsvResult {
@@ -128,17 +127,10 @@ export function useCsvClient(filePath: string): UseCsvResult {
     setLoading(true);
     setError("");
 
-    fetch(filePath, { cache: "no-store" })
-      .then((res) => {
-        if (!res.ok) {
-          throw new Error(`No se pudo leer CSV: ${filePath} (${res.status})`);
-        }
-        return res.text();
-      })
-      .then((text) => {
+    readCsvFromPublic(filePath)
+      .then(({ rows }) => {
         if (!alive) return;
-        const parsed = parseCSV(text);
-        setRows(parsed);
+        setRows(rows);
         setLoading(false);
       })
       .catch((err) => {
@@ -156,7 +148,7 @@ export function useCsvClient(filePath: string): UseCsvResult {
 }
 
 /* =========================
-   Helpers numéricos (mejorados)
+   Helpers numéricos
 ========================= */
 
 export function num(v: any): number {
@@ -166,19 +158,14 @@ export function num(v: any): number {
   const s = String(v).trim();
   if (!s) return 0;
 
-  // Ej: "22.441,71" -> 22441.71  |  "59,40%" -> 59.40
-  const cleaned = s
-    .replace(/\s/g, "")
-    .replace(/\./g, "")
-    .replace(",", ".")
-    .replace("%", "");
-
+  // 22.441,71  -> 22441.71
+  // 59,40%     -> 59.40
+  const cleaned = s.replace(/\./g, "").replace(",", ".").replace("%", "").trim();
   const n = Number(cleaned);
-  return isNaN(n) ? 0 : n;
+  return Number.isNaN(n) ? 0 : n;
 }
 
-export function pct(v: any): number {
-  const n = typeof v === "number" ? v : num(v);
+export function pct01(n: number): number {
   // si viene 59.4 => 0.594
   return n > 1 ? n / 100 : n;
 }
