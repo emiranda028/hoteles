@@ -11,6 +11,7 @@ export type CsvRow = Record<string, any>;
 export type CsvReadResult = {
   rows: CsvRow[];
   rawText?: string;
+  delimiter?: string;
 };
 
 export type UseCsvResult = {
@@ -20,20 +21,57 @@ export type UseCsvResult = {
 };
 
 /* =========================
-   CSV Parser ROBUSTO (sin libs)
+   CSV parser robusto (sin libs)
    - respeta comillas
-   - soporta comas dentro de comillas
-   - soporta saltos de línea dentro de comillas  ✅ (CLAVE para hf_diario.csv)
-   - soporta comillas escapadas "" dentro de un campo
+   - soporta comas/puntoycoma/tab dentro de comillas
+   - soporta saltos de línea dentro de comillas
+   - AUTO-DETECTA delimitador: , ; \t
 ========================= */
 
-function parseCSV(text: string): CsvRow[] {
-  if (!text) return [];
+function detectDelimiter(sampleLine: string): string {
+  // contamos separadores fuera de comillas
+  const count = (delim: string) => {
+    let inQuotes = false;
+    let c = 0;
+    for (let i = 0; i < sampleLine.length; i++) {
+      const ch = sampleLine[i];
+      if (ch === '"') {
+        const next = sampleLine[i + 1];
+        if (inQuotes && next === '"') {
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+        continue;
+      }
+      if (!inQuotes && ch === delim) c++;
+    }
+    return c;
+  };
 
-  // Normalizo saltos de línea (pero NO hago split por líneas)
+  const cComma = count(",");
+  const cSemi = count(";");
+  const cTab = count("\t");
+
+  // elegimos el que más “cortes” tenga
+  if (cSemi >= cComma && cSemi >= cTab && cSemi > 0) return ";";
+  if (cTab >= cComma && cTab >= cSemi && cTab > 0) return "\t";
+  return ","; // default
+}
+
+function parseCSV(text: string): { rows: CsvRow[]; delimiter: string } {
+  if (!text) return { rows: [], delimiter: "," };
+
+  // normalizo fin de línea
   const s = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
-  const rows: string[][] = [];
+  // buscamos una primera línea “no vacía” para detectar delimitador
+  const firstNonEmptyLine =
+    s.split("\n").find((l) => l.trim().length > 0) ?? "";
+
+  const delimiter = detectDelimiter(firstNonEmptyLine);
+
+  const rowsMatrix: string[][] = [];
   let row: string[] = [];
   let field = "";
   let inQuotes = false;
@@ -44,9 +82,8 @@ function parseCSV(text: string): CsvRow[] {
   };
 
   const pushRow = () => {
-    // Evito filas totalmente vacías
-    const allEmpty = row.every((x) => String(x ?? "").trim() === "");
-    if (!allEmpty) rows.push(row);
+    const allEmpty = row.every((x) => (x ?? "").trim() === "");
+    if (!allEmpty) rowsMatrix.push(row);
     row = [];
   };
 
@@ -55,31 +92,28 @@ function parseCSV(text: string): CsvRow[] {
 
     if (ch === '"') {
       const next = s[i + 1];
-
-      // "" dentro de comillas => comilla escapada
       if (inQuotes && next === '"') {
         field += '"';
-        i++; // salto la segunda comilla
+        i++;
       } else {
         inQuotes = !inQuotes;
       }
       continue;
     }
 
-    // separador de columna
-    if (ch === "," && !inQuotes) {
+    // separador (según delimiter detectado)
+    if (!inQuotes && ch === delimiter) {
       pushField();
       continue;
     }
 
     // fin de línea (solo si NO estamos dentro de comillas)
-    if (ch === "\n" && !inQuotes) {
+    if (!inQuotes && ch === "\n") {
       pushField();
       pushRow();
       continue;
     }
 
-    // carácter normal (incluye \n si está dentro de comillas)
     field += ch;
   }
 
@@ -87,40 +121,39 @@ function parseCSV(text: string): CsvRow[] {
   pushField();
   pushRow();
 
-  if (!rows.length) return [];
+  if (!rowsMatrix.length) return { rows: [], delimiter };
 
-  // Headers
-  const headersRaw = rows[0] ?? [];
+  // headers
+  const headersRaw = rowsMatrix[0] ?? [];
   const headers = headersRaw.map((h, idx) => {
     const clean = String(h ?? "")
+      .replace(/^"|"$/g, "")
       .replace(/\u00a0/g, " ")
       .replace(/\s+/g, " ")
       .trim();
     return clean || `col_${idx + 1}`;
   });
 
-  // Data
+  // data
   const out: CsvRow[] = [];
-  for (let r = 1; r < rows.length; r++) {
-    const values = rows[r] ?? [];
+  for (let r = 1; r < rowsMatrix.length; r++) {
+    const values = rowsMatrix[r] ?? [];
     const obj: CsvRow = {};
 
     for (let c = 0; c < headers.length; c++) {
       const key = headers[c];
       const v = values[c] ?? "";
-      obj[key] = String(v).trim();
+      obj[key] = String(v).replace(/^"|"$/g, "").trim();
     }
 
     out.push(obj);
   }
 
-  return out;
+  return { rows: out, delimiter };
 }
 
 /* =========================
-   API COMPAT (clave)
-   Muchos componentes hacen:
-     readCsvFromPublic(file).then(({ rows }) => ...)
+   API COMPAT
 ========================= */
 
 export async function readCsvFromPublic(path: string): Promise<CsvReadResult> {
@@ -129,8 +162,8 @@ export async function readCsvFromPublic(path: string): Promise<CsvReadResult> {
     throw new Error(`No se pudo leer CSV: ${path} (${res.status})`);
   }
   const text = await res.text();
-  const rows = parseCSV(text);
-  return { rows, rawText: text };
+  const parsed = parseCSV(text);
+  return { rows: parsed.rows, rawText: text, delimiter: parsed.delimiter };
 }
 
 /* =========================
@@ -169,7 +202,7 @@ export function useCsvClient(filePath: string): UseCsvResult {
 }
 
 /* =========================
-   Helpers numéricos
+   Helpers numéricos + compat
 ========================= */
 
 export function num(v: any): number {
@@ -191,30 +224,28 @@ export function num(v: any): number {
   return Number.isNaN(n) ? 0 : n;
 }
 
-/** Convierte a proporción 0..1 si viene en % (59,4 -> 0,594) */
+/** Convierte a proporción 0..1 si viene en % */
 export function pct01(v: any): number {
-  const n = num(v);
+  const n = typeof v === "number" ? v : num(v);
   return n > 1 ? n / 100 : n;
 }
 
-/* =========================
-   Helpers COMPAT (para no romper componentes viejos)
-   Antes estaban en csvClient.ts
-========================= */
-
+// compat vieja
 export function safeDiv(a: number, b: number): number {
   return b === 0 ? 0 : a / b;
 }
-
-// Alias clásicos
 export function toNumberSmart(v: any): number {
   return num(v);
 }
-
 export function toPercent01(v: any): number {
   return pct01(v);
 }
-
+export function formatPct01(v: any): string {
+  return (pct01(v) * 100).toFixed(1) + "%";
+}
+export function formatPct(v: any): string {
+  return formatPct01(v);
+}
 export function formatMoney(n: number): string {
   return n.toLocaleString("es-AR", {
     style: "currency",
@@ -222,19 +253,3 @@ export function formatMoney(n: number): string {
     maximumFractionDigits: 0,
   });
 }
-
-export function formatPct(n01: number): string {
-  return (n01 * 100).toFixed(1) + "%";
-}
-
-/* =========================
-   Alias de compatibilidad FINAL
-   (para componentes legacy)
-========================= */
-
-// algunos componentes llaman formatPct01
-export function formatPct01(v: any): string {
-  const n01 = pct01(v);
-  return (n01 * 100).toFixed(1) + "%";
-}
-
