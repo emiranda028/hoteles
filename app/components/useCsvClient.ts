@@ -226,3 +226,15 @@ export function formatMoney(n: number): string {
 export function formatPct(n01: number): string {
   return (n01 * 100).toFixed(1) + "%";
 }
+
+/* =========================
+   Alias de compatibilidad FINAL
+   (para componentes legacy)
+========================= */
+
+// algunos componentes llaman formatPct01
+export function formatPct01(v: any): string {
+  const n01 = pct01(v);
+  return (n01 * 100).toFixed(1) + "%";
+}
+
