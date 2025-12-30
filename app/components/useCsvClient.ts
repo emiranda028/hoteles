@@ -169,5 +169,4 @@ export function pct01(n: number): number {
   // si viene 59.4 => 0.594
   return n > 1 ? n / 100 : n;
 }
-// Alias por compatibilidad (algunos componentes usan pct01)
-export const pct01 = pct;
+
