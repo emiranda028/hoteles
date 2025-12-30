@@ -165,8 +165,10 @@ export function num(v: any): number {
   return Number.isNaN(n) ? 0 : n;
 }
 
-export function pct01(n: number): number {
-  // si viene 59.4 => 0.594
+/** Convierte a proporción 0..1 si viene en % (59,4 -> 0,594) */
+export function pct01(v: any): number {
+  const n = num(v);
   return n > 1 ? n / 100 : n;
 }
+
 
