@@ -20,85 +20,106 @@ export type UseCsvResult = {
 };
 
 /* =========================
-   CSV parser robusto (sin libs)
+   CSV Parser ROBUSTO (sin libs)
    - respeta comillas
    - soporta comas dentro de comillas
+   - soporta saltos de línea dentro de comillas  ✅ (CLAVE para hf_diario.csv)
+   - soporta comillas escapadas "" dentro de un campo
 ========================= */
 
-function splitCsvLine(line: string): string[] {
-  const out: string[] = [];
-  let cur = "";
+function parseCSV(text: string): CsvRow[] {
+  if (!text) return [];
+
+  // Normalizo saltos de línea (pero NO hago split por líneas)
+  const s = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
   let inQuotes = false;
 
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
+  const pushField = () => {
+    row.push(field);
+    field = "";
+  };
+
+  const pushRow = () => {
+    // Evito filas totalmente vacías
+    const allEmpty = row.every((x) => String(x ?? "").trim() === "");
+    if (!allEmpty) rows.push(row);
+    row = [];
+  };
+
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
 
     if (ch === '"') {
-      // escape de comillas dobles "" dentro de campo
-      const next = line[i + 1];
+      const next = s[i + 1];
+
+      // "" dentro de comillas => comilla escapada
       if (inQuotes && next === '"') {
-        cur += '"';
-        i++;
+        field += '"';
+        i++; // salto la segunda comilla
       } else {
         inQuotes = !inQuotes;
       }
       continue;
     }
 
+    // separador de columna
     if (ch === "," && !inQuotes) {
-      out.push(cur);
-      cur = "";
+      pushField();
       continue;
     }
 
-    cur += ch;
-  }
-
-  out.push(cur);
-  return out.map((v) => v.trim());
-}
-
-function stripOuterQuotes(s: string): string {
-  const t = String(s ?? "").trim();
-  if (t.startsWith('"') && t.endsWith('"')) return t.slice(1, -1).trim();
-  return t;
-}
-
-function parseCSV(text: string): CsvRow[] {
-  if (!text) return [];
-
-  // normaliza fin de línea
-  const lines = text
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .split("\n")
-    .filter((l) => l.trim().length > 0);
-
-  if (lines.length === 0) return [];
-
-  // headers
-  const headerParts = splitCsvLine(lines[0]).map(stripOuterQuotes);
-  const headers = headerParts.map((h, idx) => (h ? h : `col_${idx + 1}`));
-
-  const rows: CsvRow[] = [];
-
-  for (let i = 1; i < lines.length; i++) {
-    const parts = splitCsvLine(lines[i]).map(stripOuterQuotes);
-    const row: CsvRow = {};
-
-    for (let c = 0; c < headers.length; c++) {
-      row[headers[c]] = parts[c] ?? "";
+    // fin de línea (solo si NO estamos dentro de comillas)
+    if (ch === "\n" && !inQuotes) {
+      pushField();
+      pushRow();
+      continue;
     }
 
-    rows.push(row);
+    // carácter normal (incluye \n si está dentro de comillas)
+    field += ch;
   }
 
-  return rows;
+  // flush final
+  pushField();
+  pushRow();
+
+  if (!rows.length) return [];
+
+  // Headers
+  const headersRaw = rows[0] ?? [];
+  const headers = headersRaw.map((h, idx) => {
+    const clean = String(h ?? "")
+      .replace(/\u00a0/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return clean || `col_${idx + 1}`;
+  });
+
+  // Data
+  const out: CsvRow[] = [];
+  for (let r = 1; r < rows.length; r++) {
+    const values = rows[r] ?? [];
+    const obj: CsvRow = {};
+
+    for (let c = 0; c < headers.length; c++) {
+      const key = headers[c];
+      const v = values[c] ?? "";
+      obj[key] = String(v).trim();
+    }
+
+    out.push(obj);
+  }
+
+  return out;
 }
 
 /* =========================
    API COMPAT (clave)
-   Muchos componentes viejos hacen:
+   Muchos componentes hacen:
      readCsvFromPublic(file).then(({ rows }) => ...)
 ========================= */
 
@@ -160,7 +181,12 @@ export function num(v: any): number {
 
   // 22.441,71  -> 22441.71
   // 59,40%     -> 59.40
-  const cleaned = s.replace(/\./g, "").replace(",", ".").replace("%", "").trim();
+  const cleaned = s
+    .replace(/\s/g, "")
+    .replace(/\./g, "")
+    .replace(",", ".")
+    .replace("%", "");
+
   const n = Number(cleaned);
   return Number.isNaN(n) ? 0 : n;
 }
@@ -170,5 +196,3 @@ export function pct01(v: any): number {
   const n = num(v);
   return n > 1 ? n / 100 : n;
 }
-
-
