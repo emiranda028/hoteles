@@ -4,6 +4,8 @@ import React, { useMemo, useState } from "react";
 import SectionTitle from "./ui/SectionTitle";
 import Pill from "./ui/Pill";
 import { useCsvClient, num, pct01, CsvRow, safeDiv } from "./useCsvClient";
+import KpiCarousel from "./KpiCarousel";
+
 
 /* =========================================================
    Props
@@ -873,3 +875,4 @@ export default function YearComparator({ filePath, year, baseYear, hotelFilter }
     </section>
   );
 }
+
