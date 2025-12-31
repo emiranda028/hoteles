@@ -2,187 +2,246 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-export type KpiItem = {
+type Tone = "red" | "blue" | "neutral";
+
+export type KpiCarouselItem = {
   label: string;
   value: string;
-  /** ejemplo: "+3,2%" o "-1,1%" */
-  deltaText?: string;
-  /** si lo tenés numérico, mejor: +0.032 o -0.011 (o +3.2 / -1.1, igual sirve) */
-  deltaValue?: number;
   sub?: string;
+
+  /** texto ya formateado tipo "Δ +4,2%" */
+  deltaText?: string;
+
+  /** número para colorear (positivo/negativo) */
+  deltaValue?: number;
 };
 
 type Props = {
-  items: KpiItem[];
-  /** red = JCR, blue = Gotel */
-  tone?: "red" | "blue" | "neutral";
+  tone: Tone;
+  items: KpiCarouselItem[];
+
+  /** default 4500 (4.5s) */
   intervalMs?: number;
+
+  /** default true */
   showDots?: boolean;
+
+  /** default true */
+  pauseOnHover?: boolean;
 };
 
-function gradForTone(tone: "red" | "blue" | "neutral", idx: number) {
-  // JCR: rojo -> violeta
-  const jcr = [
-    "linear-gradient(135deg, rgba(220,38,38,.95), rgba(168,85,247,.70))",
-    "linear-gradient(135deg, rgba(244,63,94,.95), rgba(124,58,237,.65))",
-    "linear-gradient(135deg, rgba(249,115,22,.95), rgba(168,85,247,.55))",
-    "linear-gradient(135deg, rgba(190,18,60,.95), rgba(147,51,234,.55))",
-  ];
+function gradForTone(tone: Tone) {
+  if (tone === "red") return "linear-gradient(135deg, rgba(220,38,38,.95), rgba(168,85,247,.70))"; // rojo->violeta
+  if (tone === "blue") return "linear-gradient(135deg, rgba(56,189,248,.95), rgba(37,99,235,.70))"; // celeste->azul
+  return "linear-gradient(135deg, rgba(255,255,255,.18), rgba(255,255,255,.06))";
+}
 
-  // Gotel: celeste -> azul
-  const gotel = [
-    "linear-gradient(135deg, rgba(56,189,248,.95), rgba(37,99,235,.70))",
-    "linear-gradient(135deg, rgba(14,165,233,.95), rgba(29,78,216,.65))",
-    "linear-gradient(135deg, rgba(34,211,238,.95), rgba(59,130,246,.60))",
-    "linear-gradient(135deg, rgba(125,211,252,.95), rgba(37,99,235,.60))",
-  ];
+function borderForTone(tone: Tone) {
+  if (tone === "red") return "rgba(244,63,94,.35)";
+  if (tone === "blue") return "rgba(56,189,248,.35)";
+  return "rgba(255,255,255,.18)";
+}
 
-  const neutral = [
-    "linear-gradient(135deg, rgba(255,255,255,.20), rgba(255,255,255,.06))",
-    "linear-gradient(135deg, rgba(255,255,255,.18), rgba(255,255,255,.06))",
-    "linear-gradient(135deg, rgba(255,255,255,.16), rgba(255,255,255,.06))",
-  ];
-
-  const bank = tone === "red" ? jcr : tone === "blue" ? gotel : neutral;
-  return bank[idx % bank.length];
+function dotForTone(tone: Tone) {
+  if (tone === "red") return "rgba(244,63,94,.95)";
+  if (tone === "blue") return "rgba(56,189,248,.95)";
+  return "rgba(255,255,255,.75)";
 }
 
 function deltaColor(v?: number) {
-  if (v === undefined || v === null) return "rgba(255,255,255,.70)";
+  if (v === undefined || v === null) return "rgba(255,255,255,.80)";
   if (v > 0) return "rgba(34,197,94,.95)"; // verde
   if (v < 0) return "rgba(239,68,68,.95)"; // rojo
-  return "rgba(255,255,255,.70)";
-}
-
-function Card({
-  children,
-  bg,
-}: React.PropsWithChildren<{ bg: string }>) {
-  return (
-    <div
-      style={{
-        minWidth: 0,
-        borderRadius: 18,
-        padding: "1rem",
-        border: "1px solid rgba(255,255,255,.12)",
-        background: "rgba(255,255,255,.05)",
-        position: "relative",
-        overflow: "hidden",
-        boxShadow: "0 16px 34px rgba(0,0,0,.18)",
-      }}
-    >
-      <div style={{ position: "absolute", inset: 0, background: bg, opacity: 0.18 }} />
-      <div style={{ position: "relative" }}>{children}</div>
-    </div>
-  );
+  return "rgba(255,255,255,.80)";
 }
 
 export default function KpiCarousel({
+  tone,
   items,
-  tone = "neutral",
-  intervalMs = 3600,
+  intervalMs = 4500,
   showDots = true,
+  pauseOnHover = true,
 }: Props) {
-  const trackRef = useRef<HTMLDivElement | null>(null);
+  const safeItems = items ?? [];
   const [idx, setIdx] = useState(0);
+  const [hover, setHover] = useState(false);
+  const timerRef = useRef<number | null>(null);
 
-  const slides = useMemo(() => items ?? [], [items]);
-  const count = slides.length;
+  const count = safeItems.length;
+
+  // clamp idx if items change
+  useEffect(() => {
+    if (idx >= count) setIdx(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [count]);
+
+  const canRun = useMemo(() => {
+    if (count <= 1) return false;
+    if (!pauseOnHover) return true;
+    return !hover;
+  }, [count, pauseOnHover, hover]);
 
   useEffect(() => {
-    if (count <= 1) return;
-    const t = setInterval(() => setIdx((i) => (i + 1) % count), intervalMs);
-    return () => clearInterval(t);
-  }, [count, intervalMs]);
+    if (!canRun) return;
 
-  useEffect(() => {
-    const el = trackRef.current;
-    if (!el) return;
-    const child = el.children[idx] as HTMLElement | undefined;
-    if (!child) return;
-    child.scrollIntoView({ behavior: "smooth", inline: "start", block: "nearest" });
-  }, [idx]);
+    timerRef.current = window.setInterval(() => {
+      setIdx((cur) => (cur + 1) % count);
+    }, intervalMs);
+
+    return () => {
+      if (timerRef.current) window.clearInterval(timerRef.current);
+      timerRef.current = null;
+    };
+  }, [canRun, intervalMs, count]);
 
   if (!count) return null;
 
+  const it = safeItems[idx];
+
   return (
-    <div style={{ display: "grid", gap: ".55rem" }}>
+    <section
+      className="section"
+      style={{ display: "grid", gap: ".6rem" }}
+      onMouseEnter={() => pauseOnHover && setHover(true)}
+      onMouseLeave={() => pauseOnHover && setHover(false)}
+    >
+      {/* CARD ÚNICA GRANDE */}
       <div
-        ref={trackRef}
+        className="card"
         style={{
-          display: "grid",
-          gridAutoFlow: "column",
-          gridAutoColumns: "minmax(280px, 1fr)",
-          gap: ".85rem",
-          overflowX: "auto",
-          scrollSnapType: "x mandatory",
-          paddingBottom: ".25rem",
-          WebkitOverflowScrolling: "touch",
+          borderRadius: 22,
+          padding: "1.25rem 1.25rem",
+          border: `1px solid ${borderForTone(tone)}`,
+          background: "rgba(255,255,255,.05)",
+          position: "relative",
+          overflow: "hidden",
+          minHeight: 140,
+          boxShadow: "0 18px 40px rgba(0,0,0,.22)",
         }}
       >
-        {slides.map((it, i) => {
-          const dc = deltaColor(it.deltaValue);
-          return (
-            <div
-              key={`${it.label}-${i}`}
-              style={{ scrollSnapAlign: "start", minWidth: 0 }}
-              onMouseEnter={() => setIdx(i)}
-            >
-              <Card bg={gradForTone(tone, i)}>
-                <div style={{ fontSize: ".92rem", opacity: 0.88, fontWeight: 900 }}>
-                  {it.label}
-                </div>
+        {/* fondo degradé */}
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            background: gradForTone(tone),
+            opacity: 0.18,
+          }}
+        />
 
-                <div style={{ display: "flex", gap: ".6rem", alignItems: "baseline", marginTop: ".25rem", flexWrap: "wrap" }}>
-                  <div style={{ fontSize: "1.75rem", fontWeight: 950 }}>
-                    {it.value}
-                  </div>
+        {/* brillo suave */}
+        <div
+          style={{
+            position: "absolute",
+            width: 260,
+            height: 260,
+            borderRadius: 999,
+            right: -90,
+            top: -90,
+            background: "rgba(255,255,255,.22)",
+            filter: "blur(18px)",
+            opacity: 0.25,
+          }}
+        />
 
-                  {(it.deltaText || it.deltaValue !== undefined) ? (
-                    <div
-                      style={{
-                        fontWeight: 950,
-                        color: dc,
-                        fontSize: "1.05rem",
-                      }}
-                      title="Variación vs año base"
-                    >
-                      {it.deltaText ?? ""}
-                    </div>
-                  ) : null}
-                </div>
+        <div style={{ position: "relative", display: "grid", gap: ".35rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: ".75rem", alignItems: "baseline" }}>
+            <div style={{ fontSize: "1.02rem", fontWeight: 900, opacity: 0.9 }}>{it.label}</div>
 
-                {it.sub ? (
-                  <div style={{ marginTop: ".35rem", opacity: 0.78, fontSize: ".92rem" }}>
-                    {it.sub}
-                  </div>
-                ) : null}
-              </Card>
+            {it.deltaText ? (
+              <div
+                style={{
+                  fontWeight: 950,
+                  color: deltaColor(it.deltaValue),
+                  background: "rgba(0,0,0,.20)",
+                  border: "1px solid rgba(255,255,255,.12)",
+                  padding: ".2rem .55rem",
+                  borderRadius: 999,
+                  fontSize: ".92rem",
+                  whiteSpace: "nowrap",
+                }}
+                title="Variación vs base"
+              >
+                <b style={{ fontWeight: 950 }}>{it.deltaText}</b>
+              </div>
+            ) : null}
+          </div>
+
+          <div style={{ fontSize: "2.15rem", fontWeight: 950, letterSpacing: -0.3, lineHeight: 1.05 }}>
+            {it.value}
+          </div>
+
+          {it.sub ? (
+            <div style={{ opacity: 0.85, fontWeight: 750, marginTop: ".1rem" }}>{it.sub}</div>
+          ) : (
+            <div style={{ opacity: 0.75, fontWeight: 700, marginTop: ".1rem" }}>
+              {/* espacio para que la card no “salte” */}
             </div>
-          );
-        })}
+          )}
+
+          {/* barra de progreso visual del slide */}
+          {count > 1 ? (
+            <div
+              style={{
+                marginTop: ".45rem",
+                height: 6,
+                borderRadius: 999,
+                background: "rgba(255,255,255,.10)",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                key={`${idx}-${canRun ? "run" : "stop"}`}
+                style={{
+                  height: "100%",
+                  width: canRun ? "100%" : "40%",
+                  background: "rgba(255,255,255,.45)",
+                  borderRadius: 999,
+                  transformOrigin: "left",
+                  animation: canRun ? `kpiProgress ${intervalMs}ms linear forwards` : "none",
+                }}
+              />
+            </div>
+          ) : null}
+        </div>
       </div>
 
+      {/* dots + click */}
       {showDots && count > 1 ? (
-        <div style={{ display: "flex", gap: ".45rem", justifyContent: "center", alignItems: "center" }}>
-          {slides.map((_, i) => (
-            <button
-              key={i}
-              onClick={() => setIdx(i)}
-              aria-label={`Ir a slide ${i + 1}`}
-              style={{
-                width: i === idx ? 26 : 10,
-                height: 10,
-                borderRadius: 999,
-                border: "1px solid rgba(255,255,255,.20)",
-                background: i === idx ? gradForTone(tone, i) : "rgba(255,255,255,.10)",
-                cursor: "pointer",
-                transition: "all .18s ease",
-              }}
-            />
-          ))}
+        <div style={{ display: "flex", justifyContent: "center", gap: ".45rem", marginTop: ".1rem" }}>
+          {safeItems.map((_, i) => {
+            const active = i === idx;
+            return (
+              <button
+                key={i}
+                onClick={() => setIdx(i)}
+                aria-label={`KPI ${i + 1}`}
+                style={{
+                  width: active ? 22 : 10,
+                  height: 10,
+                  borderRadius: 999,
+                  border: "1px solid rgba(255,255,255,.18)",
+                  background: active ? dotForTone(tone) : "rgba(255,255,255,.18)",
+                  cursor: "pointer",
+                  transition: "all 180ms ease",
+                }}
+              />
+            );
+          })}
         </div>
       ) : null}
-    </div>
+
+      {/* keyframes inline (para no tocar css global) */}
+      <style jsx>{`
+        @keyframes kpiProgress {
+          from {
+            transform: scaleX(0);
+          }
+          to {
+            transform: scaleX(1);
+          }
+        }
+      `}</style>
+    </section>
   );
 }
