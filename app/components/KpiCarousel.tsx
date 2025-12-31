@@ -148,18 +148,19 @@ export default function KpiCarousel({
           <div style={{ display: "flex", justifyContent: "space-between", gap: ".75rem", alignItems: "baseline" }}>
             <div style={{ fontSize: "1.02rem", fontWeight: 900, opacity: 0.9 }}>{it.label}</div>
 
-            {it.deltaText ? (
-              <div
-                style={{
-                  fontWeight: 950,
-                  color: deltaColor(it.deltaValue),
-                  background: "rgba(0,0,0,.20)",
-                  border: "1px solid rgba(255,255,255,.12)",
-                  padding: ".2rem .55rem",
-                  borderRadius: 999,
-                  fontSize: ".92rem",
-                  whiteSpace: "nowrap",
-                }}
+         style={{
+  fontWeight: 950,
+  color: deltaColor(it.deltaValue),
+  background: "rgba(0,0,0,.42)",
+  border: "1px solid rgba(255,255,255,.18)",
+  padding: ".22rem .6rem",
+  borderRadius: 999,
+  fontSize: ".95rem",
+  whiteSpace: "nowrap",
+  textShadow: "0 1px 6px rgba(0,0,0,.65)",   // CLAVE para que el verde se lea
+  boxShadow: "0 10px 22px rgba(0,0,0,.22)", // ayuda al contraste
+}}
+
                 title="Variación vs base"
               >
                 <b style={{ fontWeight: 950 }}>{it.deltaText}</b>
