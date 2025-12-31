@@ -1,190 +1,53 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import { useCsvClient, num, pct01, safeDiv, formatMoney } from "./useCsvClient";
+import SectionTitle from "./ui/SectionTitle";
+import Pill from "./ui/Pill";
+import { useCsvClient, num, pct01, CsvRow } from "./useCsvClient";
 
 /* =========================================================
-   YearComparator (MEGA COMPLETO)
-   - Filtros locales (H/F + trimestre + mes) con estética
-   - 1 carrusel GRANDE (auto-rotación 4-5s)
-   - KPIs: Ocupación promedio, Revenue total, Habitaciones ocupadas
-   - Comparativa vs baseYear con deltas verde/rojo (bien distinguible)
-   - Series: por Año, Trimestre, Mes (ordenado y no “todo igual”)
-   - Rankings: meses (1..12 con medallas) y días de semana (vertical)
-   - Diagnóstico final (para debug cuando “sin datos”)
+   Props
 ========================================================= */
 
 type Props = {
   filePath: string;
   year: number;
   baseYear: number;
-  /** "" => todos; "MAITEI" => sólo Maitei */
+
+  /** "" => todos; si viene "MAITEI" => sólo ese */
   hotelFilter: string;
 };
 
-/* =========================
-   UI primitives (self-contained)
-========================= */
+/* =========================================================
+   Helpers (keys, fechas, normalización)
+========================================================= */
 
-function Card({
-  children,
-  style,
-  className,
-}: React.PropsWithChildren<{ style?: React.CSSProperties; className?: string }>) {
-  return (
-    <div
-      className={className ?? "card"}
-      style={{
-        padding: "1rem",
-        borderRadius: 18,
-        border: "1px solid rgba(255,255,255,.12)",
-        background: "rgba(255,255,255,.05)",
-        boxShadow: "0 18px 38px rgba(0,0,0,.20)",
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  );
+function normKey(s: string): string {
+  return String(s ?? "")
+    .toLowerCase()
+    .replace(/\u00a0/g, " ")
+    .replace(/[“”"]/g, "")
+    .replace(/\./g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function SectionHeader({
-  title,
-  desc,
-  right,
-}: {
-  title: string;
-  desc?: string;
-  right?: React.ReactNode;
-}) {
-  return (
-    <div style={{ display: "flex", gap: ".75rem", alignItems: "flex-start", justifyContent: "space-between" }}>
-      <div>
-        <div style={{ fontSize: "1.2rem", fontWeight: 950 }}>{title}</div>
-        {desc ? <div style={{ opacity: 0.8, marginTop: ".25rem" }}>{desc}</div> : null}
-      </div>
-      {right ? <div>{right}</div> : null}
-    </div>
-  );
-}
+function pickKey(keys: string[], candidates: string[]): string {
+  const K = keys.map((k) => ({ raw: k, n: normKey(k) }));
 
-type Tone = "jcr" | "gotel" | "neutral";
-function toneFromHotel(h: string): Tone {
-  return String(h ?? "").toUpperCase() === "MAITEI" ? "gotel" : h ? "jcr" : "neutral";
-}
-
-function toneGradient(t: Tone) {
-  if (t === "gotel") return "linear-gradient(135deg, rgba(56,189,248,.95), rgba(37,99,235,.85))"; // celeste->azul
-  if (t === "jcr") return "linear-gradient(135deg, rgba(220,38,38,.95), rgba(124,58,237,.85))"; // rojo->violeta
-  return "linear-gradient(135deg, rgba(255,255,255,.20), rgba(255,255,255,.06))";
-}
-
-function toneBorder(t: Tone) {
-  if (t === "gotel") return "rgba(56,189,248,.45)";
-  if (t === "jcr") return "rgba(220,38,38,.45)";
-  return "rgba(255,255,255,.18)";
-}
-
-function toneSoftBg(t: Tone) {
-  if (t === "gotel") return "rgba(56,189,248,.10)";
-  if (t === "jcr") return "rgba(220,38,38,.10)";
-  return "rgba(255,255,255,.06)";
-}
-
-function Pill({
-  children,
-  active,
-  onClick,
-  tone,
-  title,
-}: React.PropsWithChildren<{
-  active?: boolean;
-  onClick?: () => void;
-  tone: Tone;
-  title?: string;
-}>) {
-  return (
-    <button
-      title={title}
-      onClick={onClick}
-      style={{
-        cursor: "pointer",
-        borderRadius: 999,
-        padding: ".45rem .75rem",
-        border: `1px solid ${active ? toneBorder(tone) : "rgba(255,255,255,.14)"}`,
-        background: active ? toneGradient(tone) : "rgba(255,255,255,.05)",
-        color: "white",
-        fontWeight: 900,
-        fontSize: ".9rem",
-        opacity: active ? 1 : 0.88,
-        boxShadow: active ? "0 14px 30px rgba(0,0,0,.25)" : "none",
-        transition: "all .15s ease",
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function BadgeDelta({ v }: { v: number }) {
-  const up = v >= 0;
-  // verde bien “visible”
-  const good = "#22c55e"; // green-500
-  const bad = "#ef4444"; // red-500
-  return (
-    <span style={{ fontWeight: 950, color: up ? good : bad }}>
-      {(v * 100).toFixed(1)}%
-    </span>
-  );
-}
-
-function Bar({
-  pct,
-  tone,
-}: {
-  pct: number; // 0..100
-  tone: Tone;
-}) {
-  const fill =
-    tone === "gotel"
-      ? "linear-gradient(90deg, rgba(56,189,248,.95), rgba(37,99,235,.65))"
-      : tone === "jcr"
-      ? "linear-gradient(90deg, rgba(220,38,38,.95), rgba(124,58,237,.65))"
-      : "linear-gradient(90deg, rgba(255,255,255,.35), rgba(255,255,255,.12))";
-
-  return (
-    <div style={{ height: 12, borderRadius: 999, background: "rgba(255,255,255,.10)", overflow: "hidden" }}>
-      <div style={{ width: `${Math.max(0, Math.min(100, pct))}%`, height: "100%", background: fill }} />
-    </div>
-  );
-}
-
-/* =========================
-   Helpers de fechas / labels
-========================= */
-
-const MONTHS_SHORT = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
-const MONTHS_LONG = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
-const WEEKDAYS = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
-
-function monthName(m: number, long = false) {
-  return (long ? MONTHS_LONG : MONTHS_SHORT)[m] ?? String(m + 1);
-}
-function quarterOfMonth(m: number): 1 | 2 | 3 | 4 {
-  if (m <= 2) return 1;
-  if (m <= 5) return 2;
-  if (m <= 8) return 3;
-  return 4;
-}
-function weekdayName(d: number) {
-  return WEEKDAYS[d] ?? String(d);
-}
-
-function medal(i: number) {
-  if (i === 0) return "🥇";
-  if (i === 1) return "🥈";
-  if (i === 2) return "🥉";
-  return `${i + 1}.`;
+  // match exact
+  for (const c of candidates) {
+    const cn = normKey(c);
+    const hit = K.find((x) => x.n === cn);
+    if (hit) return hit.raw;
+  }
+  // match contains
+  for (const c of candidates) {
+    const cn = normKey(c);
+    const hit = K.find((x) => x.n.includes(cn));
+    if (hit) return hit.raw;
+  }
+  return "";
 }
 
 function parseDateSmart(v: any): Date | null {
@@ -194,7 +57,7 @@ function parseDateSmart(v: any): Date | null {
   const s = String(v).trim();
   if (!s) return null;
 
-  // dd/mm/yyyy
+  // dd/mm/yyyy (preferido por "Fecha")
   const m1 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (m1) {
     const dd = Number(m1[1]);
@@ -204,7 +67,7 @@ function parseDateSmart(v: any): Date | null {
     return Number.isNaN(d.getTime()) ? null : d;
   }
 
-  // dd-mm-yy ...
+  // dd-mm-yy (a veces aparece en Date "01-06-22 Wed")
   const m2 = s.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})/);
   if (m2) {
     const dd = Number(m2[1]);
@@ -221,220 +84,353 @@ function parseDateSmart(v: any): Date | null {
   return null;
 }
 
-/* =========================
-   Key picking (robusto)
-========================= */
-
-function normKey(s: string): string {
-  return String(s ?? "")
-    .toLowerCase()
-    .replace(/\u00a0/g, " ")
-    .replace(/[“”"]/g, "")
-    .replace(/\./g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+function monthName(m: number): string {
+  return ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"][m] ?? String(m + 1);
 }
 
-function pickKey(keys: string[], candidates: string[]): string {
-  const K = keys.map((k) => ({ raw: k, n: normKey(k) }));
-
-  for (const c of candidates) {
-    const cn = normKey(c);
-    const hit = K.find((x) => x.n === cn);
-    if (hit) return hit.raw;
-  }
-  for (const c of candidates) {
-    const cn = normKey(c);
-    const hit = K.find((x) => x.n.includes(cn));
-    if (hit) return hit.raw;
-  }
-  return "";
+function monthLong(m: number): string {
+  return ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"][m] ?? String(m + 1);
 }
 
-/* =========================
-   Modelo de datos
-========================= */
+function quarterOfMonth(m: number): 1 | 2 | 3 | 4 {
+  if (m <= 2) return 1;
+  if (m <= 5) return 2;
+  if (m <= 8) return 3;
+  return 4;
+}
+
+function weekdayName(d: number): string {
+  // 0 Domingo, 1 Lunes...
+  return ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"][d] ?? String(d);
+}
+
+function formatInt(n: number): string {
+  return Math.round(n).toLocaleString("es-AR");
+}
+
+function formatMoneyUsd(n: number): string {
+  return n.toLocaleString("es-AR", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+}
+
+function formatPct01(n: number): string {
+  return (n * 100).toFixed(1) + "%";
+}
+
+function safeDiv(a: number, b: number): number {
+  if (!b) return 0;
+  return a / b;
+}
+
+function deltaPct(cur: number, base: number): number {
+  if (!base) return 0;
+  return (cur - base) / base;
+}
+
+type Tone = "jcr" | "gotel";
+
+function toneForHotel(hotelFilter: string): Tone {
+  // IMPORTANTE: si es "Todos" (""), sigue siendo JCR (rojo/violeta)
+  return String(hotelFilter ?? "").toUpperCase() === "MAITEI" ? "gotel" : "jcr";
+}
+
+function gradMain(tone: Tone): string {
+  // JCR rojo->violeta, GOTEL celeste->azul
+  return tone === "jcr"
+    ? "linear-gradient(135deg, rgba(220,38,38,.95), rgba(139,92,246,.70))"
+    : "linear-gradient(135deg, rgba(14,165,233,.95), rgba(59,130,246,.75))";
+}
+
+function gradBar(tone: Tone): string {
+  return tone === "jcr"
+    ? "linear-gradient(90deg, rgba(220,38,38,.95), rgba(139,92,246,.70))"
+    : "linear-gradient(90deg, rgba(14,165,233,.95), rgba(59,130,246,.75))";
+}
+
+function subtleBg(tone: Tone): string {
+  return tone === "jcr" ? "rgba(220,38,38,.07)" : "rgba(14,165,233,.07)";
+}
+
+function medal(rank: number): string {
+  if (rank === 1) return "🥇";
+  if (rank === 2) return "🥈";
+  if (rank === 3) return "🥉";
+  return "🏅";
+}
+
+function deltaColor(delta: number): string {
+  // verde/rojo bien distinguible
+  if (delta > 0.0005) return "#22c55e"; // green-500
+  if (delta < -0.0005) return "#ef4444"; // red-500
+  return "rgba(255,255,255,.75)";
+}
+
+/* =========================================================
+   Modelado de filas H&F
+========================================================= */
 
 type HfRow = {
   empresa: string;
-  hof: string; // History/Forecast
+  hof: string; // History / Forecast
   date: Date;
   year: number;
   month: number; // 0-11
   quarter: 1 | 2 | 3 | 4;
   weekday: number; // 0-6
 
-  occPct: number; // 0..1
-  occRooms: number; // Total Occ.
-  revenue: number; // Room Revenue
+  occRooms: number; // "Total Occ."
+  occPct: number; // Occ.% 0..1
+  roomRevenue: number;
 };
 
 type Agg = {
   key: string;
   countDays: number;
 
-  sumOccPct: number;
-  sumOccRooms: number;
+  sumOccPct: number; // promedio simple por día
   sumRevenue: number;
+  sumOccRooms: number;
 };
 
 function emptyAgg(key: string): Agg {
-  return { key, countDays: 0, sumOccPct: 0, sumOccRooms: 0, sumRevenue: 0 };
+  return {
+    key,
+    countDays: 0,
+    sumOccPct: 0,
+    sumRevenue: 0,
+    sumOccRooms: 0,
+  };
 }
 
 function addAgg(a: Agg, r: HfRow) {
   a.countDays += 1;
   a.sumOccPct += r.occPct;
+  a.sumRevenue += r.roomRevenue;
   a.sumOccRooms += r.occRooms;
-  a.sumRevenue += r.revenue;
 }
 
 function finalizeAgg(a: Agg) {
-  const avgOcc = safeDiv(a.sumOccPct, a.countDays);
+  const avgOcc = a.countDays ? a.sumOccPct / a.countDays : 0;
+  const revenueTotal = a.sumRevenue;
+  const occRoomsTotal = a.sumOccRooms;
+
   return {
     ...a,
     avgOcc,
-    totalRoomsOcc: a.sumOccRooms,
-    totalRevenue: a.sumRevenue,
+    revenueTotal,
+    occRoomsTotal,
   };
 }
 
-function deltaPct(cur: number, base: number) {
-  return base === 0 ? 0 : (cur - base) / base;
-}
+/* =========================================================
+   UI bits
+========================================================= */
 
-/* =========================
-   Ranking row (cards)
-========================= */
-
-function RankRow({
-  idx,
-  label,
-  occ,
-  revenue,
-  maxOcc,
-  tone,
-}: {
-  idx: number;
-  label: string;
-  occ: number;
-  revenue: number;
-  maxOcc: number;
-  tone: Tone;
-}) {
-  const occPct = occ * 100;
-  const w = maxOcc > 0 ? (occ / maxOcc) * 100 : 0;
-
-  // pequeños acentos por posición
-  const accent =
-    idx === 0 ? "rgba(34,197,94,.18)" :
-    idx === 1 ? "rgba(56,189,248,.18)" :
-    idx === 2 ? "rgba(245,158,11,.18)" :
-    "rgba(255,255,255,.06)";
-
+function Card({
+  children,
+  style,
+}: React.PropsWithChildren<{ style?: React.CSSProperties }>) {
   return (
     <div
+      className="card"
       style={{
-        padding: ".8rem",
-        borderRadius: 16,
+        padding: "1rem",
+        borderRadius: 18,
+        background: "rgba(255,255,255,.06)",
         border: "1px solid rgba(255,255,255,.12)",
-        background: accent,
-        display: "grid",
-        gap: ".5rem",
+        boxShadow: "0 16px 34px rgba(0,0,0,.18)",
+        ...style,
       }}
     >
-      <div style={{ display: "flex", justifyContent: "space-between", gap: ".75rem", alignItems: "center" }}>
-        <div style={{ fontWeight: 950 }}>
-          <span style={{ marginRight: ".45rem" }}>{medal(idx)}</span>
-          {label}
-        </div>
-        <div style={{ fontWeight: 950, opacity: 0.95 }}>{occPct.toFixed(1)}%</div>
-      </div>
-
-      <Bar pct={w} tone={tone} />
-
-      <div style={{ display: "flex", justifyContent: "space-between", opacity: 0.9 }}>
-        <div style={{ fontWeight: 850 }}>Revenue</div>
-        <div style={{ fontWeight: 950 }}>{formatMoney(revenue)}</div>
-      </div>
+      {children}
     </div>
   );
 }
 
-/* =========================
-   Carrusel grande (1 visible)
-========================= */
-
-type Slide = {
-  title: string;
-  value: string;
-  delta: number; // ratio
-  sub: string;
-};
-
-function BigCarousel({
+function BigKpiCarousel({
   tone,
-  slides,
-  intervalMs = 5000,
+  items,
+  intervalMs = 4500,
 }: {
   tone: Tone;
-  slides: Slide[];
+  items: {
+    label: string;
+    value: string;
+    baseText: string; // "Base 2024: ..."
+    deltaText: string; // "Δ +2.1%"
+    delta: number;
+  }[];
   intervalMs?: number;
 }) {
   const [idx, setIdx] = useState(0);
 
   useEffect(() => {
-    if (!slides.length) return;
-    const t = setInterval(() => setIdx((i) => (i + 1) % slides.length), intervalMs);
-    return () => clearInterval(t);
-  }, [slides.length, intervalMs]);
+    if (!items.length) return;
+    const t = window.setInterval(() => {
+      setIdx((p) => (p + 1) % items.length);
+    }, intervalMs);
+    return () => window.clearInterval(t);
+  }, [items.length, intervalMs]);
 
-  const s = slides[idx] ?? slides[0];
-
-  const deltaColor = s.delta >= 0 ? "#22c55e" : "#ef4444";
+  const it = items[idx] ?? items[0];
 
   return (
     <div
       style={{
         borderRadius: 22,
-        padding: "1.35rem",
-        color: "white",
-        position: "relative",
+        border: "1px solid rgba(255,255,255,.14)",
+        background: "rgba(255,255,255,.05)",
         overflow: "hidden",
-        border: `1px solid ${toneBorder(tone)}`,
-        boxShadow: "0 22px 45px rgba(0,0,0,.28)",
-        background: toneGradient(tone),
+        position: "relative",
+        minHeight: 140,
       }}
     >
-      <div style={{ position: "absolute", inset: 0, opacity: 0.18, background: "radial-gradient(circle at 30% 20%, rgba(255,255,255,.35), transparent 60%)" }} />
-      <div style={{ position: "relative" }}>
-        <div style={{ opacity: 0.9, fontWeight: 900, letterSpacing: ".2px" }}>{s.title}</div>
-        <div style={{ marginTop: ".35rem", fontSize: "2.35rem", fontWeight: 950, lineHeight: 1.05 }}>{s.value}</div>
-
-        <div style={{ marginTop: ".35rem", display: "flex", gap: ".75rem", alignItems: "baseline" }}>
-          <div style={{ fontWeight: 950, color: deltaColor, textShadow: "0 2px 12px rgba(0,0,0,.35)" }}>
-            {(s.delta * 100).toFixed(1)}%
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          background: gradMain(tone),
+          opacity: 0.22,
+        }}
+      />
+      <div style={{ position: "relative", padding: "1.15rem 1.2rem" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: ".6rem" }}>
+          <div style={{ fontSize: ".95rem", fontWeight: 900, opacity: 0.9 }}>{it?.label}</div>
+          <div style={{ marginLeft: "auto", display: "flex", gap: ".35rem" }}>
+            {items.map((_, i) => (
+              <div
+                key={i}
+                style={{
+                  width: 9,
+                  height: 9,
+                  borderRadius: 999,
+                  background: i === idx ? "rgba(255,255,255,.9)" : "rgba(255,255,255,.28)",
+                }}
+              />
+            ))}
           </div>
-          <div style={{ opacity: 0.9 }}>{s.sub}</div>
         </div>
 
-        {/* dots */}
-        <div style={{ marginTop: "1rem", display: "flex", gap: ".5rem" }}>
-          {slides.map((_, i) => (
-            <div
-              key={i}
-              onClick={() => setIdx(i)}
-              style={{
-                cursor: "pointer",
-                width: i === idx ? 22 : 10,
-                height: 10,
-                borderRadius: 999,
-                background: i === idx ? "rgba(255,255,255,.92)" : "rgba(255,255,255,.35)",
-                transition: "all .15s ease",
-              }}
-              title={`Slide ${i + 1}`}
-            />
-          ))}
+        <div style={{ marginTop: ".55rem", fontSize: "2.3rem", fontWeight: 950, letterSpacing: -0.3 }}>
+          {it?.value}
+        </div>
+
+        <div style={{ marginTop: ".25rem", display: "flex", gap: ".75rem", flexWrap: "wrap", alignItems: "baseline" }}>
+          <div style={{ opacity: 0.82 }}>{it?.baseText}</div>
+          <div style={{ fontWeight: 950, color: deltaColor(it?.delta ?? 0) }}>{it?.deltaText}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BarRow({
+  label,
+  valueRight,
+  pctWidth,
+  tone,
+  subLeft,
+}: {
+  label: string;
+  valueRight: string;
+  pctWidth: number;
+  tone: Tone;
+  subLeft?: string;
+}) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "240px 1fr 140px",
+        gap: ".85rem",
+        alignItems: "center",
+        padding: ".55rem .6rem",
+        borderRadius: 14,
+        background: "rgba(255,255,255,.03)",
+        border: "1px solid rgba(255,255,255,.08)",
+      }}
+    >
+      <div>
+        <div style={{ fontWeight: 900, opacity: 0.95 }}>{label}</div>
+        {subLeft ? <div style={{ marginTop: ".15rem", fontSize: ".9rem", opacity: 0.75 }}>{subLeft}</div> : null}
+      </div>
+
+      <div style={{ height: 12, borderRadius: 999, background: "rgba(255,255,255,.10)", overflow: "hidden" }}>
+        <div style={{ width: `${Math.max(0, Math.min(100, pctWidth))}%`, height: "100%", background: gradBar(tone) }} />
+      </div>
+
+      <div style={{ textAlign: "right", fontWeight: 950 }}>{valueRight}</div>
+    </div>
+  );
+}
+
+function RankRow({
+  tone,
+  rank,
+  label,
+  occ,
+  revenue,
+  maxOcc,
+}: {
+  tone: Tone;
+  rank: number;
+  label: string;
+  occ: number;
+  revenue: number;
+  maxOcc: number;
+}) {
+  const w = safeDiv(occ, maxOcc) * 100;
+
+  return (
+    <div
+      style={{
+        borderRadius: 18,
+        border: "1px solid rgba(255,255,255,.12)",
+        background: "rgba(255,255,255,.05)",
+        overflow: "hidden",
+        position: "relative",
+      }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          background: gradMain(tone),
+          opacity: 0.08,
+        }}
+      />
+      <div style={{ position: "relative", padding: ".8rem .9rem" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: ".65rem", marginBottom: ".55rem" }}>
+          <div
+            style={{
+              minWidth: 62,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: ".35rem",
+              padding: ".35rem .55rem",
+              borderRadius: 999,
+              background: subtleBg(tone),
+              border: "1px solid rgba(255,255,255,.14)",
+              fontWeight: 950,
+            }}
+          >
+            <span>{medal(rank)}</span>
+            <span>#{rank}</span>
+          </div>
+
+          <div style={{ fontWeight: 950, opacity: 0.95 }}>{label}</div>
+
+          <div style={{ marginLeft: "auto", fontWeight: 950 }}>
+            {formatPct01(occ)}
+          </div>
+        </div>
+
+        <div style={{ height: 10, borderRadius: 999, background: "rgba(255,255,255,.10)", overflow: "hidden" }}>
+          <div style={{ width: `${Math.max(0, Math.min(100, w))}%`, height: "100%", background: gradBar(tone) }} />
+        </div>
+
+        <div style={{ marginTop: ".55rem", opacity: 0.8 }}>
+          Revenue: <b>{formatMoneyUsd(revenue)}</b>
         </div>
       </div>
     </div>
@@ -442,40 +438,43 @@ function BigCarousel({
 }
 
 /* =========================================================
-   Main
+   Main component
 ========================================================= */
 
 export default function YearComparator({ filePath, year, baseYear, hotelFilter }: Props) {
-  const tone = toneFromHotel(hotelFilter);
+  const tone = toneForHotel(hotelFilter);
 
   const { rows, loading, error } = useCsvClient(filePath);
 
   // filtros locales
   const [hofMode, setHofMode] = useState<"ALL" | "HISTORY" | "FORECAST">("ALL");
   const [quarter, setQuarter] = useState<0 | 1 | 2 | 3 | 4>(0);
-  const [month, setMonth] = useState<number>(-1); // -1 todos
+  const [month, setMonth] = useState<number>(-1); // -1 => todos
 
   const keys = useMemo(() => Object.keys(rows?.[0] ?? {}), [rows]);
 
-  // keys detectadas
+  // keys del CSV (robusto)
   const kEmpresa = useMemo(() => pickKey(keys, ["Empresa", "Hotel", "Property"]), [keys]);
   const kFecha = useMemo(() => pickKey(keys, ["Fecha", "Date"]), [keys]);
-  const kHoF = useMemo(() => pickKey(keys, ["HoF", "Hof", "HOF", "History", "Forecast"]), [keys]);
+  const kHoF = useMemo(() => pickKey(keys, ["HoF", "Hof", "HOF"]), [keys]);
 
-  const kOccPct = useMemo(() => pickKey(keys, ["Occ.%", "Occ %", "Occ%", "Occupancy", "OCC"]), [keys]);
-  const kOccRooms = useMemo(() => pickKey(keys, ['Total Occ.', "Total Occ", "Rooms Occupied"]), [keys]);
+  const kOccPct = useMemo(() => pickKey(keys, ["Occ.%", "Occ %", "Occ%", "Occupancy"]), [keys]);
+  const kOccRooms = useMemo(() => pickKey(keys, ["Total Occ.", "Total Occ", "Rooms Occupied", "Total Occu"]), [keys]);
   const kRev = useMemo(() => pickKey(keys, ["Room Revenue", "RoomRevenue", "Revenue"]), [keys]);
 
   const normalized: HfRow[] = useMemo(() => {
     if (!rows?.length) return [];
 
-    const target = String(hotelFilter ?? "").trim().toUpperCase();
+    const hfFilter = String(hotelFilter ?? "").trim();
+    const target = hfFilter ? hfFilter.toUpperCase() : "";
+
     const out: HfRow[] = [];
 
-    for (const r of rows as any[]) {
+    for (const r of rows as CsvRow[]) {
       const empresa = String(r[kEmpresa] ?? "").trim();
       if (!empresa) continue;
 
+      // filtro exacto por Empresa (sin mezclar Sheratons)
       if (target && empresa.toUpperCase() !== target) continue;
 
       const d = parseDateSmart(r[kFecha]);
@@ -488,9 +487,9 @@ export default function YearComparator({ filePath, year, baseYear, hotelFilter }
       const qq = quarterOfMonth(mm);
       const wd = d.getDay();
 
-      const occ = pct01(r[kOccPct]);
+      const occPct01 = pct01(r[kOccPct]); // soporta "59,40%"
       const occRooms = num(r[kOccRooms]);
-      const revenue = num(r[kRev]);
+      const roomRevenue = num(r[kRev]);
 
       out.push({
         empresa,
@@ -500,9 +499,9 @@ export default function YearComparator({ filePath, year, baseYear, hotelFilter }
         month: mm,
         quarter: qq,
         weekday: wd,
-        occPct: occ,
         occRooms,
-        revenue,
+        occPct: occPct01,
+        roomRevenue,
       });
     }
 
@@ -510,49 +509,54 @@ export default function YearComparator({ filePath, year, baseYear, hotelFilter }
     return out;
   }, [rows, kEmpresa, kFecha, kHoF, kOccPct, kOccRooms, kRev, hotelFilter]);
 
-  // filtros aplicados a un año específico
-  function applyFilters(list: HfRow[], y: number) {
-    let out = list.filter((r) => r.year === y);
+  const filtered = useMemo(() => {
+    const y = year;
+    let list = normalized.filter((r) => r.year === y);
 
     if (hofMode !== "ALL") {
       const want = hofMode === "HISTORY" ? "history" : "forecast";
-      out = out.filter((r) => String(r.hof).toLowerCase().includes(want));
+      list = list.filter((r) => String(r.hof).toLowerCase().includes(want));
     }
 
-    if (quarter !== 0) out = out.filter((r) => r.quarter === quarter);
-    if (month !== -1) out = out.filter((r) => r.month === month);
+    if (quarter !== 0) list = list.filter((r) => r.quarter === quarter);
+    if (month !== -1) list = list.filter((r) => r.month === month);
 
-    return out;
-  }
+    return list;
+  }, [normalized, year, hofMode, quarter, month]);
 
-  const cur = useMemo(() => applyFilters(normalized, year), [normalized, year, hofMode, quarter, month]);
-  const base = useMemo(() => applyFilters(normalized, baseYear), [normalized, baseYear, hofMode, quarter, month]);
+  const baseFiltered = useMemo(() => {
+    const y = baseYear;
+    let list = normalized.filter((r) => r.year === y);
 
-  // meses disponibles para el año seleccionado (para pills)
-  const monthsInYear = useMemo(() => {
-    const set = new Set<number>();
-    for (const r of normalized) if (r.year === year) set.add(r.month);
-    return Array.from(set.values()).sort((a, b) => a - b);
-  }, [normalized, year]);
+    if (hofMode !== "ALL") {
+      const want = hofMode === "HISTORY" ? "history" : "forecast";
+      list = list.filter((r) => String(r.hof).toLowerCase().includes(want));
+    }
 
-  // KPI agregados
+    if (quarter !== 0) list = list.filter((r) => r.quarter === quarter);
+    if (month !== -1) list = list.filter((r) => r.month === month);
+
+    return list;
+  }, [normalized, baseYear, hofMode, quarter, month]);
+
   const kpis = useMemo(() => {
     const a = emptyAgg("cur");
-    cur.forEach((r) => addAgg(a, r));
-    const curAgg = finalizeAgg(a);
+    for (const r of filtered) addAgg(a, r);
+    const cur = finalizeAgg(a);
 
     const b = emptyAgg("base");
-    base.forEach((r) => addAgg(b, r));
-    const baseAgg = finalizeAgg(b);
+    for (const r of baseFiltered) addAgg(b, r);
+    const base = finalizeAgg(b);
 
-    const occDelta = deltaPct(curAgg.avgOcc, baseAgg.avgOcc);
-    const revDelta = deltaPct(curAgg.totalRevenue, baseAgg.totalRevenue);
-    const roomsDelta = deltaPct(curAgg.totalRoomsOcc, baseAgg.totalRoomsOcc);
+    return {
+      cur,
+      base,
+      occDelta: deltaPct(cur.avgOcc, base.avgOcc),
+      revDelta: deltaPct(cur.revenueTotal, base.revenueTotal),
+      occRoomsDelta: deltaPct(cur.occRoomsTotal, base.occRoomsTotal),
+    };
+  }, [filtered, baseFiltered]);
 
-    return { curAgg, baseAgg, occDelta, revDelta, roomsDelta };
-  }, [cur, base]);
-
-  // series por año (contexto general del dataset ya filtrado por hotel)
   const aggByYear = useMemo(() => {
     const map = new Map<string, Agg>();
     for (const r of normalized) {
@@ -561,96 +565,96 @@ export default function YearComparator({ filePath, year, baseYear, hotelFilter }
       addAgg(a, r);
       map.set(key, a);
     }
-    return Array.from(map.values()).map(finalizeAgg).sort((a, b) => Number(a.key) - Number(b.key));
+    return Array.from(map.values())
+      .map(finalizeAgg)
+      .sort((a, b) => Number(a.key) - Number(b.key));
   }, [normalized]);
 
-  // serie por trimestre (respetando filtros de H/F, mes no; usamos “cur” del año actual pero sin month filter para que no quede todo igual)
   const aggByQuarter = useMemo(() => {
-    const list = applyFilters(normalized, year).filter((r) => month === -1 ? true : true); // mantenemos, pero no dependemos de month
     const map = new Map<string, Agg>();
-    for (const r of list) {
+    for (const r of filtered) {
       const key = `Q${r.quarter}`;
       const a = map.get(key) ?? emptyAgg(key);
       addAgg(a, r);
       map.set(key, a);
     }
-    return Array.from(map.values()).map(finalizeAgg).sort((a, b) => a.key.localeCompare(b.key));
-  }, [normalized, year, hofMode, quarter, month]);
+    return Array.from(map.values())
+      .map(finalizeAgg)
+      .sort((a, b) => a.key.localeCompare(b.key));
+  }, [filtered]);
 
-  // serie por mes (orden cronológico, respetando filtros; si estás filtrando por trimestre, queda por mes dentro del trimestre)
   const aggByMonth = useMemo(() => {
-    const list = applyFilters(normalized, year);
-    const map = new Map<number, Agg>();
-    for (const r of list) {
-      const key = r.month;
-      const a = map.get(key) ?? emptyAgg(String(key));
+    const map = new Map<string, Agg>();
+    for (const r of filtered) {
+      const key = `${r.month}`; // 0..11
+      const a = map.get(key) ?? emptyAgg(key);
       addAgg(a, r);
       map.set(key, a);
     }
-    return Array.from(map.entries())
-      .map(([m, a]) => ({ m, ...finalizeAgg(a) }))
-      .sort((a, b) => a.m - b.m);
-  }, [normalized, year, hofMode, quarter, month]);
+    return Array.from(map.values())
+      .map((a) => ({ ...finalizeAgg(a), monthIdx: Number(a.key) }))
+      .sort((a, b) => a.monthIdx - b.monthIdx);
+  }, [filtered]);
 
-  // ranking de meses por ocupación (siempre 1..12 cuando hay data)
   const monthRanking = useMemo(() => {
-    const list = applyFilters(normalized, year);
-    const map = new Map<number, Agg>();
-    for (const r of list) {
-      const a = map.get(r.month) ?? emptyAgg(String(r.month));
-      addAgg(a, r);
-      map.set(r.month, a);
-    }
-    const items = Array.from(map.entries()).map(([m, a]) => {
-      const f = finalizeAgg(a);
-      return { m, label: `${m + 1}. ${monthName(m, true)}`, occ: f.avgOcc, revenue: f.totalRevenue };
-    });
-    return items.sort((a, b) => b.occ - a.occ);
-  }, [normalized, year, hofMode, quarter, month]);
+    const list = aggByMonth.map((a: any) => ({
+      label: monthLong(a.monthIdx),
+      occ: a.avgOcc,
+      revenue: a.revenueTotal,
+    }));
+    return [...list].sort((a, b) => b.occ - a.occ).slice(0, 12);
+  }, [aggByMonth]);
 
-  // ranking por día de semana por ocupación
   const weekdayRanking = useMemo(() => {
-    const list = applyFilters(normalized, year);
     const map = new Map<number, Agg>();
-    for (const r of list) {
+    for (const r of filtered) {
       const a = map.get(r.weekday) ?? emptyAgg(String(r.weekday));
       addAgg(a, r);
       map.set(r.weekday, a);
     }
-    const items = Array.from(map.entries()).map(([wd, a]) => {
+    const list = Array.from(map.entries()).map(([wd, a]) => {
       const f = finalizeAgg(a);
-      return { wd, label: weekdayName(wd), occ: f.avgOcc, revenue: f.totalRevenue };
+      return { wd, label: weekdayName(wd), occ: f.avgOcc, revenue: f.revenueTotal };
     });
-    return items.sort((a, b) => b.occ - a.occ);
-  }, [normalized, year, hofMode, quarter, month]);
+    return list.sort((a, b) => b.occ - a.occ);
+  }, [filtered]);
 
-  // slides del carrusel grande (solo 3)
-  const slides: Slide[] = useMemo(() => {
+  const monthsInYear = useMemo(() => {
+    const set = new Set<number>();
+    for (const r of normalized) {
+      if (r.year === year) set.add(r.month);
+    }
+    return Array.from(set.values()).sort((a, b) => a - b);
+  }, [normalized, year]);
+
+  const carouselItems = useMemo(() => {
+    const cur = kpis.cur;
+    const base = kpis.base;
+
     return [
       {
-        title: "Ocupación promedio",
-        value: (kpis.curAgg.avgOcc * 100).toFixed(1) + "%",
+        label: "Ocupación promedio",
+        value: formatPct01(cur.avgOcc),
+        baseText: `Base ${baseYear}: ${formatPct01(base.avgOcc)}`,
+        deltaText: `Δ ${(kpis.occDelta * 100).toFixed(1)}%`,
         delta: kpis.occDelta,
-        sub: `vs ${baseYear}: ${(kpis.baseAgg.avgOcc * 100).toFixed(1)}%`,
       },
       {
-        title: "Revenue total",
-        value: formatMoney(kpis.curAgg.totalRevenue),
+        label: "Revenue total",
+        value: formatMoneyUsd(cur.revenueTotal),
+        baseText: `Base ${baseYear}: ${formatMoneyUsd(base.revenueTotal)}`,
+        deltaText: `Δ ${(kpis.revDelta * 100).toFixed(1)}%`,
         delta: kpis.revDelta,
-        sub: `vs ${baseYear}: ${formatMoney(kpis.baseAgg.totalRevenue)}`,
       },
       {
-        title: "Habitaciones ocupadas",
-        value: Math.round(kpis.curAgg.totalRoomsOcc).toLocaleString("es-AR"),
-        delta: kpis.roomsDelta,
-        sub: `vs ${baseYear}: ${Math.round(kpis.baseAgg.totalRoomsOcc).toLocaleString("es-AR")}`,
+        label: "Habitaciones ocupadas",
+        value: formatInt(cur.occRoomsTotal),
+        baseText: `Base ${baseYear}: ${formatInt(base.occRoomsTotal)}`,
+        deltaText: `Δ ${(kpis.occRoomsDelta * 100).toFixed(1)}%`,
+        delta: kpis.occRoomsDelta,
       },
     ];
   }, [kpis, baseYear]);
-
-  /* =========================
-     Estados de carga/errores
-  ========================= */
 
   if (loading) {
     return (
@@ -676,204 +680,155 @@ export default function YearComparator({ filePath, year, baseYear, hotelFilter }
       <Card>
         <div style={{ fontWeight: 950 }}>Sin datos de H&F</div>
         <div style={{ opacity: 0.8, marginTop: ".35rem" }}>
-          No se encontraron filas. Revisá columnas <b>Empresa</b> y <b>Fecha</b>.
+          No se encontraron filas. Revisá que el CSV tenga columnas <b>Empresa</b> y <b>Fecha</b>.
         </div>
         <div style={{ opacity: 0.7, marginTop: ".5rem", fontSize: ".9rem" }}>
-          Detectado: Empresa=<b>{kEmpresa || "—"}</b> · Fecha=<b>{kFecha || "—"}</b> · HoF=<b>{kHoF || "—"}</b> · Occ%=<b>{kOccPct || "—"}</b> · TotalOcc=<b>{kOccRooms || "—"}</b> · Revenue=<b>{kRev || "—"}</b>
+          Detectado: Empresa={kEmpresa || "—"} · Fecha={kFecha || "—"} · HoF={kHoF || "—"} · Occ%={kOccPct || "—"} · TotalOcc={kOccRooms || "—"} · Revenue={kRev || "—"}
         </div>
       </Card>
     );
   }
 
-  /* =========================
-     Render
-  ========================= */
-
-  const headerTitle = `History & Forecast — ${hotelFilter ? hotelFilter : "Todos"} · ${year} vs ${baseYear}`;
-  const headerDesc = "KPIs + comparativa + series por Año/Trimestre/Mes + rankings por % ocupación (y revenue).";
-
-  // para barras: máximos
-  const maxYearOcc = Math.max(...aggByYear.map((a) => a.avgOcc), 0.00001);
-  const maxQOcc = Math.max(...aggByQuarter.map((a) => a.avgOcc), 0.00001);
-  const maxMOcc = Math.max(...aggByMonth.map((a) => a.avgOcc), 0.00001);
-  const maxRankMOcc = Math.max(...monthRanking.map((x) => x.occ), 0.00001);
-  const maxRankWOcc = Math.max(...weekdayRanking.map((x) => x.occ), 0.00001);
+  const maxOccMonthSeries = Math.max(...aggByMonth.map((a: any) => a.avgOcc), 0.00001);
+  const maxOccYear = Math.max(...aggByYear.map((a: any) => a.avgOcc), 0.00001);
+  const maxOccQuarter = Math.max(...aggByQuarter.map((a: any) => a.avgOcc), 0.00001);
+  const maxOccMonthRank = Math.max(...monthRanking.map((x) => x.occ), 0.00001);
+  const maxOccWeekRank = Math.max(...weekdayRanking.map((x) => x.occ), 0.00001);
 
   return (
     <section className="section" style={{ display: "grid", gap: "1.25rem" }}>
-      {/* Header + H/F selector */}
-      <Card style={{ padding: "1rem", borderRadius: 18, background: toneSoftBg(tone) }}>
-        <SectionHeader
-          title={headerTitle}
-          desc={headerDesc}
-          right={
-            <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
-              <Pill tone={tone} active={hofMode === "ALL"} onClick={() => setHofMode("ALL")}>
-                H&F · Ambos
-              </Pill>
-              <Pill tone={tone} active={hofMode === "HISTORY"} onClick={() => setHofMode("HISTORY")}>
-                History
-              </Pill>
-              <Pill tone={tone} active={hofMode === "FORECAST"} onClick={() => setHofMode("FORECAST")}>
-                Forecast
-              </Pill>
-            </div>
-          }
-        />
-      </Card>
+      <SectionTitle
+        title={`History & Forecast — ${hotelFilter ? hotelFilter : "Todos"} · ${year} vs ${baseYear}`}
+        desc="KPIs + comparativa + series por Año/Trimestre/Mes + rankings por % ocupación (y revenue)."
+        right={
+          <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
+            <Pill tone={tone === "gotel" ? "blue" : "red"} active={hofMode === "ALL"} onClick={() => setHofMode("ALL")}>
+              Ambos
+            </Pill>
+            <Pill tone={tone === "gotel" ? "blue" : "red"} active={hofMode === "HISTORY"} onClick={() => setHofMode("HISTORY")}>
+              History
+            </Pill>
+            <Pill tone={tone === "gotel" ? "blue" : "red"} active={hofMode === "FORECAST"} onClick={() => setHofMode("FORECAST")}>
+              Forecast
+            </Pill>
+          </div>
+        }
+      />
 
-      {/* Filtros locales (trimestre + mes) */}
+      {/* Filtros locales */}
       <Card style={{ padding: ".85rem" }}>
         <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", alignItems: "center" }}>
-          <div style={{ fontWeight: 950, opacity: 0.85, marginRight: ".25rem" }}>Filtros:</div>
+          <div style={{ fontWeight: 900, opacity: 0.85, marginRight: ".35rem" }}>Filtros:</div>
 
-          <Pill tone={tone} active={quarter === 0} onClick={() => setQuarter(0)} title="Todos los trimestres">
+          <Pill tone={tone === "gotel" ? "blue" : "red"} active={quarter === 0} onClick={() => setQuarter(0)}>
             Trimestre · Todos
           </Pill>
           {[1, 2, 3, 4].map((q) => (
-            <Pill key={q} tone={tone} active={quarter === q} onClick={() => setQuarter(q as any)}>
+            <Pill key={q} tone={tone === "gotel" ? "blue" : "red"} active={quarter === q} onClick={() => setQuarter(q as any)}>
               Q{q}
             </Pill>
           ))}
 
-          <div style={{ width: 12 }} />
+          <div style={{ width: 10 }} />
 
-          <Pill tone={tone} active={month === -1} onClick={() => setMonth(-1)} title="Todos los meses">
+          <Pill tone={tone === "gotel" ? "blue" : "red"} active={month === -1} onClick={() => setMonth(-1)}>
             Mes · Todos
           </Pill>
           {monthsInYear.map((m) => (
-            <Pill key={m} tone={tone} active={month === m} onClick={() => setMonth(m)}>
+            <Pill key={m} tone={tone === "gotel" ? "blue" : "red"} active={month === m} onClick={() => setMonth(m)}>
               {monthName(m)}
             </Pill>
           ))}
-
-          <div style={{ marginLeft: "auto", opacity: 0.85, fontWeight: 850 }}>
-            {hofMode === "ALL" ? "H&F: Ambos" : hofMode === "HISTORY" ? "H&F: History" : "H&F: Forecast"} ·{" "}
-            {quarter === 0 ? "Trimestre: Todos" : `Trimestre: Q${quarter}`} ·{" "}
-            {month === -1 ? "Mes: Todos" : `Mes: ${monthName(month, true)}`}
-          </div>
         </div>
       </Card>
 
-      {/* Carrusel grande (1 slide visible) */}
-      <BigCarousel tone={tone} slides={slides} intervalMs={5000} />
+      {/* CAROUSEL: 1 SOLO GRANDE + auto */}
+      <BigKpiCarousel tone={tone} items={carouselItems} intervalMs={4500} />
 
-      {/* Comparativa principal (solo 3 KPIs) */}
+      {/* Comparativa principales indicadores (Ocupación / Revenue / Hab. ocupadas) */}
       <Card>
-        <SectionHeader
+        <SectionTitle
           title="Comparativa principales indicadores"
           desc="Se calcula sobre el período filtrado del año seleccionado, comparado contra el mismo filtro aplicado al año base."
         />
 
         <div style={{ marginTop: ".85rem", display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: ".85rem" }}>
-          <div style={{ borderRadius: 16, padding: ".9rem", border: "1px solid rgba(255,255,255,.12)", background: "rgba(255,255,255,.04)" }}>
-            <div style={{ fontWeight: 900, opacity: 0.85 }}>Ocupación promedio</div>
-            <div style={{ fontSize: "1.45rem", fontWeight: 950, marginTop: ".25rem" }}>
-              {(kpis.curAgg.avgOcc * 100).toFixed(1)}%
-            </div>
-            <div style={{ opacity: 0.78, marginTop: ".25rem" }}>
-              Base {baseYear}: {(kpis.baseAgg.avgOcc * 100).toFixed(1)}% · Δ <BadgeDelta v={kpis.occDelta} />
-            </div>
-          </div>
-
-          <div style={{ borderRadius: 16, padding: ".9rem", border: "1px solid rgba(255,255,255,.12)", background: "rgba(255,255,255,.04)" }}>
-            <div style={{ fontWeight: 900, opacity: 0.85 }}>Revenue total</div>
-            <div style={{ fontSize: "1.45rem", fontWeight: 950, marginTop: ".25rem" }}>
-              {formatMoney(kpis.curAgg.totalRevenue)}
-            </div>
-            <div style={{ opacity: 0.78, marginTop: ".25rem" }}>
-              Base {baseYear}: {formatMoney(kpis.baseAgg.totalRevenue)} · Δ <BadgeDelta v={kpis.revDelta} />
-            </div>
-          </div>
-
-          <div style={{ borderRadius: 16, padding: ".9rem", border: "1px solid rgba(255,255,255,.12)", background: "rgba(255,255,255,.04)" }}>
-            <div style={{ fontWeight: 900, opacity: 0.85 }}>Habitaciones ocupadas</div>
-            <div style={{ fontSize: "1.45rem", fontWeight: 950, marginTop: ".25rem" }}>
-              {Math.round(kpis.curAgg.totalRoomsOcc).toLocaleString("es-AR")}
-            </div>
-            <div style={{ opacity: 0.78, marginTop: ".25rem" }}>
-              Base {baseYear}: {Math.round(kpis.baseAgg.totalRoomsOcc).toLocaleString("es-AR")} · Δ{" "}
-              <BadgeDelta v={kpis.roomsDelta} />
-            </div>
-          </div>
-        </div>
-      </Card>
-
-      {/* Serie por Año */}
-      <Card>
-        <SectionHeader
-          title="Serie por Año (contexto del dataset)"
-          desc="Promedio de ocupación por año (filtrado por hotel si corresponde)."
-        />
-        <div style={{ marginTop: ".85rem", display: "grid", gap: ".6rem" }}>
-          {aggByYear.map((a) => (
-            <div key={a.key} style={{ display: "grid", gridTemplateColumns: "90px 1fr 120px", gap: ".75rem", alignItems: "center" }}>
-              <div style={{ fontWeight: 950 }}>{a.key}</div>
-              <Bar pct={(a.avgOcc / maxYearOcc) * 100} tone={tone} />
-              <div style={{ textAlign: "right", fontWeight: 950 }}>{(a.avgOcc * 100).toFixed(1)}%</div>
+          {[
+            {
+              label: "Ocupación promedio",
+              value: formatPct01(kpis.cur.avgOcc),
+              base: formatPct01(kpis.base.avgOcc),
+              delta: kpis.occDelta,
+            },
+            {
+              label: "Revenue total",
+              value: formatMoneyUsd(kpis.cur.revenueTotal),
+              base: formatMoneyUsd(kpis.base.revenueTotal),
+              delta: kpis.revDelta,
+            },
+            {
+              label: "Habitaciones ocupadas",
+              value: formatInt(kpis.cur.occRoomsTotal),
+              base: formatInt(kpis.base.occRoomsTotal),
+              delta: kpis.occRoomsDelta,
+            },
+          ].map((b) => (
+            <div
+              key={b.label}
+              style={{
+                padding: "1rem",
+                borderRadius: 18,
+                border: "1px solid rgba(255,255,255,.12)",
+                background: "rgba(255,255,255,.04)",
+                position: "relative",
+                overflow: "hidden",
+              }}
+            >
+              <div style={{ position: "absolute", inset: 0, background: gradMain(tone), opacity: 0.08 }} />
+              <div style={{ position: "relative" }}>
+                <div style={{ fontWeight: 900, opacity: 0.85 }}>{b.label}</div>
+                <div style={{ fontSize: "1.55rem", fontWeight: 950, marginTop: ".25rem" }}>{b.value}</div>
+                <div style={{ opacity: 0.78, marginTop: ".35rem" }}>
+                  Base {baseYear}: {b.base} ·{" "}
+                  <span style={{ fontWeight: 950, color: deltaColor(b.delta) }}>
+                    Δ {(b.delta * 100).toFixed(1)}%
+                  </span>
+                </div>
+              </div>
             </div>
           ))}
         </div>
       </Card>
 
-      {/* Serie por Trimestre */}
+      {/* Serie por Año */}
       <Card>
-        <SectionHeader
-          title="History & Forecast por Trimestre"
-          desc="Ocupación promedio por trimestre (respetando H/F y filtros aplicados)."
-        />
+        <SectionTitle title="Serie por Año (contexto del dataset)" desc="Promedio de ocupación por año (filtrado por hotel si corresponde)." />
+        <div style={{ marginTop: ".85rem", display: "grid", gap: ".6rem" }}>
+          {aggByYear.map((a: any) => (
+            <BarRow
+              key={a.key}
+              label={a.key}
+              subLeft={`Revenue: ${formatMoneyUsd(a.revenueTotal)} · Hab. ocupadas: ${formatInt(a.occRoomsTotal)}`}
+              valueRight={formatPct01(a.avgOcc)}
+              pctWidth={safeDiv(a.avgOcc, maxOccYear) * 100}
+              tone={tone}
+            />
+          ))}
+        </div>
+      </Card>
+
+      {/* H&F por Trimestre */}
+      <Card>
+        <SectionTitle title="History & Forecast por Trimestre" desc="Ocupación promedio por trimestre (respetando H/F y filtros aplicados)." />
         <div style={{ marginTop: ".85rem", display: "grid", gap: ".6rem" }}>
           {aggByQuarter.length ? (
-            aggByQuarter.map((a) => (
-              <div key={a.key} style={{ display: "grid", gridTemplateColumns: "90px 1fr 120px", gap: ".75rem", alignItems: "center" }}>
-                <div style={{ fontWeight: 950 }}>{a.key}</div>
-                <Bar pct={(a.avgOcc / maxQOcc) * 100} tone={tone} />
-                <div style={{ textAlign: "right", fontWeight: 950 }}>{(a.avgOcc * 100).toFixed(1)}%</div>
-              </div>
-            ))
-          ) : (
-            <div style={{ opacity: 0.8 }}>Sin datos con el filtro actual.</div>
-          )}
-        </div>
-      </Card>
-
-      {/* Serie por Mes (orden cronológico) */}
-      <Card>
-        <SectionHeader
-          title="History & Forecast por Mes"
-          desc="Meses en orden cronológico (no ranking)."
-        />
-        <div style={{ marginTop: ".85rem", display: "grid", gap: ".6rem" }}>
-          {aggByMonth.length ? (
-            aggByMonth.map((a) => (
-              <div key={a.m} style={{ display: "grid", gridTemplateColumns: "140px 1fr 120px", gap: ".75rem", alignItems: "center" }}>
-                <div style={{ fontWeight: 950 }}>{monthName(a.m, true)}</div>
-                <Bar pct={(a.avgOcc / maxMOcc) * 100} tone={tone} />
-                <div style={{ textAlign: "right", fontWeight: 950 }}>{(a.avgOcc * 100).toFixed(1)}%</div>
-              </div>
-            ))
-          ) : (
-            <div style={{ opacity: 0.8 }}>Sin datos con el filtro actual.</div>
-          )}
-        </div>
-      </Card>
-
-      {/* Ranking de meses (vertical, cards, 1..12, medallas) */}
-      <Card>
-        <SectionHeader
-          title="Ranking de Meses (por % ocupación)"
-          desc="Ordena meses por ocupación promedio. Incluye revenue total como referencia."
-        />
-        <div style={{ marginTop: ".85rem", display: "grid", gap: ".65rem" }}>
-          {monthRanking.length ? (
-            monthRanking.map((x, i) => (
-              <RankRow
-                key={x.m}
-                idx={i}
-                label={x.label}
-                occ={x.occ}
-                revenue={x.revenue}
-                maxOcc={maxRankMOcc}
+            aggByQuarter.map((a: any) => (
+              <BarRow
+                key={a.key}
+                label={a.key}
+                subLeft={`Revenue: ${formatMoneyUsd(a.revenueTotal)} · Hab. ocupadas: ${formatInt(a.occRoomsTotal)}`}
+                valueRight={formatPct01(a.avgOcc)}
+                pctWidth={safeDiv(a.avgOcc, maxOccQuarter) * 100}
                 tone={tone}
               />
             ))
@@ -883,23 +838,85 @@ export default function YearComparator({ filePath, year, baseYear, hotelFilter }
         </div>
       </Card>
 
-      {/* Ranking por día de semana (vertical) */}
+      {/* H&F por Mes (más “vivo”, no todo igual) */}
       <Card>
-        <SectionHeader
-          title="Ranking por Día de la Semana (por % ocupación)"
-          desc="Para ver en qué día conviene mejorar (solo ocupación + revenue)."
-        />
+        <SectionTitle title="History & Forecast por Mes" desc="Meses en orden cronológico (respetando filtros actuales)." />
+        <div style={{ marginTop: ".85rem", display: "grid", gap: ".65rem" }}>
+          {aggByMonth.length ? (
+            aggByMonth.map((a: any, idx: number) => {
+              const isAlt = idx % 2 === 0;
+              return (
+                <div
+                  key={a.key}
+                  style={{
+                    borderRadius: 18,
+                    padding: ".75rem .85rem",
+                    border: "1px solid rgba(255,255,255,.12)",
+                    background: isAlt ? "rgba(255,255,255,.045)" : "rgba(255,255,255,.03)",
+                    position: "relative",
+                    overflow: "hidden",
+                  }}
+                >
+                  <div style={{ position: "absolute", inset: 0, background: gradMain(tone), opacity: 0.06 }} />
+                  <div style={{ position: "relative" }}>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: ".75rem" }}>
+                      <div style={{ fontWeight: 950 }}>{monthLong(a.monthIdx)}</div>
+                      <div style={{ marginLeft: "auto", fontWeight: 950 }}>{formatPct01(a.avgOcc)}</div>
+                    </div>
+
+                    <div style={{ marginTop: ".45rem", height: 10, borderRadius: 999, background: "rgba(255,255,255,.10)", overflow: "hidden" }}>
+                      <div style={{ width: `${safeDiv(a.avgOcc, maxOccMonthSeries) * 100}%`, height: "100%", background: gradBar(tone) }} />
+                    </div>
+
+                    <div style={{ marginTop: ".55rem", opacity: 0.82 }}>
+                      Revenue: <b>{formatMoneyUsd(a.revenueTotal)}</b> · Hab. ocupadas: <b>{formatInt(a.occRoomsTotal)}</b>
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          ) : (
+            <div style={{ opacity: 0.8 }}>Sin datos con el filtro actual.</div>
+          )}
+        </div>
+      </Card>
+
+      {/* Ranking de meses */}
+      <Card>
+        <SectionTitle title="Ranking de Meses (por % ocupación)" desc="Ranking por ocupación promedio (no por recaudación contable). Incluye revenue total como referencia." />
+        <div style={{ marginTop: ".85rem", display: "grid", gap: ".65rem" }}>
+          {monthRanking.length ? (
+            monthRanking.map((x, i) => (
+              <RankRow
+                key={x.label}
+                tone={tone}
+                rank={i + 1}
+                label={x.label}
+                occ={x.occ}
+                revenue={x.revenue}
+                maxOcc={maxOccMonthRank}
+              />
+            ))
+          ) : (
+            <div style={{ opacity: 0.8 }}>Sin datos con el filtro actual.</div>
+          )}
+        </div>
+      </Card>
+
+      {/* Ranking por día de semana */}
+      <Card>
+        <SectionTitle title="Ranking por Día de la Semana (por % ocupación)" desc="Para detectar qué día conviene empujar con estrategia comercial/operativa." />
         <div style={{ marginTop: ".85rem", display: "grid", gap: ".65rem" }}>
           {weekdayRanking.length ? (
             weekdayRanking.map((x, i) => (
               <RankRow
-                key={x.wd}
-                idx={i}
+                key={x.label}
+                tone={tone}
+                rank={i + 1}
                 label={x.label}
                 occ={x.occ}
                 revenue={x.revenue}
-                maxOcc={maxRankWOcc}
-                tone={tone}
+                maxOcc={maxOccWeekRank}
               />
             ))
           ) : (
@@ -909,14 +926,14 @@ export default function YearComparator({ filePath, year, baseYear, hotelFilter }
       </Card>
 
       {/* Diagnóstico */}
-      <Card style={{ padding: ".9rem" }}>
-        <div style={{ fontWeight: 950 }}>Diagnóstico</div>
-        <div style={{ opacity: 0.85, marginTop: ".35rem" }}>
+      <Card style={{ padding: ".85rem" }}>
+        <div style={{ fontWeight: 900 }}>Diagnóstico</div>
+        <div style={{ opacity: 0.78, marginTop: ".35rem", fontSize: ".92rem" }}>
           Filas CSV: <b>{rows.length}</b> · Filas normalizadas: <b>{normalized.length}</b> · Filas filtradas ({year}):{" "}
-          <b>{cur.length}</b> · Base ({baseYear}): <b>{base.length}</b>
+          <b>{filtered.length}</b>
         </div>
-        <div style={{ opacity: 0.7, marginTop: ".35rem", fontSize: ".92rem" }}>
-          Keys detectadas: Empresa=<b>{kEmpresa || "—"}</b> · Fecha=<b>{kFecha || "—"}</b> · HoF=<b>{kHoF || "—"}</b> ·
+        <div style={{ opacity: 0.65, marginTop: ".35rem", fontSize: ".9rem" }}>
+          Keys: Empresa=<b>{kEmpresa || "—"}</b> · Fecha=<b>{kFecha || "—"}</b> · HoF=<b>{kHoF || "—"}</b> ·
           Occ%=<b>{kOccPct || "—"}</b> · TotalOcc=<b>{kOccRooms || "—"}</b> · Revenue=<b>{kRev || "—"}</b>
         </div>
       </Card>
