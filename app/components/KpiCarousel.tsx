@@ -49,10 +49,10 @@ function dotForTone(tone: Tone) {
 }
 
 function deltaColor(v?: number) {
-  if (v === undefined || v === null) return "rgba(255,255,255,.80)";
-  if (v > 0) return "rgba(34,197,94,.95)"; // verde
-  if (v < 0) return "rgba(239,68,68,.95)"; // rojo
-  return "rgba(255,255,255,.80)";
+  if (v === undefined || v === null) return "rgba(255,255,255,.88)";
+  if (v > 0) return "#22c55e"; // verde fuerte
+  if (v < 0) return "#ef4444"; // rojo fuerte
+  return "rgba(255,255,255,.88)";
 }
 
 export default function KpiCarousel({
