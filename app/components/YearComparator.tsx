@@ -867,3 +867,4 @@ export default function YearComparator({ filePath, year, baseYear, hotelFilter }
     </section>
   );
 }
+
