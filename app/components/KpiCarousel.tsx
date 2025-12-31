@@ -5,40 +5,53 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 export type KpiItem = {
   label: string;
   value: string;
+  /** ejemplo: "+3,2%" o "-1,1%" */
+  deltaText?: string;
+  /** si lo tenés numérico, mejor: +0.032 o -0.011 (o +3.2 / -1.1, igual sirve) */
+  deltaValue?: number;
   sub?: string;
 };
 
 type Props = {
   items: KpiItem[];
+  /** red = JCR, blue = Gotel */
   tone?: "red" | "blue" | "neutral";
-  /** ms entre slides */
   intervalMs?: number;
-  /** si querés mostrar bullets */
   showDots?: boolean;
 };
 
 function gradForTone(tone: "red" | "blue" | "neutral", idx: number) {
-  const red = [
-    "linear-gradient(135deg, rgba(220,38,38,.95), rgba(251,113,133,.70))",
-    "linear-gradient(135deg, rgba(249,115,22,.95), rgba(244,63,94,.65))",
-    "linear-gradient(135deg, rgba(168,85,247,.95), rgba(244,63,94,.55))",
-    "linear-gradient(135deg, rgba(59,130,246,.95), rgba(244,63,94,.50))",
-  ];
-  const blue = [
-    "linear-gradient(135deg, rgba(59,130,246,.95), rgba(14,165,233,.70))",
-    "linear-gradient(135deg, rgba(14,165,233,.95), rgba(56,189,248,.65))",
-    "linear-gradient(135deg, rgba(16,185,129,.95), rgba(59,130,246,.55))",
-    "linear-gradient(135deg, rgba(168,85,247,.95), rgba(59,130,246,.50))",
-  ];
-  const neutral = [
-    "linear-gradient(135deg, rgba(255,255,255,.22), rgba(255,255,255,.06))",
-    "linear-gradient(135deg, rgba(255,255,255,.18), rgba(255,255,255,.06))",
-    "linear-gradient(135deg, rgba(255,255,255,.16), rgba(255,255,255,.06))",
-    "linear-gradient(135deg, rgba(255,255,255,.14), rgba(255,255,255,.06))",
+  // JCR: rojo -> violeta
+  const jcr = [
+    "linear-gradient(135deg, rgba(220,38,38,.95), rgba(168,85,247,.70))",
+    "linear-gradient(135deg, rgba(244,63,94,.95), rgba(124,58,237,.65))",
+    "linear-gradient(135deg, rgba(249,115,22,.95), rgba(168,85,247,.55))",
+    "linear-gradient(135deg, rgba(190,18,60,.95), rgba(147,51,234,.55))",
   ];
 
-  const bank = tone === "blue" ? blue : tone === "red" ? red : neutral;
+  // Gotel: celeste -> azul
+  const gotel = [
+    "linear-gradient(135deg, rgba(56,189,248,.95), rgba(37,99,235,.70))",
+    "linear-gradient(135deg, rgba(14,165,233,.95), rgba(29,78,216,.65))",
+    "linear-gradient(135deg, rgba(34,211,238,.95), rgba(59,130,246,.60))",
+    "linear-gradient(135deg, rgba(125,211,252,.95), rgba(37,99,235,.60))",
+  ];
+
+  const neutral = [
+    "linear-gradient(135deg, rgba(255,255,255,.20), rgba(255,255,255,.06))",
+    "linear-gradient(135deg, rgba(255,255,255,.18), rgba(255,255,255,.06))",
+    "linear-gradient(135deg, rgba(255,255,255,.16), rgba(255,255,255,.06))",
+  ];
+
+  const bank = tone === "red" ? jcr : tone === "blue" ? gotel : neutral;
   return bank[idx % bank.length];
+}
+
+function deltaColor(v?: number) {
+  if (v === undefined || v === null) return "rgba(255,255,255,.70)";
+  if (v > 0) return "rgba(34,197,94,.95)"; // verde
+  if (v < 0) return "rgba(239,68,68,.95)"; // rojo
+  return "rgba(255,255,255,.70)";
 }
 
 function Card({
@@ -67,7 +80,7 @@ function Card({
 export default function KpiCarousel({
   items,
   tone = "neutral",
-  intervalMs = 3800,
+  intervalMs = 3600,
   showDots = true,
 }: Props) {
   const trackRef = useRef<HTMLDivElement | null>(null);
@@ -76,24 +89,17 @@ export default function KpiCarousel({
   const slides = useMemo(() => items ?? [], [items]);
   const count = slides.length;
 
-  // auto-advance
   useEffect(() => {
     if (count <= 1) return;
-    const t = setInterval(() => {
-      setIdx((i) => (i + 1) % count);
-    }, intervalMs);
+    const t = setInterval(() => setIdx((i) => (i + 1) % count), intervalMs);
     return () => clearInterval(t);
   }, [count, intervalMs]);
 
-  // scroll to active
   useEffect(() => {
     const el = trackRef.current;
     if (!el) return;
-
     const child = el.children[idx] as HTMLElement | undefined;
     if (!child) return;
-
-    // scrollIntoView suave
     child.scrollIntoView({ behavior: "smooth", inline: "start", block: "nearest" });
   }, [idx]);
 
@@ -106,7 +112,7 @@ export default function KpiCarousel({
         style={{
           display: "grid",
           gridAutoFlow: "column",
-          gridAutoColumns: "minmax(260px, 1fr)",
+          gridAutoColumns: "minmax(280px, 1fr)",
           gap: ".85rem",
           overflowX: "auto",
           scrollSnapType: "x mandatory",
@@ -114,24 +120,47 @@ export default function KpiCarousel({
           WebkitOverflowScrolling: "touch",
         }}
       >
-        {slides.map((it, i) => (
-          <div
-            key={`${it.label}-${i}`}
-            style={{
-              scrollSnapAlign: "start",
-              minWidth: 0,
-            }}
-            onMouseEnter={() => setIdx(i)}
-          >
-            <Card bg={gradForTone(tone, i)}>
-              <div style={{ fontSize: ".92rem", opacity: 0.85, fontWeight: 850 }}>{it.label}</div>
-              <div style={{ fontSize: "1.65rem", fontWeight: 950, marginTop: ".25rem" }}>{it.value}</div>
-              {it.sub ? (
-                <div style={{ marginTop: ".35rem", opacity: 0.78, fontSize: ".92rem" }}>{it.sub}</div>
-              ) : null}
-            </Card>
-          </div>
-        ))}
+        {slides.map((it, i) => {
+          const dc = deltaColor(it.deltaValue);
+          return (
+            <div
+              key={`${it.label}-${i}`}
+              style={{ scrollSnapAlign: "start", minWidth: 0 }}
+              onMouseEnter={() => setIdx(i)}
+            >
+              <Card bg={gradForTone(tone, i)}>
+                <div style={{ fontSize: ".92rem", opacity: 0.88, fontWeight: 900 }}>
+                  {it.label}
+                </div>
+
+                <div style={{ display: "flex", gap: ".6rem", alignItems: "baseline", marginTop: ".25rem", flexWrap: "wrap" }}>
+                  <div style={{ fontSize: "1.75rem", fontWeight: 950 }}>
+                    {it.value}
+                  </div>
+
+                  {(it.deltaText || it.deltaValue !== undefined) ? (
+                    <div
+                      style={{
+                        fontWeight: 950,
+                        color: dc,
+                        fontSize: "1.05rem",
+                      }}
+                      title="Variación vs año base"
+                    >
+                      {it.deltaText ?? ""}
+                    </div>
+                  ) : null}
+                </div>
+
+                {it.sub ? (
+                  <div style={{ marginTop: ".35rem", opacity: 0.78, fontSize: ".92rem" }}>
+                    {it.sub}
+                  </div>
+                ) : null}
+              </Card>
+            </div>
+          );
+        })}
       </div>
 
       {showDots && count > 1 ? (
@@ -146,10 +175,7 @@ export default function KpiCarousel({
                 height: 10,
                 borderRadius: 999,
                 border: "1px solid rgba(255,255,255,.20)",
-                background:
-                  i === idx
-                    ? gradForTone(tone, i)
-                    : "rgba(255,255,255,.10)",
+                background: i === idx ? gradForTone(tone, i) : "rgba(255,255,255,.10)",
                 cursor: "pointer",
                 transition: "all .18s ease",
               }}
